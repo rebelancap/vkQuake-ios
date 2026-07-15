@@ -1,0 +1,153 @@
+name: vkQuake
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  bundleIdPrefix: com.rebelancap
+# xcodebuild archive needs real schemes (scripts/publish-ota.sh); xcodegen only
+# emits them when declared.
+schemes:
+  vkQuake:
+    build:
+      targets:
+        vkQuake: all
+    archive:
+      config: Release
+  vkQuake-visionOS:
+    build:
+      targets:
+        vkQuake-visionOS: all
+    archive:
+      config: Release
+targets:
+  vkQuake:
+    type: application
+    platform: iOS
+    sources:
+      - shell
+      - path: icon/generated
+        optional: true
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rebelancap.vkquake
+        DEVELOPMENT_TEAM: 57G8J46Z2T
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # NEVER strip: SDL locates the statically-linked MoltenVK via
+        # dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr") — archive-time stripping
+        # (DEPLOYMENT_POSTPROCESSING) removes the exported symbol and every OTA
+        # build dies at window creation ("Failed to load Vulkan Portability
+        # library"). Cable builds never strip, which hid this until the first
+        # OTA install. publish-ota.sh asserts the symbol survived.
+        STRIP_INSTALLED_PRODUCT: NO
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Info.plist
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        ENABLE_BITCODE: NO
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/../build/ios"
+          - "$(SRCROOT)/../build/ios-deps/sdl-prefix/lib"
+          - "$(SRCROOT)/../build/ios-deps/moltenvk/lib"
+          - "$(SRCROOT)/../build/ios-deps/codec-prefix/lib"
+        OTHER_LDFLAGS:
+          - "-ObjC"
+          - "-force_load"
+          - "$(SRCROOT)/../build/ios/libvkquake.a"
+          - "-lSDL3"
+          - "-lMoltenVK"
+          - "-lc++"
+          - "-lz"
+          - "-liconv"
+          - "-lvorbisfile"
+          - "-lvorbis"
+          - "-logg"
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: OpenGLES.framework
+      - sdk: QuartzCore.framework
+      - sdk: IOSurface.framework
+      - sdk: CoreGraphics.framework
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreMotion.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreAudio.framework
+      - sdk: GameController.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreBluetooth.framework
+      - sdk: Security.framework
+      - sdk: UniformTypeIdentifiers.framework
+
+  # ---- native visionOS 2D-window variant (D-018 pattern from quake3e) ----
+  # Second target in the SAME project; the iOS target above is untouched. Shares
+  # every shell source; VKQ_VISIONOS gates the visionOS deltas (no landscape gate,
+  # window aspect-lock, hidden touch controls). Links libvkquake-xros.a + the
+  # MoltenVK xros slice. Codecs omitted for the first-render spike.
+  vkQuake-visionOS:
+    type: application
+    platform: visionOS
+    sources:
+      - shell
+      - shell-visionos
+      - path: Assets-visionos.xcassets
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rebelancap.vkquake
+        PRODUCT_NAME: vkQuake
+        DEVELOPMENT_TEAM: 57G8J46Z2T
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "7"
+        # NEVER strip — same reason as the iOS target: SDL's static-MoltenVK
+        # dlsym lookup needs the exported vkGetInstanceProcAddr.
+        STRIP_INSTALLED_PRODUCT: NO
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Info-visionos.plist
+        XROS_DEPLOYMENT_TARGET: "2.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_BITCODE: NO
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/shell-visionos/VKQVision-Bridging-Header.h"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "VKQ_VISIONOS=1"
+        LIBRARY_SEARCH_PATHS:
+          - "$(SRCROOT)/../build/visionos"
+          - "$(SRCROOT)/../build/visionos-deps/sdl-prefix/lib"
+          - "$(SRCROOT)/../build/visionos-deps/codec-prefix/lib"
+          - "$(SRCROOT)/../vendor/moltenvk/MoltenVK.xcframework/xros-arm64"
+        OTHER_LDFLAGS:
+          - "-ObjC"
+          - "-force_load"
+          - "$(SRCROOT)/../build/visionos/libvkquake-xros.a"
+          - "-lSDL3"
+          - "-lMoltenVK"
+          - "-lc++"
+          - "-lz"
+          - "-liconv"
+          - "-lvorbisfile"
+          - "-lvorbis"
+          - "-logg"
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: IOSurface.framework
+      - sdk: CoreGraphics.framework
+      - sdk: UIKit.framework
+      - sdk: Foundation.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreMotion.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreAudio.framework
+      - sdk: GameController.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreMedia.framework
+      - sdk: Security.framework
+      - sdk: UniformTypeIdentifiers.framework
+      # stereoscopic 3D (shell-visionos): SwiftUI ImmersiveSpace + per-eye render
+      - sdk: CompositorServices.framework
+      - sdk: ARKit.framework
+      - sdk: SwiftUI.framework

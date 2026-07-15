@@ -1,0 +1,26 @@
+--- a/Quake/gl_vidsdl.c	2026-07-08 23:48:27
++++ b/Quake/gl_vidsdl.c	2026-07-09 10:24:15
+@@ -520,6 +520,9 @@
+ 	if (!draw_context)
+ 	{
+ 		flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_VULKAN;
++#ifdef VKQ_IOS
++		flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY; // native Retina drawable (else renders at 1/3 res)
++#endif
+ 
+ 		if (vid_borderless.value)
+ 			flags |= SDL_WINDOW_BORDERLESS;
+@@ -2841,7 +2844,13 @@
+ 	swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+ 	swapchain_create_info.pNext = NULL;
+ 	swapchain_create_info.surface = vulkan_surface;
++#ifdef VKQ_IOS
++	// iOS: triple-buffer so FIFO present (the only mode MoltenVK exposes on iOS) can
++	// sustain 120 Hz on ProMotion instead of being capped at 60 by double buffering.
++	swapchain_create_info.minImageCount = q_max (3, vulkan_surface_capabilities.minImageCount);
++#else
+ 	swapchain_create_info.minImageCount = q_max ((vid_vsync.value >= 2) ? 3 : 2, vulkan_surface_capabilities.minImageCount);
++#endif
+ 	swapchain_create_info.imageFormat = swap_chain_format;
+ 	swapchain_create_info.imageColorSpace = swap_chain_color_space;
+ 	swapchain_create_info.imageExtent.width = vid.width;

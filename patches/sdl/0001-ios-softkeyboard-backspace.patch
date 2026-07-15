@@ -1,0 +1,13 @@
+diff --git a/src/video/uikit/SDL_uikitviewcontroller.m b/src/video/uikit/SDL_uikitviewcontroller.m
+index e9b48c2..bbb49f8 100644
+--- a/src/video/uikit/SDL_uikitviewcontroller.m
++++ b/src/video/uikit/SDL_uikitviewcontroller.m
+@@ -581,7 +581,7 @@ - (void)textFieldTextDidChange:(NSNotification *)notification
+                 break;
+             }
+         }
+-        if (matchLength < committedText.length && !SDL_HasKeyboard()) {
++        if (matchLength < committedText.length) {
+             size_t deleteLength = SDL_utf8strlen([[committedText substringFromIndex:matchLength] UTF8String]);
+             while (deleteLength > 0) {
+                 // Send distinct down and up events for each backspace action

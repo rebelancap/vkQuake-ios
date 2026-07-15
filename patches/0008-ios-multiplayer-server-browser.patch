@@ -1,0 +1,131 @@
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -86,8 +86,15 @@
+ qboolean	   m_return_onerror;
+ char		   m_return_reason[32];
+ 
++#ifdef VKQ_IOS
++// iOS reorders the multiplayer menu (Public/Local browsers first), so the classic
++// join/host rows move to cursor 2/3 — keep these macros pointing at them.
++#define StartingGame (m_multiplayer_cursor == 3)
++#define JoiningGame	 (m_multiplayer_cursor == 2)
++#else
+ #define StartingGame (m_multiplayer_cursor == 1)
+ #define JoiningGame	 (m_multiplayer_cursor == 0)
++#endif
+ #define IPXConfig	 (m_net_cursor == 0)
+ #define TCPIPConfig	 (m_net_cursor == 1)
+ 
+@@ -1025,6 +1032,14 @@
+ 
+ int m_multiplayer_cursor;
+ #define MULTIPLAYER_ITEMS 3
++#ifdef VKQ_IOS
++// iOS: two extra items — "Join a Public Game" / "Join a Local Game" — jump STRAIGHT
++// to the native server browsers (dpmaster getservers in net_dgrm.c), skipping the
++// TCP/IP + LanConfig screens. Ordered first (primary action on a phone).
++#define MULTIPLAYER_COUNT (MULTIPLAYER_ITEMS + 2)
++#else
++#define MULTIPLAYER_COUNT MULTIPLAYER_ITEMS
++#endif
+ 
+ static void M_Menu_MultiPlayer_f (void)
+ {
+@@ -1036,18 +1051,33 @@
+ 
+ static void M_MultiPlayer_Draw (cb_context_t *cbx)
+ {
+-	int		f;
+ 	qpic_t *p;
+ 
+ 	M_DrawTransPic (cbx, 16, 4, Draw_CachePic ("gfx/qplaque.lmp"));
+ 	p = Draw_CachePic ("gfx/p_multi.lmp");
+ 	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
+-	M_DrawTransPic (cbx, 72, 32, Draw_CachePic ("gfx/mp_menu.lmp"));
+ 
+-	f = (int)(realtime * 10) % 6;
+-
+-	M_Mouse_UpdateListCursor (&m_multiplayer_cursor, 70, 320, 32, 20, MULTIPLAYER_ITEMS, 0);
+-	M_DrawTransPic (cbx, 54, 32 + m_multiplayer_cursor * 20, Draw_CachePic (va ("gfx/menudot%i.lmp", f + 1)));
++#ifdef VKQ_IOS
++	// iOS: all five items in the small menu font at the Options-menu rhythm (8px
++	// pitch, flashing character cursor), Public/Local first.
++	{
++		static const char *const ios_mp[MULTIPLAYER_COUNT] = {
++			"Join a Public Game", "Join a Local Game", "Join a Game", "New Game", "Setup"};
++		const int top = 40;
++		int		  n;
++		for (n = 0; n < MULTIPLAYER_COUNT; n++)
++			M_Print (cbx, MENU_LABEL_X, top + n * CHARACTER_SIZE, ios_mp[n]);
++		M_Mouse_UpdateListCursor (&m_multiplayer_cursor, MENU_LABEL_X, 320, top, CHARACTER_SIZE, MULTIPLAYER_COUNT, 0);
++		Draw_Character (cbx, MENU_CURSOR_X, top + m_multiplayer_cursor * CHARACTER_SIZE, 12 + ((int)(realtime * 4) & 1));
++	}
++#else
++	M_DrawTransPic (cbx, 72, 32, Draw_CachePic ("gfx/mp_menu.lmp"));
++	{
++		int f = (int)(realtime * 10) % 6;
++		M_Mouse_UpdateListCursor (&m_multiplayer_cursor, 70, 320, 32, 20, MULTIPLAYER_COUNT, 0);
++		M_DrawTransPic (cbx, 54, 32 + m_multiplayer_cursor * 20, Draw_CachePic (va ("gfx/menudot%i.lmp", f + 1)));
++	}
++#endif
+ 
+ 	if (ipxAvailable || ipv4Available || ipv6Available)
+ 		return;
+@@ -1066,14 +1096,14 @@
+ 
+ 	case K_DOWNARROW:
+ 		S_LocalSound ("misc/menu1.wav");
+-		if (++m_multiplayer_cursor >= MULTIPLAYER_ITEMS)
++		if (++m_multiplayer_cursor >= MULTIPLAYER_COUNT)
+ 			m_multiplayer_cursor = 0;
+ 		break;
+ 
+ 	case K_UPARROW:
+ 		S_LocalSound ("misc/menu1.wav");
+ 		if (--m_multiplayer_cursor < 0)
+-			m_multiplayer_cursor = MULTIPLAYER_ITEMS - 1;
++			m_multiplayer_cursor = MULTIPLAYER_COUNT - 1;
+ 		break;
+ 
+ 	case K_MOUSE1:
+@@ -1081,8 +1111,32 @@
+ 	case K_KP_ENTER:
+ 	case K_ABUTTON:
+ 		m_entersound = true;
++#ifdef VKQ_IOS
+ 		switch (m_multiplayer_cursor)
+ 		{
++		case 0: // Join a Public Game -> native internet server browser (dpmaster)
++			if (ipxAvailable || ipv4Available || ipv6Available)
++				M_Menu_Search_f (SLIST_INTERNET);
++			break;
++
++		case 1: // Join a Local Game -> native LAN server browser
++			if (ipxAvailable || ipv4Available || ipv6Available)
++				M_Menu_Search_f (SLIST_LAN);
++			break;
++
++		case 2: // Join a Game (classic direct/LanConfig)
++		case 3: // New Game (host)
++			if (ipxAvailable || ipv4Available || ipv6Available)
++				M_Menu_Net_f ();
++			break;
++
++		case 4:
++			M_Menu_Setup_f ();
++			break;
++		}
++#else
++		switch (m_multiplayer_cursor)
++		{
+ 		case 0:
+ 			if (ipxAvailable || ipv4Available || ipv6Available)
+ 				M_Menu_Net_f ();
+@@ -1097,6 +1151,7 @@
+ 			M_Menu_Setup_f ();
+ 			break;
+ 		}
++#endif
+ 	}
+ }
+ 

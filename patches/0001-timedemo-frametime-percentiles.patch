@@ -1,0 +1,63 @@
+--- a/Quake/cl_demo.c	2026-07-08 23:48:27
++++ b/Quake/cl_demo.c	2026-07-09 00:07:55
+@@ -89,6 +89,19 @@
+ 	fflush (cls.demofile);
+ }
+ 
++// vkquake-ios overlay 0001: timedemo per-frame wall-time percentiles.
++// RAM-buffered stamps recorded once per timedemo frame in CL_GetDemoMessage,
++// reported at CL_FinishTimeDemo. Never active outside timedemo; A/B cost ~0.
++#define TD_FT_MAX 200000
++static double td_ft[TD_FT_MAX];
++static int td_ft_count;
++static double td_ft_last;
++static int td_ft_cmp (const void *a, const void *b)
++{
++	double da = *(const double *)a, db = *(const double *)b;
++	return (da < db) ? -1 : (da > db) ? 1 : 0;
++}
++
+ static int CL_GetDemoMessage (void)
+ {
+ 	int	  r, i;
+@@ -107,6 +120,12 @@
+ 			if (host_framecount == cls.td_lastframe)
+ 				return 0; // already read this frame's message
+ 			cls.td_lastframe = host_framecount;
++			{ // overlay 0001: record this frame's wall time (1st frame skipped naturally)
++				double now = Sys_DoubleTime ();
++				if (td_ft_last != 0.0 && td_ft_count < TD_FT_MAX)
++					td_ft[td_ft_count++] = now - td_ft_last;
++				td_ft_last = now;
++			}
+ 			// if this is the second frame, grab the real td_starttime
+ 			// so the bogus time on the first frame doesn't count
+ 			if (host_framecount == cls.td_startframe + 1)
+@@ -755,6 +774,19 @@
+ 	if (!time)
+ 		time = 1;
+ 	Con_Printf ("%i frames %5.1f seconds %5.1f fps\n", frames, time, frames / time);
++
++	if (td_ft_count > 0) // overlay 0001: frame-time percentiles (ms)
++	{
++		int n = td_ft_count, i;
++		double sum = 0.0;
++		qsort (td_ft, n, sizeof (double), td_ft_cmp);
++		for (i = 0; i < n; i++)
++			sum += td_ft[i];
++#define TD_PCT(p) (td_ft[(int)((p) * (n - 1) + 0.5)] * 1000.0)
++		Con_Printf ("TIMEDEMO_FT: n=%d p50=%.3f p95=%.3f p99=%.3f min=%.3f max=%.3f avg=%.3f (ms)\n", n, TD_PCT (0.50), TD_PCT (0.95),
++			TD_PCT (0.99), td_ft[0] * 1000.0, td_ft[n - 1] * 1000.0, (sum / n) * 1000.0);
++#undef TD_PCT
++	}
+ }
+ 
+ /*
+@@ -785,4 +817,7 @@
+ 	cls.timedemo = true;
+ 	cls.td_startframe = host_framecount;
+ 	cls.td_lastframe = -1; // get a new message this frame
++
++	td_ft_count = 0; // overlay 0001: reset frame-time buffer
++	td_ft_last = 0.0;
+ }

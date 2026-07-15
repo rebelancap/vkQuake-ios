@@ -1,0 +1,575 @@
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -534,6 +534,10 @@
+ SCR_Init
+ ==================
+ */
++#ifdef VKQ_IOS
++void SCR_WeaponWheel_Init (void); // defined below; registered from SCR_Init
++#endif
++
+ void SCR_Init (void)
+ {
+ 	// johnfitz -- new cvars
+@@ -590,6 +594,9 @@
+ 		CFG_CloseConfig ();
+ 	}
+ 
++#ifdef VKQ_IOS
++	SCR_WeaponWheel_Init (); // rerelease-style weapon wheel commands
++#endif
+ 	Cmd_AddCommand ("screenshot", SCR_ScreenShot_f);
+ 	Cmd_AddCommand ("sizeup", SCR_SizeUp_f);
+ 	Cmd_AddCommand ("sizedown", SCR_SizeDown_f);
+@@ -1042,16 +1049,37 @@
+ 	time2 = 0.0f;						 // johnfitz -- timeout
+ 
+ 	Key_BeginInputGrab ();
++#ifdef VKQ_IOS
++	// This loop blocks the display-link callback + UIKit run loop; on iOS that
++	// deadlocks touch input. Show touch Yes/No buttons and pump the run loop.
++	{
++		extern void VKQ_iOS_ModalBegin (const char *t);
++		VKQ_iOS_ModalBegin (text);
++	}
++#endif
+ 	do
+ 	{
+ 		Sys_SendKeyEvents ();
+ 		Key_GetGrabbedInput (&lastkey, &lastchar);
++#ifdef VKQ_IOS
++		{
++			extern void VKQ_iOS_ModalPump (void);
++			VKQ_iOS_ModalPump (); // spin the run loop so the Yes/No button taps are delivered
++		}
++#else
+ 		Sys_Sleep (16);
++#endif
+ 		if (timeout)
+ 			time2 = Sys_DoubleTime (); // johnfitz -- zero timeout means wait forever.
+ 	} while (lastchar != 'y' && lastchar != 'Y' && lastchar != 'n' && lastchar != 'N' && lastkey != K_ESCAPE && lastkey != K_ABUTTON && lastkey != K_BBUTTON &&
+ 			 lastkey != K_MOUSE2 && time2 <= time1);
+ 	Key_EndInputGrab ();
++#ifdef VKQ_IOS
++	{
++		extern void VKQ_iOS_ModalEnd (void);
++		VKQ_iOS_ModalEnd ();
++	}
++#endif
+ 
+ 	//	SCR_UpdateScreen (); //johnfitz -- commented out
+ 
+@@ -1095,9 +1123,488 @@
+ 		Draw_TileClear (
+ 			cbx, r_refdef.vrect.x, r_refdef.vrect.y + r_refdef.vrect.height, r_refdef.vrect.width,
+ 			glheight - r_refdef.vrect.y - r_refdef.vrect.height - sb_lines);
++	}
++}
++
++#ifdef VKQ_IOS
++//==============================================================================
++// vkquake-ios: rerelease-style weapon wheel.
++//
++// The 2021 rerelease ships wwheel.txt (an 8-slot layout: impulse, ownership bit
++// `weaponnum`, ammo icon) plus gfx/weapons/ww_*.lmp wheel icons (normal + _sel).
++// We parse and draw those exact assets, so the wheel matches the KEX/Steam look
++// instead of a from-scratch UI. Ownership is cl.items; ammo is cl.stats.
++// Selection is driven by an aim vector (SCR_WeaponWheel_SetAim) fed from the
++// controller look-stick (in_sdl.c) or a touch drag (shell). +weaponwheel opens
++// (hold), -weaponwheel closes and switches to the highlighted weapon.
++//==============================================================================
++#define WW_MAX_SLOTS 16 // id1 = 8, hipnotic = 11, rogue = 13 weapons
++
++typedef struct
++{
++	int		impulse;
++	int		weaponnum; // cl.items bit -> owned?
++	int		ammostat;  // STAT_* index, or -1
++	qpic_t *icon;
++	qpic_t *icon_sel;
++} ww_slot_t;
++
++static ww_slot_t ww_slots[WW_MAX_SLOTS];
++static int		 ww_numslots;
++static qboolean	 ww_loaded;
++static qboolean	 ww_active;
++static float	 ww_aim_x, ww_aim_y; // aim vector, screen-space (up == -y)
++static int		 ww_selected = -1;
++static qpic_t	*ww_digit[10];			// anum_0..9 HUD digits, for the centered ammo count
++static double	 ww_look_suppress_until;			 // brief no-look window after the wheel closes
++static float	 ww_center_nx = -1.0f, ww_center_ny = -1.0f; // touch: normalized wheel centre; <0 = default right-side
++
++static int SCR_WW_AmmoStat (const char *ammoicon)
++{
++	if (!strcmp (ammoicon, "sb_shells"))
++		return STAT_SHELLS;
++	if (!strcmp (ammoicon, "sb_nails"))
++		return STAT_NAILS;
++	if (!strcmp (ammoicon, "sb_rocket"))
++		return STAT_ROCKETS;
++	if (!strcmp (ammoicon, "sb_cells"))
++		return STAT_CELLS;
++	return -1;
++}
++
++static qpic_t *SCR_WW_RingPic (void);  // defined below; built at load time (not mid-render)
++static qpic_t *SCR_WW_ArrowPic (void); // selection pointer texture
++
++static void SCR_WeaponWheel_Load (void)
++{
++	ww_loaded = true;
++	ww_numslots = 0;
++	byte *file = COM_LoadFile ("wwheel.txt", NULL);
++	if (!file)
++	{
++		Con_Printf ("weapon wheel: wwheel.txt not found (rerelease data only)\n");
++		return;
++	}
++	const char *data = (const char *)file;
++	while ((data = COM_Parse (data)) != NULL)
++	{
++		if (strcmp (com_token, "slot"))
++			continue;
++		if (!(data = COM_Parse (data))) // slot index (file order defines layout)
++			break;
++		if (!(data = COM_Parse (data)) || strcmp (com_token, "{"))
++			continue;
++		if (ww_numslots >= WW_MAX_SLOTS)
++			break;
++		ww_slot_t *s = &ww_slots[ww_numslots];
++		memset (s, 0, sizeof (*s));
++		s->ammostat = -1;
++		while ((data = COM_Parse (data)) != NULL && strcmp (com_token, "}"))
++		{
++			char key[64];
++			q_strlcpy (key, com_token, sizeof (key));
++			if (!(data = COM_Parse (data)))
++				break;
++			if (!strcmp (key, "impulse"))
++				s->impulse = atoi (com_token);
++			else if (!strcmp (key, "weaponnum"))
++				s->weaponnum = atoi (com_token);
++			else if (!strcmp (key, "icon"))
++				s->icon = Draw_TryCachePic (com_token, TEXPREF_ALPHA | TEXPREF_PAD | TEXPREF_NOPICMIP);
++			else if (!strcmp (key, "icon_sel"))
++				s->icon_sel = Draw_TryCachePic (com_token, TEXPREF_ALPHA | TEXPREF_PAD | TEXPREF_NOPICMIP);
++			else if (!strcmp (key, "ammoicon"))
++				s->ammostat = SCR_WW_AmmoStat (com_token);
++		}
++		if (s->icon)
++			ww_numslots++;
++	}
++	Mem_Free (file);
++	// Reorder into the rerelease's on-screen layout. wwheel.txt lists the slots going
++	// one rotational direction; the rerelease keeps slot 0 at 12 o'clock and runs the
++	// rest the OTHER way, so reversing slots 1..N-1 reproduces it for ANY weapon count
++	// — id1 (8), hipnotic (11, +laser/mjolnir/proximity), rogue (13, +lava/plasma/...).
++	// For id1 this yields shotgun, axe, lightning, rocket, grenade, super-nail, nail,
++	// super-shotgun clockwise from the top (the layout verified against Steam).
++	for (int a = 1, b = ww_numslots - 1; a < b; a++, b--)
++	{
++		ww_slot_t t = ww_slots[a];
++		ww_slots[a] = ww_slots[b];
++		ww_slots[b] = t;
++	}
++	// Build/warm all textures NOW (parse time is outside the render pass; creating
++	// a Vulkan texture during SCR_DrawGUI does not bind).
++	SCR_WW_RingPic ();
++	SCR_WW_ArrowPic ();
++	Draw_PicFromWad ("sb_shells");
++	Draw_PicFromWad ("sb_nails");
++	Draw_PicFromWad ("sb_rocket");
++	Draw_PicFromWad ("sb_cells");
++	for (int d = 0; d < 10; d++)
++		ww_digit[d] = Draw_PicFromWad (va ("anum_%i", d));
++	Con_DPrintf ("weapon wheel: %d slots\n", ww_numslots);
++}
++
++qboolean SCR_WeaponWheel_Active (void)
++{
++	return ww_active;
++}
++
++// aim vector from input (up == negative y); magnitude < dead-zone keeps selection
++void SCR_WeaponWheel_SetAim (float x, float y)
++{
++	ww_aim_x = x;
++	ww_aim_y = y;
++}
++
++// touch: center the wheel on the finger (normalized 0..1 screen coords); <0 restores the default right-side placement
++void SCR_WeaponWheel_SetCenter (float nx, float ny)
++{
++	ww_center_nx = nx;
++	ww_center_ny = ny;
++}
++
++static void SCR_WeaponWheel_Open (void)
++{
++	if (cls.state != ca_connected || cl.intermission)
++		return;
++	if (!ww_loaded)
++		SCR_WeaponWheel_Load ();
++	if (ww_numslots == 0)
++		return;
++	ww_active = true;
++	ww_aim_x = ww_aim_y = 0.0f;
++	ww_selected = -1;
++	ww_center_nx = ww_center_ny = -1.0f; // default to right-side; touch overrides via SetCenter
++}
++
++static void SCR_WeaponWheel_Close (void)
++{
++	extern double realtime;
++	if (ww_active && ww_selected >= 0 && ww_selected < ww_numslots && (cl.items & ww_slots[ww_selected].weaponnum))
++		Cbuf_AddText (va ("impulse %d\n", ww_slots[ww_selected].impulse));
++	ww_active = false;
++	ww_selected = -1;
++	ww_look_suppress_until = realtime + 0.25; // a still-deflected stick shouldn't snap the view on release
++}
++
++qboolean SCR_WeaponWheel_LookSuppressed (void)
++{
++	extern double realtime;
++	return ww_active || realtime < ww_look_suppress_until;
++}
++
++static void SCR_WeaponWheel_Toggle (void) // test/console helper
++{
++	if (ww_active)
++	{
++		ww_active = false;
++		ww_selected = -1;
++	}
++	else
++	{
++		SCR_WeaponWheel_Open ();
++		ww_selected = 5; // test: preselect a slot so the highlight + center ammo show
++	}
++}
++
++// Touch entry points: call Open/Close directly (not via Cbuf) so we can set the
++// thumb-centre in the same step (Open resets it). Safe: touch handlers and the
++// display-link frame are both on the main thread.
++void SCR_WeaponWheel_TouchOpen (float nx, float ny)
++{
++	SCR_WeaponWheel_Open ();
++	SCR_WeaponWheel_SetCenter (nx, ny);
++}
++void SCR_WeaponWheel_TouchClose (void)
++{
++	SCR_WeaponWheel_Close ();
++}
++
++void SCR_WeaponWheel_Init (void)
++{
++	Cmd_AddCommand ("+weaponwheel", SCR_WeaponWheel_Open);
++	Cmd_AddCommand ("-weaponwheel", SCR_WeaponWheel_Close);
++	Cmd_AddCommand ("weaponwheel", SCR_WeaponWheel_Toggle);
++}
++
++// glpic_t is private to gl_draw.c; replicate its layout so we can wrap a
++// generated texture in a qpic_t and Draw_Pic it (the rerelease ring art is baked
++// into the KEX engine, not shipped in the data, so we synthesize it).
++typedef struct
++{
++	gltexture_t *gltexture;
++	float		 sl, tl, sh, th; // MUST match gl_draw.c glpic_t field order exactly
++} ww_glpic_t;
++
++static qpic_t *ww_ring_pic;
++static qpic_t *ww_arrow_pic;
++
++static qpic_t *SCR_WW_RingPic (void)
++{
++	if (ww_ring_pic)
++		return ww_ring_pic;
++	const int S = 160;
++	byte	 *rgba = (byte *)malloc (S * S * 4); // kept alive: TexMgr may reload from this address
++	float	  c = (S - 1) * 0.5f, router = S * 0.49f, rinner = S * 0.25f; // band mid = 0.37*S (matches weapon radius)
++	for (int y = 0; y < S; y++)
++		for (int x = 0; x < S; x++)
++		{
++			float dx = x - c, dy = y - c, d = (float)sqrt (dx * dx + dy * dy);
++			byte *px = rgba + (y * S + x) * 4;
++			float a = 0.0f;
++			if (d <= router && d >= rinner)
++			{
++				a = 1.0f;
++				if (d > router - 3.0f)
++					a = (router - d) / 3.0f;
++				else if (d < rinner + 3.0f)
++					a = (d - rinner) / 3.0f;
++			}
++			a = CLAMP (0.0f, a, 1.0f);
++			float t = (router > rinner) ? (d - rinner) / (router - rinner) : 0.5f; // 0..1 across band
++			float band = 1.0f - (float)fabs (t - 0.5f) * 2.0f;					   // brighter mid, darker edges
++			unsigned h = (unsigned)(x * 374761393u + y * 668265263u);			   // per-pixel hash
++			h = (h ^ (h >> 13)) * 1274126177u;
++			int n = (int)((h >> 24) & 63);	  // 0..63 mottle
++			int base = (int)(30 + 18 * band); // DARK desaturated metal (30..48)
++			px[0] = (byte)CLAMP (0, base + (n * 44) / 63, 255);		// reddish rust flecks
++			px[1] = (byte)CLAMP (0, base + (n * 14) / 63 - 3, 255);	// muted green
++			px[2] = (byte)CLAMP (0, base + (n * 4) / 63 - 7, 255);	// low blue
++			px[3] = (byte)(a * 224);
++		}
++	gltexture_t *tex =
++		TexMgr_LoadImage (NULL, "ww_ring", S, S, SRC_RGBA, rgba, "", (src_offset_t)(uintptr_t)rgba, TEXPREF_ALPHA | TEXPREF_LINEAR | TEXPREF_NOPICMIP);
++	ww_ring_pic = (qpic_t *)Mem_Alloc (sizeof (int) * 2 + sizeof (ww_glpic_t));
++	ww_ring_pic->width = S;
++	ww_ring_pic->height = S;
++	ww_glpic_t gl = {tex, 0.0f, 0.0f, 1.0f, 1.0f}; // sl,tl,sh,th = full texture
++	memcpy (ww_ring_pic->data, &gl, sizeof (gl));
++	return ww_ring_pic;
++}
++
++static qpic_t *SCR_WW_AmmoPic (int stat)
++{
++	switch (stat)
++	{
++	case STAT_SHELLS:
++		return Draw_PicFromWad ("sb_shells");
++	case STAT_NAILS:
++		return Draw_PicFromWad ("sb_nails");
++	case STAT_ROCKETS:
++		return Draw_PicFromWad ("sb_rocket");
++	case STAT_CELLS:
++		return Draw_PicFromWad ("sb_cells");
++	}
++	return NULL;
++}
++
++// white triangle pointing "up" (tip at top), for the selection pointer
++static qpic_t *SCR_WW_ArrowPic (void)
++{
++	if (ww_arrow_pic)
++		return ww_arrow_pic;
++	const int S = 32;
++	byte	 *rgba = (byte *)malloc (S * S * 4);
++	for (int y = 0; y < S; y++)
++		for (int x = 0; x < S; x++)
++		{
++			byte *px = rgba + (y * S + x) * 4;
++			float t = (float)y / (S - 1);				  // 0 top (tip) .. 1 bottom (base)
++			float halfw = t * (S * 0.42f);				  // widens toward the base
++			float dxc = (float)fabs (x - (S - 1) * 0.5f); // distance from vertical centre
++			px[0] = px[1] = px[2] = 255;				  // white
++			px[3] = (dxc <= halfw && y >= 2) ? 255 : 0;
++		}
++	gltexture_t *tex =
++		TexMgr_LoadImage (NULL, "ww_arrow", S, S, SRC_RGBA, rgba, "", (src_offset_t)(uintptr_t)rgba, TEXPREF_ALPHA | TEXPREF_LINEAR | TEXPREF_NOPICMIP);
++	ww_arrow_pic = (qpic_t *)Mem_Alloc (sizeof (int) * 2 + sizeof (ww_glpic_t));
++	ww_arrow_pic->width = S;
++	ww_arrow_pic->height = S;
++	ww_glpic_t gl = {tex, 0.0f, 0.0f, 1.0f, 1.0f};
++	memcpy (ww_arrow_pic->data, &gl, sizeof (gl));
++	return ww_arrow_pic;
++}
++
++// Switching games (mods menu / `game` command) flushes and reloads ALL textures
++// (common.c: TexMgr_NewGame + Draw_NewGame), which frees the wheel's cached pics —
++// but the wheel loaded lazily ONCE and kept those now-dangling pointers, so it drew
++// whatever art reused those texture slots (menu graphics, jumbled tiles). Invalidate
++// its cache here so the next open reloads it (fresh wwheel.txt + fresh textures) for
++// the new game. Called from the game-change path.
++void SCR_WeaponWheel_NewGame (void)
++{
++	ww_loaded = false;	   // re-parse wwheel.txt + re-cache slot/digit/ammo pics on next open
++	ww_ring_pic = NULL;	   // procedural: force SCR_WW_RingPic to recreate its texture
++	ww_arrow_pic = NULL;   // procedural: force SCR_WW_ArrowPic to recreate its texture
++}
++
++// draw a pic centered at (ccx,ccy), size w x h, rotated by `angle` radians (local
++// -y = "up" maps to the angle direction). Replicates Draw_SubPic's submission.
++static void SCR_WW_DrawRotPic (cb_context_t *cbx, float ccx, float ccy, float w, float h, qpic_t *pic, float angle)
++{
++	ww_glpic_t gl;
++	memcpy (&gl, pic->data, sizeof (gl));
++	if (!gl.gltexture)
++		return;
++	float		ca = (float)cos (angle), sa = (float)sin (angle);
++	float		hw = w * 0.5f, hh = h * 0.5f;
++	const float lx[4] = {-hw, hw, hw, -hw};
++	const float ly[4] = {-hh, -hh, hh, hh};
++	const float tx[4] = {gl.sl, gl.sh, gl.sh, gl.sl};
++	const float ty[4] = {gl.tl, gl.tl, gl.th, gl.th};
++
++	basicvertex_t cv[4];
++	for (int i = 0; i < 4; i++)
++	{
++		cv[i].position[0] = ccx + lx[i] * ca - ly[i] * sa;
++		cv[i].position[1] = ccy + lx[i] * sa + ly[i] * ca;
++		cv[i].position[2] = 0.0f;
++		cv[i].texcoord[0] = tx[i];
++		cv[i].texcoord[1] = ty[i];
++		cv[i].color[0] = cv[i].color[1] = cv[i].color[2] = cv[i].color[3] = 255;
++	}
++	VkBuffer	   buffer;
++	VkDeviceSize   buffer_offset;
++	basicvertex_t *vertices = (basicvertex_t *)R_VertexAllocate (6 * sizeof (basicvertex_t), &buffer, &buffer_offset);
++	vertices[0] = cv[0];
++	vertices[1] = cv[1];
++	vertices[2] = cv[2];
++	vertices[3] = cv[2];
++	vertices[4] = cv[3];
++	vertices[5] = cv[0];
++	vkCmdBindVertexBuffers (cbx->cb, 0, 1, &buffer, &buffer_offset);
++	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_blend_pipeline[cbx->render_pass_index]);
++	vkCmdBindDescriptorSets (
++		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &gl.gltexture->descriptor_set, 0, NULL);
++	vkCmdDraw (cbx->cb, 6, 1, 0, 0);
++}
++
++// draw an integer centered on cx (top at ytop), scaled to height h, using the
++// HUD ammo digits (anum_*), which match the rerelease's red count.
++static void SCR_WW_DrawNumCentered (cb_context_t *cbx, float cx, float ytop, int num, float h)
++{
++	if (!ww_digit[0])
++		return;
++	char buf[16];
++	q_snprintf (buf, sizeof (buf), "%d", num);
++	int	  len = (int)strlen (buf);
++	float dw = h * (float)ww_digit[0]->width / (float)ww_digit[0]->height;
++	float x = cx - len * dw * 0.5f;
++	for (int i = 0; i < len; i++)
++	{
++		int d = buf[i] - '0';
++		if (d >= 0 && d <= 9 && ww_digit[d])
++			Draw_SubPic (cbx, x, ytop, dw, h, ww_digit[d], 0.0f, 0.0f, 1.0f, 1.0f, NULL, 1.0f);
++		x += dw;
+ 	}
+ }
+ 
++void SCR_DrawWeaponWheel (cb_context_t *cbx)
++{
++	if (!ww_active)
++		return;
++	if (cls.state != ca_connected || cl.intermission)
++	{
++		ww_active = false;
++		return;
++	}
++
++	Draw_FadeScreen (cbx);
++	GL_SetCanvas (cbx, CANVAS_DEFAULT); // 1 unit == 1 pixel (glwidth x glheight); independent of menu scale
++
++	const float D = glheight * 0.60f;											 // ring diameter ~60% of screen height (larger than Steam for phone visibility)
++	float		cx = (ww_center_nx >= 0.0f) ? ww_center_nx * glwidth : glwidth - D * 0.60f; // touch: thumb-centered; else right-side
++	float		cy = (ww_center_ny >= 0.0f) ? ww_center_ny * glheight : glheight * 0.50f;
++	if (ww_center_nx >= 0.0f) // touch: keep the ring fully on-screen even if the thumb is near an edge
++	{
++		cx = CLAMP (D * 0.5f, cx, glwidth - D * 0.5f);
++		cy = CLAMP (D * 0.5f, cy, glheight - D * 0.5f);
++	}
++	const float radius = D * 0.37f;			   // weapon icons centered on the band
++	const float wpn_h = D * 0.19f;			   // scaled weapon icon size (ww_*.lmp are 48x32); some bleed-out is fine
++	const float wpn_w = wpn_h * 48.0f / 32.0f;
++
++	// resolve selection from the aim vector (dead zone keeps the last pick)
++	float aimlen = (float)sqrt (ww_aim_x * ww_aim_x + ww_aim_y * ww_aim_y);
++	if (aimlen > 0.4f)
++	{
++		float best = -1e9f;
++		int	  bestslot = ww_selected;
++		for (int i = 0; i < ww_numslots; i++)
++		{
++			float ang = (float)i / ww_numslots * 2.0f * (float)M_PI; // slot 0 at 12 o'clock, clockwise
++			float sx = (float)sin (ang), sy = -(float)cos (ang);
++			float dot = (ww_aim_x / aimlen) * sx + (ww_aim_y / aimlen) * sy;
++			if (dot > best)
++			{
++				best = dot;
++				bestslot = i;
++			}
++		}
++		ww_selected = bestslot;
++	}
++
++	qpic_t *ring = SCR_WW_RingPic ();
++	if (ring)
++		Draw_SubPic (cbx, cx - D * 0.5f, cy - D * 0.5f, D, D, ring, 0.0f, 0.0f, 1.0f, 1.0f, NULL, 0.85f);
++
++	for (int i = 0; i < ww_numslots; i++)
++	{
++		ww_slot_t *s = &ww_slots[i];
++		float	   ang = (float)i / ww_numslots * 2.0f * (float)M_PI;
++		float	   px = cx + radius * (float)sin (ang);
++		float	   py = cy - radius * (float)cos (ang);
++		qboolean   owned = (cl.items & s->weaponnum) != 0;
++		qboolean   sel = (i == ww_selected) && owned;
++		qpic_t	  *pic = (sel && s->icon_sel) ? s->icon_sel : s->icon;
++		if (!pic)
++			continue;
++		float dark[3] = {0.42f, 0.42f, 0.42f}; // unowned: DARKEN (color multiply), not fade — matches Steam
++		Draw_SubPic (cbx, px - wpn_w * 0.5f, py - wpn_h * 0.5f, wpn_w, wpn_h, pic, 0.0f, 0.0f, 1.0f, 1.0f, owned ? NULL : dark, 1.0f);
++	}
++
++	// center: selected weapon's ammo icon + count (updates as you rotate)
++	if (ww_selected >= 0 && ww_selected < ww_numslots)
++	{
++		ww_slot_t *s = &ww_slots[ww_selected];
++		if (s->ammostat >= 0) // show ammo for the selected weapon even if unowned (reads 0)
++		{
++			qpic_t *ap = SCR_WW_AmmoPic (s->ammostat);
++			if (ap)
++			{
++				float ai_h = D * 0.12f;
++				float ai_w = ai_h * (float)ap->width / (float)ap->height;
++				Draw_SubPic (cbx, cx - ai_w * 0.5f, cy - ai_h - D * 0.01f, ai_w, ai_h, ap, 0.0f, 0.0f, 1.0f, 1.0f, NULL, 1.0f);
++			}
++			SCR_WW_DrawNumCentered (cbx, cx, cy + D * 0.02f, cl.stats[s->ammostat], D * 0.12f);
++		}
++	}
++
++	// selection pointer: white triangle near the inner edge, pointing outward.
++	// Follows the raw aim direction when tilted, else snaps to the selected slot.
++	{
++		float	 pang;
++		qboolean show = true;
++		if (aimlen > 0.4f)
++			pang = (float)atan2 (ww_aim_x, -ww_aim_y);
++		else if (ww_selected >= 0)
++			pang = (float)ww_selected / ww_numslots * 2.0f * (float)M_PI;
++		else
++			show = false;
++		if (show)
++		{
++			float	rp = D * 0.19f;
++			float	ptx = cx + rp * (float)sin (pang);
++			float	pty = cy - rp * (float)cos (pang);
++			qpic_t *arrow = SCR_WW_ArrowPic ();
++			if (arrow)
++				SCR_WW_DrawRotPic (cbx, ptx, pty, D * 0.055f, D * 0.055f, arrow, pang);
++		}
++	}
++}
++#endif // VKQ_IOS
++
+ /*
+ ==================
+ SCR_DrawGUI
+@@ -1154,6 +1661,9 @@
+ 		SCR_DrawPause (cbx);
+ 		SCR_CheckDrawCenterString (cbx);
+ 		Sbar_Draw (cbx);
++#ifdef VKQ_IOS
++		SCR_DrawWeaponWheel (cbx); // rerelease weapon wheel (drawn over the HUD)
++#endif
+ 		SCR_DrawDevStats (cbx); // johnfitz
+ 		SCR_DrawFPS (cbx);		// johnfitz
+ 		SCR_DrawClock (cbx);	// johnfitz
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -2692,10 +2692,12 @@
+ 		Sky_ClearAll ();
+ 		if (!isDedicated)
+ 		{
++			void SCR_WeaponWheel_NewGame (void); // gl_screen.c: drop the wheel's stale texture cache
+ 			TexMgr_NewGame ();
+ 			Draw_NewGame ();
+ 			R_NewGame ();
+ 			M_NewGame ();
++			SCR_WeaponWheel_NewGame ();
+ 		}
+ 		ExtraMaps_NewGame ();
+ 		Host_Resetdemos ();

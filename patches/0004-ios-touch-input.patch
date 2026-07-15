@@ -1,0 +1,173 @@
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -161,15 +161,53 @@
+ #endif
+ }
+ 
++#ifdef VKQ_IOS
++// iOS uses a NATIVE UIKeyInput keyboard in the shell, not SDL's soft keyboard
++// (SDL's was a persistent source of bugs on this hardware — backspace gated by
++// SDL_HasKeyboard(), touch->mouse gated by SDL_HasMouse()). The engine just tells
++// the shell when a text field / console is active; the shell shows/hides its own
++// keyboard and feeds characters back via VKQ_TouchChar / VKQ_TouchKey.
++extern void VKQ_iOS_SetTextActive (int active);
++// Shell still uses this to position SDL's view-shift when the native keyboard shows.
++void VKQ_iOS_SetTextInputRect (int x, int y, int w, int h)
++{
++	SDL_Window *win = SDL3_GET_WINDOW;
++	SDL_Rect	r;
++	if (!win)
++		return;
++	r.x = x;
++	r.y = y;
++	r.w = w;
++	r.h = h;
++	SDL_SetTextInputArea (win, &r, 0);
++}
++#endif
++
+ void IN_Init (void)
+ {
+ 	textmode = Key_TextEntry ();
+ 
++#ifdef VKQ_IOS
++	VKQ_iOS_SetTextActive (textmode ? 1 : 0);
++#else
+ 	if (textmode)
+ 		SDL_StartTextInput (SDL3_GET_WINDOW);
+ 	else
+ 		SDL_StopTextInput (SDL3_GET_WINDOW);
++#endif
+ 
++#ifdef VKQ_IOS
++	// iOS has no mouse; relative-mouse-mode calls fail and spam the console every
++	// activate. Force no_mouse so IN_Activate/IN_HideCursor early-return. Aim is
++	// touch / gyro / gamepad.
++	no_mouse = true;
++	IN_BeginIgnoringMouseEvents ();
++	// The menu is driven straight from finger events (in_sdl3.c) — SDL's touch->mouse
++	// synthesis freezes at the first tap's position on this hardware, so every menu
++	// tap stuck on the first item. Turn the synthesis OFF so its stale-position mouse
++	// buttons don't also fire spurious menu clicks.
++	SDL_SetHint (SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
++#endif
+ 	if (safemode || COM_CheckParm ("-nomouse"))
+ 	{
+ 		no_mouse = true;
+@@ -513,6 +551,25 @@
+ 		lookRaw = temp;
+ 	}
+ 
++#ifdef VKQ_IOS
++	// While the weapon wheel is open, the right stick selects a slot instead of
++	// turning the view (GTA-style). Movement (left stick) still works.
++	{
++		extern qboolean SCR_WeaponWheel_Active (void);
++		extern qboolean SCR_WeaponWheel_LookSuppressed (void);
++		extern void		SCR_WeaponWheel_SetAim (float x, float y);
++		if (SCR_WeaponWheel_Active ())
++		{
++			SCR_WeaponWheel_SetAim (lookRaw.x, lookRaw.y); // SDL Y is up-negative, matching the wheel's up==-y
++			lookRaw.x = lookRaw.y = 0.0f;				   // suppress view turn while open
++		}
++		else if (SCR_WeaponWheel_LookSuppressed ())
++		{
++			lookRaw.x = lookRaw.y = 0.0f; // grace window: don't snap the view from a still-deflected stick
++		}
++	}
++#endif
++
+ 	moveDeadzone = IN_ApplyDeadzone (moveRaw, joy_deadzone_move.value, joy_outer_threshold_move.value);
+ 	lookDeadzone = IN_ApplyDeadzone (lookRaw, joy_deadzone_look.value, joy_outer_threshold_look.value);
+ 
+@@ -593,8 +650,58 @@
+ 		else
+ 			cmd->forwardmove_accumulator -= m_forward.value * dmy;
+ 	}
++}
++
++#ifdef VKQ_IOS
++// --- vkquake-ios overlay 0004: touch input bridge --------------------------
++// The native UIKit overlay (ios/shell/ios_touch.m) calls these C setters; the
++// per-frame IN_TouchMove folds them into the usercmd/viewangles, mirroring
++// IN_JoyMove. Display link + UIKit both run on the main thread — no locking.
++extern cvar_t cl_forwardspeed, cl_sidespeed, cl_movespeedkey;
++static float vkq_move_fwd, vkq_move_side;  // analog stick, [-1, 1]
++static float vkq_look_yaw, vkq_look_pitch; // accumulated look degrees (consumed/frame)
++static int	 vkq_touch_run = 1;			   // always-run toggle (iOS settings)
++
++void VKQ_TouchSetRun (int on) { vkq_touch_run = on; }
++
++void VKQ_TouchMove (float fwd, float side)
++{
++	vkq_move_fwd = fwd;
++	vkq_move_side = side;
+ }
++void VKQ_TouchLook (float dyaw_deg, float dpitch_deg)
++{
++	vkq_look_yaw += dyaw_deg;
++	vkq_look_pitch += dpitch_deg;
++}
++void VKQ_TouchKey (int key, int down) { Key_Event (key, down ? true : false); }
++void VKQ_TouchChar (int c) { Char_Event (c); } // native iOS keyboard -> engine text input
++void VKQ_TouchCommand (const char *text) { Cbuf_AddText (text); }
++int	 VKQ_TouchKeyDest (void) { return (int)key_dest; }
++int	 VKQ_TouchInGame (void) { return (key_dest == key_game && cls.state == ca_connected && !cls.demoplayback) ? 1 : 0; }
++int	 VKQ_TouchIsDemo (void) { return cls.demoplayback ? 1 : 0; }
++int	 VKQ_HasActiveController (void)
++{
++	extern SDL_Gamepad *joy_active_controller; // in_sdl3.c: the engine's open gamepad
++	return joy_active_controller != NULL ? 1 : 0;
++}
+ 
++static void IN_TouchMove (usercmd_t *cmd)
++{
++	float run = (vkq_touch_run && cl_movespeedkey.value > 0) ? cl_movespeedkey.value : 1.0f;
++	cmd->forwardmove += cl_forwardspeed.value * run * vkq_move_fwd;
++	cmd->sidemove += cl_sidespeed.value * run * vkq_move_side;
++
++	cl.viewangles[YAW] -= vkq_look_yaw;
++	cl.viewangles[PITCH] += vkq_look_pitch;
++	if (cl.viewangles[PITCH] > cl_maxpitch.value)
++		cl.viewangles[PITCH] = cl_maxpitch.value;
++	if (cl.viewangles[PITCH] < cl_minpitch.value)
++		cl.viewangles[PITCH] = cl_minpitch.value;
++	vkq_look_yaw = vkq_look_pitch = 0;
++}
++#endif
++
+ void IN_Move (usercmd_t *cmd)
+ {
+ 	// We only want the latest joystick movements
+@@ -604,6 +711,9 @@
+ 
+ 	IN_JoyMove (cmd);
+ 	IN_MouseMove (cmd);
++#ifdef VKQ_IOS
++	IN_TouchMove (cmd);
++#endif
+ }
+ 
+ void IN_ClearStates (void) {}
+@@ -616,17 +726,13 @@
+ 		textmode = want_textmode;
+ 		if (in_debugkeys.value)
+ 			Con_Printf ("SDL_EnableUNICODE %d time: %g\n", textmode, Sys_DoubleTime ());
++#ifdef VKQ_IOS
++		VKQ_iOS_SetTextActive (textmode ? 1 : 0); // native shell keyboard shows/hides
++#else
+ 		if (textmode)
+-		{
+ 			SDL_StartTextInput (SDL3_GET_WINDOW);
+-			if (in_debugkeys.value)
+-				Con_Printf ("SDL_StartTextInput time: %g\n", Sys_DoubleTime ());
+-		}
+ 		else
+-		{
+ 			SDL_StopTextInput (SDL3_GET_WINDOW);
+-			if (in_debugkeys.value)
+-				Con_Printf ("SDL_StopTextInput time: %g\n", Sys_DoubleTime ());
+-		}
++#endif
+ 	}
+ }

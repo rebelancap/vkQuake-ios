@@ -1,0 +1,585 @@
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -152,6 +152,34 @@
+ static VkImageView		depth_buffer_view;
+ static vulkan_memory_t	color_buffers_memory[NUM_COLOR_BUFFERS];
+ static VkImageView		color_buffers_view[NUM_COLOR_BUFFERS];
++
++#ifdef VKQ_VISIONOS
++// vkquake-ios overlay 0010 — visionOS stereoscopic "3D screen" state. The shell
++// (VKQHostViewController / VKQImmersive) drives these: while active, the engine
++// renders alternating parallax-offset eyes (gl_rmain.c) into the offscreen present
++// image below instead of the hidden window's swapchain, and the CompositorServices
++// loop samples that image (a MTLTexture under MoltenVK) onto a world-locked panel.
++int	  vkq_stereo3d_active = 0;	  // 3D mode on: skip swapchain, render to present images
++int	  vkq_stereo3d_eye = 0;		  // eye of the CURRENT render: 0=center, 1=left, 2=right
++int	  vkq_stereo3d_both = 1;	  // render BOTH eyes per host frame (SCR_UpdateScreen wrapper);
++								  // 0 = alternating fallback (half rate per eye + 1 frame lag)
++// Explicit render size (PIXELS) while in 3D: the panel is the render target, so
++// its resolution should NOT follow the (deliberately small, parked-out-of-the-way)
++// 2D window. When set, the mode path and resize events ignore the window.
++int	  vkq_stereo3d_vidw = 0, vkq_stereo3d_vidh = 0;
++float vkq_stereo3d_sep = 2.5f;	  // eye separation, world units (Quake ~1 unit = 1 inch)
++float vkq_stereo3d_conv = 128.0f; // zero-parallax distance, world units (panel plane)
++static int			   vkq_stereo3d_eye_done = 0;		  // eye most recently completed
++static int			   vkq_stereo3d_frames = 0;			  // offscreen frames rendered (liveness)
++static int			   vkq_stereo3d_eye_frames[2] = {0, 0}; // per-eye completed renders
++// Per-eye present images ([0]=left/mono, [1]=right): both-eyes mode fills both
++// every host frame; the alternating fallback updates them on alternate frames.
++static VkImage		   vkq_stereo_present_image[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
++static vulkan_memory_t vkq_stereo_present_memory[2];
++static VkImageView	   vkq_stereo_present_view[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
++static VkFramebuffer   vkq_stereo_present_fb[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
++static int			   vkq_stereo_present_w = 0, vkq_stereo_present_h = 0; // actual image extent
++#endif
+ static vulkan_memory_t	oit_accum_buffer_memory;
+ static vulkan_memory_t	oit_reveal_buffer_memory;
+ static VkImageView		oit_accum_buffer_view;
+@@ -268,6 +296,10 @@
+ static int VID_GetCurrentWidth (void)
+ {
+ 	int w = 0, h = 0;
++#ifdef VKQ_VISIONOS
++	if (vkq_stereo3d_active && vkq_stereo3d_vidw > 0)
++		return vkq_stereo3d_vidw; // overlay 0010: panel resolution, not window
++#endif
+ #ifdef USE_SDL3
+ 	SDL_GetWindowSizeInPixels (draw_context, &w, &h);
+ #else
+@@ -284,6 +316,10 @@
+ static int VID_GetCurrentHeight (void)
+ {
+ 	int w = 0, h = 0;
++#ifdef VKQ_VISIONOS
++	if (vkq_stereo3d_active && vkq_stereo3d_vidh > 0)
++		return vkq_stereo3d_vidh; // overlay 0010: panel resolution, not window
++#endif
+ #ifdef USE_SDL3
+ 	SDL_GetWindowSizeInPixels (draw_context, &w, &h);
+ #else
+@@ -2702,6 +2738,21 @@
+ */
+ static qboolean GL_CreateSwapChain (void)
+ {
++#ifdef VKQ_VISIONOS
++	// overlay 0010: while the 3D render-size override is active the window
++	// swapchain is never acquired or presented, and the (parked/animating)
++	// window surface extent will not match the panel override — the extent
++	// guard below would fail forever and leave render_resources_created false
++	// (engine alive but never rendering; sim-diagnosed). Skip the swapchain:
++	// zero images means the ui-framebuffer loops no-op and the stereo present
++	// framebuffers carry the GUI+postprocess pass instead.
++	if (vkq_stereo3d_active && vkq_stereo3d_vidw > 0)
++	{
++		num_swap_chain_images = 0;
++		Sys_Printf ("3D override: skipping window swapchain\n");
++		return true;
++	}
++#endif
+ 	uint32_t i;
+ 	VkResult err;
+ 
+@@ -3070,7 +3121,92 @@
+ 			Sys_Error ("vkCreateFramebuffer failed with code %i", (int)err);
+ 
+ 		GL_SetObjectName ((uint64_t)ui_framebuffers[i], VK_OBJECT_TYPE_FRAMEBUFFER, "ui");
++	}
++
++#ifdef VKQ_VISIONOS
++	// overlay 0010: offscreen "present image" for stereoscopic 3D. In 3D the swapchain
++	// is never touched (the hidden window's drawable acquire stalls MoltenVK); the
++	// GUI+postprocess pass renders into this image instead, so the immersive panel
++	// gets the full composite — gamma-corrected scene + HUD + menus. SAMPLED usage
++	// makes the backing MTLTexture shader-readable by the CompositorServices quad
++	// (vkGetMTLTextureMVK, zero copy). Reusing the GUI render pass on a non-swapchain
++	// image leaves its PRESENT_SRC final layout technically swapchain-only per spec —
++	// MoltenVK does not enforce image layouts, and this never runs elsewhere.
++	for (int vkq_eye_i = 0; vkq_eye_i < 2; vkq_eye_i++)
++	{
++		ZEROED_STRUCT (VkImageCreateInfo, image_create_info);
++		image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++		image_create_info.imageType = VK_IMAGE_TYPE_2D;
++		image_create_info.format = vulkan_globals.swap_chain_format;
++		image_create_info.extent.width = vid.width;
++		image_create_info.extent.height = vid.height;
++		image_create_info.extent.depth = 1;
++		image_create_info.mipLevels = 1;
++		image_create_info.arrayLayers = 1;
++		image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
++		image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++		image_create_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++
++		assert (vkq_stereo_present_image[vkq_eye_i] == VK_NULL_HANDLE);
++		err = vkCreateImage (vulkan_globals.device, &image_create_info, NULL, &vkq_stereo_present_image[vkq_eye_i]);
++		if (err != VK_SUCCESS)
++			Sys_Error ("vkCreateImage failed with code %i", (int)err);
++		GL_SetObjectName ((uint64_t)vkq_stereo_present_image[vkq_eye_i], VK_OBJECT_TYPE_IMAGE, va ("Stereo3D Present %d", vkq_eye_i));
++
++		VkMemoryRequirements memory_requirements;
++		vkGetImageMemoryRequirements (vulkan_globals.device, vkq_stereo_present_image[vkq_eye_i], &memory_requirements);
++
++		ZEROED_STRUCT (VkMemoryDedicatedAllocateInfoKHR, dedicated_allocation_info);
++		dedicated_allocation_info.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR;
++		dedicated_allocation_info.image = vkq_stereo_present_image[vkq_eye_i];
++
++		ZEROED_STRUCT (VkMemoryAllocateInfo, memory_allocate_info);
++		memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++		memory_allocate_info.allocationSize = memory_requirements.size;
++		memory_allocate_info.memoryTypeIndex = GL_MemoryTypeFromProperties (memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
++		if (vulkan_globals.dedicated_allocation)
++			memory_allocate_info.pNext = &dedicated_allocation_info;
++
++		R_AllocateVulkanMemory (&vkq_stereo_present_memory[vkq_eye_i], &memory_allocate_info, VULKAN_MEMORY_TYPE_DEVICE, &num_vulkan_misc_allocations);
++		err = vkBindImageMemory (vulkan_globals.device, vkq_stereo_present_image[vkq_eye_i], vkq_stereo_present_memory[vkq_eye_i].handle, 0);
++		if (err != VK_SUCCESS)
++			Sys_Error ("vkBindImageMemory failed with code %i", (int)err);
++
++		ZEROED_STRUCT (VkImageViewCreateInfo, image_view_create_info);
++		image_view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++		image_view_create_info.format = vulkan_globals.swap_chain_format;
++		image_view_create_info.image = vkq_stereo_present_image[vkq_eye_i];
++		image_view_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++		image_view_create_info.subresourceRange.levelCount = 1;
++		image_view_create_info.subresourceRange.layerCount = 1;
++		image_view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
++
++		err = vkCreateImageView (vulkan_globals.device, &image_view_create_info, NULL, &vkq_stereo_present_view[vkq_eye_i]);
++		if (err != VK_SUCCESS)
++			Sys_Error ("vkCreateImageView failed with code %i", (int)err);
++
++		ZEROED_STRUCT (VkFramebufferCreateInfo, framebuffer_create_info);
++		framebuffer_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
++		framebuffer_create_info.renderPass = vulkan_globals.secondary_cb_contexts[SCBX_GUI]->render_pass;
++		framebuffer_create_info.attachmentCount = 2;
++		framebuffer_create_info.width = vid.width;
++		framebuffer_create_info.height = vid.height;
++		framebuffer_create_info.layers = 1;
++
++		VkImageView stereo_attachments[2] = {color_buffers_view[0], vkq_stereo_present_view[vkq_eye_i]};
++		framebuffer_create_info.pAttachments = stereo_attachments;
++
++		assert (vkq_stereo_present_fb[vkq_eye_i] == VK_NULL_HANDLE);
++		err = vkCreateFramebuffer (vulkan_globals.device, &framebuffer_create_info, NULL, &vkq_stereo_present_fb[vkq_eye_i]);
++		if (err != VK_SUCCESS)
++			Sys_Error ("vkCreateFramebuffer failed with code %i", (int)err);
++
++		GL_SetObjectName ((uint64_t)vkq_stereo_present_fb[vkq_eye_i], VK_OBJECT_TYPE_FRAMEBUFFER, va ("Stereo3D Present FB %d", vkq_eye_i));
++
++		vkq_stereo_present_w = (int)vid.width;
++		vkq_stereo_present_h = (int)vid.height;
+ 	}
++#endif
+ }
+ 
+ /*
+@@ -3199,6 +3335,35 @@
+ 		swapchain_images[i] = VK_NULL_HANDLE;
+ 	}
+ 
++#ifdef VKQ_VISIONOS
++	// overlay 0010: tear down the stereo present target with the other framebuffers
++	// (recreated by GL_CreateFrameBuffers on restart/resize). NULL the globals
++	// BEFORE destroying so VKQ_Get3DPresentMTLTexture can never hand the
++	// immersive render thread a texture that is being destroyed (a vid restart
++	// during 3D would otherwise race the compositor's per-frame blit).
++	vkq_stereo_present_w = vkq_stereo_present_h = 0;
++	// re-gate the accessors: recreated images are undefined until re-rendered
++	// (a mid-3D restart — e.g. the live panel-aspect resync — hits this path)
++	vkq_stereo3d_eye_frames[0] = vkq_stereo3d_eye_frames[1] = 0;
++	for (int vkq_eye_i = 0; vkq_eye_i < 2; vkq_eye_i++)
++	{
++		if (vkq_stereo_present_image[vkq_eye_i] == VK_NULL_HANDLE)
++			continue;
++		VkFramebuffer stereo_fb = vkq_stereo_present_fb[vkq_eye_i];
++		VkImageView	  stereo_view = vkq_stereo_present_view[vkq_eye_i];
++		VkImage		  stereo_image = vkq_stereo_present_image[vkq_eye_i];
++		vkq_stereo_present_fb[vkq_eye_i] = VK_NULL_HANDLE;
++		vkq_stereo_present_view[vkq_eye_i] = VK_NULL_HANDLE;
++		vkq_stereo_present_image[vkq_eye_i] = VK_NULL_HANDLE;
++		if (stereo_fb != VK_NULL_HANDLE)
++			vkDestroyFramebuffer (vulkan_globals.device, stereo_fb, NULL);
++		if (stereo_view != VK_NULL_HANDLE)
++			vkDestroyImageView (vulkan_globals.device, stereo_view, NULL);
++		vkDestroyImage (vulkan_globals.device, stereo_image, NULL);
++		R_FreeVulkanMemory (&vkq_stereo_present_memory[vkq_eye_i], &num_vulkan_misc_allocations);
++	}
++#endif
++
+ 	for (int i = 0; i < DOUBLE_BUFFERED; ++i)
+ 	{
+ 		vkDestroySemaphore (vulkan_globals.device, image_aquired_semaphores[i], NULL);
+@@ -3547,6 +3712,10 @@
+ 	qboolean	 ray_debug	   : 1;
+ 	uint32_t	 render_scale  : 4;
+ 	uint32_t	 vid_height	   : 20;
++#ifdef VKQ_VISIONOS
++	uint32_t	 stereo3d	   : 1; // overlay 0010: route GUI+postprocess to the present image
++	uint32_t	 stereo3d_eye  : 2; // eye this frame rendered (latched for the compositor)
++#endif
+ 	float		 time;
+ 	VkClearValue color_clear_value;
+ 	uint8_t		 v_blend[4];
+@@ -3922,7 +4091,15 @@
+ #endif
+ 
+ 	qboolean swapchain_acquired = parms->swapchain && GL_AcquireNextSwapChainImage ();
++#ifdef VKQ_VISIONOS
++	// overlay 0010: in 3D the postprocess still runs — into the offscreen present
++	// image instead of a swapchain image (framebuffer routed below).
++	const int	   vkq_stereo_eye_idx = (parms->stereo3d_eye == 2) ? 1 : 0;
++	const qboolean vkq_stereo_present = parms->stereo3d && (vkq_stereo_present_fb[vkq_stereo_eye_idx] != VK_NULL_HANDLE);
++	if (swapchain_acquired || vkq_stereo_present)
++#else
+ 	if (swapchain_acquired == true)
++#endif
+ 	{
+ 		cb_context_t *cbx = vulkan_globals.secondary_cb_contexts[SCBX_POST_PROCESS];
+ 
+@@ -4041,7 +4218,11 @@
+ 		ZEROED_STRUCT (VkRenderPassBeginInfo, render_pass_begin_info);
+ 		render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+ 		render_pass_begin_info.renderPass = vulkan_globals.secondary_cb_contexts[SCBX_GUI]->render_pass;
++#ifdef VKQ_VISIONOS
++		render_pass_begin_info.framebuffer = vkq_stereo_present ? vkq_stereo_present_fb[vkq_stereo_eye_idx] : ui_framebuffers[current_swapchain_buffer];
++#else
+ 		render_pass_begin_info.framebuffer = ui_framebuffers[current_swapchain_buffer];
++#endif
+ 		render_pass_begin_info.renderArea = render_area;
+ 		render_pass_begin_info.clearValueCount = 0;
+ 		vkCmdBeginRenderPass (render_passes_cb, &render_pass_begin_info, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+@@ -4133,6 +4314,19 @@
+ 			num_images_acquired -= 1;
+ 	}
+ 
++#ifdef VKQ_VISIONOS
++	// overlay 0010: latch which eye the present image now holds so the immersive
++	// compositor copies it into the matching per-eye texture (on its own Metal
++	// queue). vkq_stereo3d_frames is the liveness signal.
++	if (vkq_stereo_present)
++	{
++		vkq_stereo3d_frames++;
++		vkq_stereo3d_eye_frames[vkq_stereo_eye_idx]++;
++		if (parms->stereo3d_eye)
++			vkq_stereo3d_eye_done = (int)parms->stereo3d_eye;
++	}
++#endif
++
+ 	frame_submitted[cb_index] = true;
+ 	current_cb_index = (current_cb_index + 1) % DOUBLE_BUFFERED;
+ }
+@@ -4189,6 +4383,13 @@
+ 				-vulkan_globals.view_matrix[9],
+ 			},
+ 	};
++#ifdef VKQ_VISIONOS
++	// overlay 0010: snapshot the stereo state into the frame's parms on the main
++	// thread, so the async end-rendering task labels the frame with the eye it
++	// actually rendered even if the shell has already advanced to the next eye.
++	parms.stereo3d = vkq_stereo3d_active ? 1u : 0u;
++	parms.stereo3d_eye = (uint32_t)(vkq_stereo3d_eye & 3);
++#endif
+ 	task_handle_t end_rendering_task = INVALID_TASK_HANDLE;
+ 	if (use_tasks)
+ 		end_rendering_task = Task_AllocateAndAssignFunc ((task_func_t)GL_EndRenderingTask, &parms, sizeof (parms));
+@@ -5414,5 +5615,125 @@
+ 	if (vulkan_globals.want_full_screen_exclusive)
+ 	{
+ 		vid.restart_next_frame = true;
++	}
++}
++
++#ifdef VKQ_VISIONOS
++// vkquake-ios overlay 0010 — C accessors for the visionOS stereoscopic shell.
++// vkGetMTLTextureMVK is MoltenVK's deprecated-but-shipping bridge: a VkImage's
++// backing store IS a MTLTexture (id<MTLTexture> is a plain pointer; declared
++// void* to keep this file pure C — the ObjC shell __bridge-casts it back).
++extern void vkGetMTLTextureMVK (VkImage image, void *pMTLTexture);
++
++// Raw present-image extent (0 while destroyed mid-restart) — the shell polls
++// this during the high-res entry resize; unlike the texture accessors it is
++// NOT gated on the eye having rendered, so it works before 3D is committed.
++void VKQ_Get3DPresentSize (int *w, int *h)
++{
++	*w = vkq_stereo_present_w; // set at creation, zeroed at destroy — reports the
++	*h = vkq_stereo_present_h; // ACTUAL live image extent, not the pending vid size
++}
++
++void *VKQ_Get3DPresentMTLTextureForEye (int eye) // 1=left, 2=right
++{
++	const int idx = (eye == 2) ? 1 : 0;
++	void	 *mtlTexture = NULL;
++	if (vkq_stereo_present_image[idx] == VK_NULL_HANDLE)
++		return NULL;
++	if (vkq_stereo3d_eye_frames[idx] == 0)
++		return NULL; // never rendered since entering 3D — contents undefined
++	vkGetMTLTextureMVK (vkq_stereo_present_image[idx], &mtlTexture);
++	return mtlTexture;
++}
++
++void *VKQ_Get3DPresentMTLTexture (void)
++{
++	return VKQ_Get3DPresentMTLTextureForEye (1);
++}
++
++void VKQ_Set3DBothEyes (int on)
++{
++	vkq_stereo3d_both = on ? 1 : 0;
++}
++
++// Set the 3D render resolution (pixels; 0,0 = follow the window again) and
++// schedule the vid restart that rebuilds every buffer at the new size.
++void VKQ_Set3DRenderSize (int w, int h)
++{
++	vkq_stereo3d_vidw = w;
++	vkq_stereo3d_vidh = h;
++	// VID_Restart(false) rebuilds buffers at the CURRENT vid.* (only the
++	// set_mode path re-reads the window), so set vid directly — exactly what
++	// the PIXEL_SIZE_CHANGED event does. Clearing (0,0) re-reads the window.
++	if (w > 0 && h > 0)
++	{
++		vid.width = w;
++		vid.height = h;
+ 	}
++	else
++	{
++		vid.width = VID_GetCurrentWidth ();	  // override already cleared above,
++		vid.height = VID_GetCurrentHeight (); // so these report the window
++	}
++	vid.restart_next_frame = true;
+ }
++
++int VKQ_Get3DBothEyes (void)
++{
++	return vkq_stereo3d_both;
++}
++
++void VKQ_Set3DMode (int on)
++{
++	vkq_stereo3d_active = on ? 1 : 0;
++	vkq_stereo3d_eye_frames[0] = vkq_stereo3d_eye_frames[1] = 0; // fresh entry/exit
++	if (!on)
++	{
++		vkq_stereo3d_eye = 0;
++		vkq_stereo3d_eye_done = 0;
++	}
++}
++
++void  VKQ_Set3DEye (int eye)
++{
++	vkq_stereo3d_eye = (eye >= 0 && eye <= 2) ? eye : 0;
++}
++
++void VKQ_Set3DParams (float sep, float conv)
++{
++	if (sep >= 0.0f && sep <= 16.0f)
++		vkq_stereo3d_sep = sep;
++	if (conv >= 16.0f && conv <= 4096.0f)
++		vkq_stereo3d_conv = conv;
++}
++
++int VKQ_Get3DMode (void)
++{
++	return vkq_stereo3d_active;
++}
++
++int VKQ_Get3DEyeDone (void)
++{
++	return vkq_stereo3d_eye_done;
++}
++
++int VKQ_Get3DFrames (void)
++{
++	return vkq_stereo3d_frames;
++}
++
++// Window size in POINTS (SDL logical size — the visionOS drawable is 2x). Used
++// by the shell to push a high-res render target while in 3D (the panel texture
++// IS the window drawable) and restore the user's size on exit. SDL routes the
++// resize through requestGeometryUpdate -> PIXEL_SIZE_CHANGED -> vid restart.
++void VKQ_GetWindowSize (int *w, int *h)
++{
++	SDL_GetWindowSize (draw_context, w, h);
++}
++
++void VKQ_SetWindowSize (int w, int h)
++{
++	if (w >= 320 && h >= 240)
++		SDL_SetWindowSize (draw_context, w, h);
++}
++#endif
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -342,6 +342,25 @@
+ 	TranslationMatrix (translation_matrix, -r_refdef.vieworg[0], -r_refdef.vieworg[1], -r_refdef.vieworg[2]);
+ 	MatrixMultiply (vulkan_globals.view_matrix, translation_matrix);
+ 
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0010: stereoscopic eye offset for the visionOS 3D panel.
++	// The shell renders alternating eyes (1=left, 2=right). Camera shifts ±sep/2
++	// along view-space X (a post-translation on the composed view matrix — the
++	// affine bottom row keeps columns 0-2 unchanged), and the projection gets the
++	// matching off-axis skew so parallax is zero at the convergence distance:
++	// objects at vkq_stereo3d_conv units appear AT the panel, nearer pops out.
++	{
++		extern int	 vkq_stereo3d_active, vkq_stereo3d_eye;
++		extern float vkq_stereo3d_sep, vkq_stereo3d_conv;
++		if (vkq_stereo3d_active && vkq_stereo3d_eye)
++		{
++			const float e = (vkq_stereo3d_eye == 2 ? 1.0f : -1.0f) * 0.5f * vkq_stereo3d_sep;
++			vulkan_globals.view_matrix[3 * 4 + 0] -= e;
++			vulkan_globals.projection_matrix[2 * 4 + 0] = -vulkan_globals.projection_matrix[0 * 4 + 0] * e / vkq_stereo3d_conv;
++		}
++	}
++#endif
++
+ 	// View projection matrix
+ 	memcpy (vulkan_globals.view_projection_matrix, vulkan_globals.projection_matrix, 16 * sizeof (float));
+ 	MatrixMultiply (vulkan_globals.view_projection_matrix, vulkan_globals.view_matrix);
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -648,7 +648,12 @@
+ 	{
+ 		char st[16];
+ 		int	 x, y;
++#ifdef VKQ_VISIONOS
++		// overlay 0010: on the 3D panel show just the number (a request)
++		q_snprintf (st, sizeof (st), "%4.0f", lastfps);
++#else
+ 		q_snprintf (st, sizeof (st), "%4.0f fps", lastfps);
++#endif
+ 		x = 320 - (strlen (st) << 3);
+ 		y = 200 - CHARACTER_SIZE;
+ 		GL_SetCanvas (cbx, CANVAS_BOTTOMRIGHT);
+@@ -1709,8 +1714,36 @@
+ needs almost the entire 256k of stack space!
+ ==================
+ */
++#ifdef VKQ_VISIONOS
++static void SCR_UpdateScreenOnce (qboolean use_tasks);
++
++// overlay 0010: stereoscopic BOTH-EYES rendering — in 3D, render the complete
++// frame twice per host frame (left then right, same game time, eye-offset
++// matrices only) into the per-eye present images. Each eye updates at the full
++// engine rate with zero inter-eye lag — the alternating fallback
++// (vkq_stereo3d_both 0) halves each eye's rate and carries one frame of
++// disparity, which shows as judder while moving. The eye global is set
++// synchronously between renders: the tasks path joins draw_done inside each
++// render, so frame N's matrices are computed before eye N+1 is selected.
+ void SCR_UpdateScreen (qboolean use_tasks)
+ {
++	extern int vkq_stereo3d_active, vkq_stereo3d_eye, vkq_stereo3d_both;
++	if (vkq_stereo3d_active && vkq_stereo3d_both)
++	{
++		vkq_stereo3d_eye = 1;
++		SCR_UpdateScreenOnce (use_tasks);
++		vkq_stereo3d_eye = 2;
++		SCR_UpdateScreenOnce (use_tasks);
++		return;
++	}
++	SCR_UpdateScreenOnce (use_tasks);
++}
++
++static void SCR_UpdateScreenOnce (qboolean use_tasks)
++#else
++void SCR_UpdateScreen (qboolean use_tasks)
++#endif
++{
+ 	if (!scr_initialized || !con_initialized || in_update_screen)
+ 		return; // not initialized yet
+ 
+@@ -1740,6 +1773,16 @@
+ 	// decide on the height of the console
+ 	con_forcedup = !cl.worldmodel || cls.signon != SIGNONS;
+ 
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0010: in stereoscopic 3D the 2D window is hidden — never
++	// touch its swapchain (the drawable acquire stalls MoltenVK); the frame instead
++	// lands in the offscreen present image the immersive compositor samples.
++	extern int	   vkq_stereo3d_active;
++	const qboolean vkq_to_swapchain = !vkq_stereo3d_active;
++#else
++	const qboolean vkq_to_swapchain = true;
++#endif
++
+ 	task_handle_t begin_rendering_task = INVALID_TASK_HANDLE;
+ 	if (!GL_BeginRendering (use_tasks, &begin_rendering_task, &glwidth, &glheight))
+ 	{
+@@ -1759,7 +1802,7 @@
+ 		task_handle_t setup_frame_task = Task_AllocateAndAssignFunc (SCR_SetupFrame, NULL, 0);
+ 		V_RenderView (use_tasks, begin_rendering_task, setup_frame_task, draw_done_task);
+ 		task_handle_t draw_gui_task = Task_AllocateAndAssignFunc (SCR_DrawGUI, NULL, 0);
+-		task_handle_t end_rendering_task = GL_EndRendering (use_tasks, true);
++		task_handle_t end_rendering_task = GL_EndRendering (use_tasks, vkq_to_swapchain);
+ 
+ 		Task_AddDependency (begin_rendering_task, draw_gui_task);
+ 		Task_AddDependency (setup_frame_task, draw_gui_task);
+@@ -1781,7 +1824,7 @@
+ 		S_ExtraUpdate ();
+ 		SCR_DrawGUI (NULL);
+ 		SCR_DrawDone (NULL);
+-		GL_EndRendering (false, true);
++		GL_EndRendering (false, vkq_to_swapchain);
+ 	}
+ 
+ 	in_update_screen = false;
+--- a/Quake/in_sdl3.c
++++ b/Quake/in_sdl3.c
+@@ -132,12 +132,31 @@
+ 			VID_FocusGained ();
+ 			break;
+ 		case SDL_EVENT_WINDOW_FOCUS_LOST:
++#ifdef VKQ_VISIONOS
++			// overlay 0010: entering stereoscopic 3D hides the 2D window, which fires
++			// focus-lost — but the game keeps playing on the immersive panel, so keep
++			// sound running and skip the focus bookkeeping.
++			{
++				extern int vkq_stereo3d_active;
++				if (vkq_stereo3d_active)
++					break;
++			}
++#endif
+ 			S_BlockSound ();
+ 			VID_FocusLost ();
+ 			break;
+ 		// data1/data2 are in pixels, matching vid.width/height, and this also
+ 		// fires when only the display scale changes
+ 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
++#ifdef VKQ_VISIONOS
++			// overlay 0010: while the 3D render-size override is active the panel
++			// resolution must not follow the (small, parked) 2D window.
++			{
++				extern int vkq_stereo3d_active, vkq_stereo3d_vidw;
++				if (vkq_stereo3d_active && vkq_stereo3d_vidw > 0)
++					break;
++			}
++#endif
+ 			vid.width = event.window.data1;
+ 			vid.height = event.window.data2;
+ 			vid.restart_next_frame = true;
+--- a/Quake/main_sdl.c
++++ b/Quake/main_sdl.c
+@@ -24,7 +24,7 @@
+ #include "quakedef.h"
+ #include <stdio.h>
+ 
+-#ifdef USE_SDL3
++#if defined(USE_SDL3) && !defined(VKQ_SWIFT_MAIN)
+ // provides the WinMain shim; must be included in the file that defines main ()
+ #include <SDL3/SDL_main.h>
+ #endif
+@@ -93,7 +93,15 @@
+ }
+ #endif
+ 
++#ifdef VKQ_SWIFT_MAIN
++// vkquake-ios overlay 0010 (visionOS): the app entry is a SwiftUI @main (required
++// to declare the stereoscopic ImmersiveSpace), so SDL's UIApplicationMain wrapper
++// is bypassed. The shell calls SDL_SetMainReady() and then this function directly
++// once the SwiftUI window scene is connected.
++int vkq_engine_main (int argc, char *argv[])
++#else
+ int main (int argc, char *argv[])
++#endif
+ {
+ 	double time, oldtime, newtime;
+ 

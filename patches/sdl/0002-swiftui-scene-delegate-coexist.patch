@@ -1,0 +1,84 @@
+--- a/src/video/uikit/SDL_uikitappdelegate.h
++++ b/src/video/uikit/SDL_uikitappdelegate.h
+@@ -30,7 +30,7 @@
+ @end
+ 
+ API_AVAILABLE(ios(13.0))
+-@interface SDLUIKitSceneDelegate : NSObject <UIApplicationDelegate, UIWindowSceneDelegate>
++@interface SDLUIKitSceneShim : NSObject <UIApplicationDelegate, UIWindowSceneDelegate>
+ 
+ + (NSString *)getSceneDelegateClassName;
+ 
+--- a/src/video/uikit/SDL_uikitappdelegate.m
++++ b/src/video/uikit/SDL_uikitappdelegate.m
+@@ -52,7 +52,7 @@
+         NSString *name = nil;
+ 
+         if (@available(iOS 13.0, tvOS 13.0, *)) {
+-            name = [SDLUIKitSceneDelegate getSceneDelegateClassName];
++            name = [SDLUIKitSceneShim getSceneDelegateClassName];
+         }
+         if (!name) {
+             name = [SDLUIKitDelegate getAppDelegateClassName];
+@@ -340,7 +340,7 @@
+ 
+ 
+ API_AVAILABLE(ios(13.0))
+-@implementation SDLUIKitSceneDelegate
++@implementation SDLUIKitSceneShim
+ {
+     UIWindow *launchWindow;
+     NSMutableArray<NSURL *> *launchURLs;
+@@ -348,7 +348,7 @@
+ 
+ + (NSString *)getSceneDelegateClassName
+ {
+-    return @"SDLUIKitSceneDelegate";
++    return @"SDLUIKitSceneShim";
+ }
+ 
+ - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions
+@@ -480,6 +480,14 @@
+ 
+ - (void)postFinishLaunch
+ {
++    // vkquake-ios SDL patch 0002: under an external (SwiftUI) app lifecycle,
++    // SDL_RunApp never ran, so forward_main is NULL. On some OS builds UIKit
++    // still resolves this class as a scene delegate; calling a NULL main
++    // function pointer jumps to address 0 (instant SIGKILL at launch).
++    if (!forward_main) {
++        NSLog(@"SDL: postFinishLaunch with no SDL_RunApp main (external app lifecycle) - ignoring");
++        return;
++    }
+     [self performSelector:@selector(hideLaunchScreen) withObject:nil afterDelay:0.0];
+     [self performSelector:@selector(processLaunchURLs) withObject:nil afterDelay:0.0];
+ 
+@@ -505,11 +513,11 @@
+ {
+     // This doesn't appear to be called, but it needs to be implemented to signal that we support the UIScene life cycle
+     UISceneConfiguration *config = [[UISceneConfiguration alloc] initWithName:@"SDLSceneConfiguration" sessionRole:connectingSceneSession.role];
+-    config.delegateClass = [SDLUIKitSceneDelegate class];
++    config.delegateClass = [SDLUIKitSceneShim class];
+     return config;
+ }
+ 
+-@end // SDLUIKitSceneDelegate
++@end // SDLUIKitSceneShim
+ 
+ 
+ @implementation SDLUIKitDelegate
+@@ -556,6 +564,14 @@
+ 
+ - (void)postFinishLaunch
+ {
++    // vkquake-ios SDL patch 0002: under an external (SwiftUI) app lifecycle,
++    // SDL_RunApp never ran, so forward_main is NULL. On some OS builds UIKit
++    // still resolves this class as a scene delegate; calling a NULL main
++    // function pointer jumps to address 0 (instant SIGKILL at launch).
++    if (!forward_main) {
++        NSLog(@"SDL: postFinishLaunch with no SDL_RunApp main (external app lifecycle) - ignoring");
++        return;
++    }
+     /* Hide the launch screen the next time the run loop is run. SDL apps will
+      * have a chance to load resources while the launch screen is still up. */
+     [self performSelector:@selector(hideLaunchScreen) withObject:nil afterDelay:0.0];

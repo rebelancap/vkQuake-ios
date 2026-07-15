@@ -1,0 +1,84 @@
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -637,12 +637,24 @@
+ 	qpic_t *p;
+ 	qpic_t *menu2 = Get_Menu2 ();
+ 	int		main_items = MAIN_ITEMS + (menu2 ? 1 : 0);
++#ifdef VKQ_IOS
++	// iOS: inside a mod/expansion (no menu2) add our OWN "MODS" row so you can hop
++	// between games from any of them. Drawn as text, independent of the mod's menu
++	// art (forcing the mainmenu2 graphic desynced with mods that ship their own).
++	qboolean ios_mods = !menu2 && registered.value;
++	if (ios_mods)
++		main_items = MAIN_ITEMS + 1;
++#endif
+ 
+ 	M_DrawTransPic (cbx, 16, 4, Draw_CachePic ("gfx/qplaque.lmp"));
+ 	p = Draw_CachePic ("gfx/ttl_main.lmp");
+ 	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
+ 
+ 	M_DrawTransPic (cbx, 72, 32, menu2 ? menu2 : Draw_CachePic ("gfx/mainmenu.lmp"));
++#ifdef VKQ_IOS
++	if (ios_mods)
++		M_DrawTransPic (cbx, 72, 32 + MAIN_ITEMS * 20, Draw_CachePic ("gfx/p_mods.lmp"));
++#endif
+ 
+ 	f = (int)(realtime * 10) % 6;
+ 
+@@ -653,6 +665,12 @@
+ void M_Main_Key (int key)
+ {
+ 	qpic_t *menu2 = Get_Menu2 ();
++#ifdef VKQ_IOS
++	qboolean ios_mods = !menu2 && registered.value;					// our extra MODS row (in a mod)
++	int		 main_count = MAIN_ITEMS + ((menu2 || ios_mods) ? 1 : 0); // total selectable items
++#else
++	int main_count = MAIN_ITEMS + (menu2 ? 1 : 0);
++#endif
+ 
+ 	switch (key)
+ 	{
+@@ -671,14 +689,14 @@
+ 
+ 	case K_DOWNARROW:
+ 		S_LocalSound ("misc/menu1.wav");
+-		if (++m_main_cursor >= (MAIN_ITEMS + (menu2 ? 1 : 0)))
++		if (++m_main_cursor >= main_count)
+ 			m_main_cursor = 0;
+ 		break;
+ 
+ 	case K_UPARROW:
+ 		S_LocalSound ("misc/menu1.wav");
+ 		if (--m_main_cursor < 0)
+-			m_main_cursor = (MAIN_ITEMS + (menu2 ? 1 : 0)) - 1;
++			m_main_cursor = main_count - 1;
+ 		break;
+ 
+ 	case K_ENTER:
+@@ -710,6 +728,13 @@
+ 				M_Menu_Quit_f ();
+ 			break;
+ 		case 5:
++#ifdef VKQ_IOS
++			if (ios_mods) // our extra MODS row sits at the bottom in a mod
++			{
++				M_Menu_Mods_f ();
++				break;
++			}
++#endif
+ 			M_Menu_Quit_f ();
+ 			break;
+ 		}
+--- a/Quake/host_cmd.c
++++ b/Quake/host_cmd.c
+@@ -349,8 +349,10 @@
+ 
+ static void Modlist_Add (const char *base, const char *name)
+ {
++#ifndef VKQ_IOS
+ 	if ((strlen (name) == 3) && (q_tolower (name[0]) == 'i') && (q_tolower (name[1]) == 'd') && (name[2] == '1'))
+ 		return;
++#endif // iOS keeps id1 in the mod list so you can return to base Quake from a mod
+ 	if (COM_ModForbiddenChars (name))
+ 		return;
+ 	char path[MAX_OSPATH];

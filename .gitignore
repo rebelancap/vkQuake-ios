@@ -1,0 +1,40 @@
+# Vendored upstream — pinned via upstream.pin, never committed
+vendor/
+
+# Local copy of user's game data — never committed (user data)
+gamedata/
+
+# Build trees (absolute paths get baked in; regenerate from scripts)
+build/
+DerivedData/
+ios/build/
+
+# Generated Xcode project (xcodegen regenerates from ios/project.yml)
+ios/*.xcodeproj
+
+# Dev measurement captures + loose sim screenshots — kept local, not published
+artifacts/
+
+# Generated app icons (regenerated from ios/icon/vkq_icon.png by build-ios.sh)
+ios/icon/generated/
+
+# Scratch / spikes
+spikes/
+
+# Build artifacts & noise
+*.ipa
+*.log
+.DS_Store
+*.swp
+
+# OTA staging (IPAs served over the tailnet, never committed)
+ota/
+
+# AI / development process docs — kept local, never published
+CLAUDE.md
+DECISIONS.md
+MEASUREMENTS.md
+QUESTIONS.md
+
+# Personal publishing infra (tailnet host + signing key IDs)
+scripts/publish-ota.sh

@@ -1,0 +1,79 @@
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -3671,7 +3671,15 @@
+ 
+ void M_UpdateMouse (void)
+ {
+-#ifdef USE_SDL3
++#ifdef VKQ_IOS
++	// iOS/visionOS: the menu is driven by TOUCH, not a mouse. SDL's touch->mouse
++	// synthesis is unreliable here — SDL_GetMouseState freezes at the first tap's
++	// position (so every menu tap stuck on the first item, Single Player). Drive the
++	// menu straight from finger events (in_sdl3.c), already in drawable pixels.
++	extern float vkq_menu_touch_x, vkq_menu_touch_y;
++	float		 new_mouse_x = vkq_menu_touch_x;
++	float		 new_mouse_y = vkq_menu_touch_y;
++#elif defined(USE_SDL3)
+ 	float new_mouse_x;
+ 	float new_mouse_y;
+ 	SDL_GetMouseState (&new_mouse_x, &new_mouse_y);
+@@ -3690,6 +3698,18 @@
+ 	m_mouse_x = new_mouse_x;
+ 	m_mouse_y = new_mouse_y;
+ 	M_PixelToMenuCanvasCoord (&m_mouse_x, &m_mouse_y);
++
++#ifdef VKQ_IOS
++	// A tap (finger up) sets a 2-frame pending click: the position was applied above
++	// and the menu draw updates the highlighted row this frame, so firing MOUSE1 a
++	// couple frames later lands the click on the row you touched, not a stale one.
++	extern int vkq_menu_click_pending;
++	if (vkq_menu_click_pending > 0 && --vkq_menu_click_pending == 0)
++	{
++		Key_Event (K_MOUSE1, true);
++		Key_Event (K_MOUSE1, false);
++	}
++#endif
+ 
+ 	if (scrollbar_grab)
+ 	{
+--- a/Quake/in_sdl3.c
++++ b/Quake/in_sdl3.c
+@@ -28,6 +28,15 @@
+ 
+ extern cvar_t in_debugkeys;
+ 
++#ifdef VKQ_IOS
++// Touch-driven menu cursor position (drawable pixels) + pending tap-click, read by
++// menu.c M_UpdateMouse. SDL's touch->mouse synthesis is unreliable on this hardware
++// (SDL_GetMouseState freezes after the first tap), so the menu is fed from finger
++// events instead — see the SDL_EVENT_FINGER_* handling in IN_Commands below.
++float vkq_menu_touch_x = 0.0f, vkq_menu_touch_y = 0.0f;
++int	  vkq_menu_click_pending = 0;
++#endif
++
+ static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
+ SDL_Gamepad			 *joy_active_controller = NULL;
+ 
+@@ -188,7 +197,22 @@
+ 
+ 		case SDL_EVENT_MOUSE_MOTION:
+ 			IN_MouseMotion (event.motion.xrel, event.motion.yrel);
++			break;
++
++#ifdef VKQ_IOS
++		// Drive the menu cursor from touch directly (SDL's touch->mouse synthesis
++		// freezes here). tfinger.x/y are normalized [0,1] in window space; scale to
++		// drawable pixels for the menu-canvas mapping. Click fires on finger-up, a
++		// couple frames later (menu.c M_UpdateMouse) once the cursor has tracked.
++		case SDL_EVENT_FINGER_DOWN:
++		case SDL_EVENT_FINGER_MOTION:
++		case SDL_EVENT_FINGER_UP:
++			vkq_menu_touch_x = event.tfinger.x * (float)glwidth;
++			vkq_menu_touch_y = event.tfinger.y * (float)glheight;
++			if (event.type == SDL_EVENT_FINGER_UP)
++				vkq_menu_click_pending = 2;
+ 			break;
++#endif
+ 
+ 		case SDL_EVENT_GAMEPAD_ADDED:
+ 			if (joy_active_instaceid == 0)

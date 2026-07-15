@@ -1,0 +1,78 @@
+--- a/Quake/main_sdl.c
++++ b/Quake/main_sdl.c
+@@ -75,6 +75,24 @@
+ 
+ static quakeparms_t parms;
+ 
++#ifdef VKQ_IOS
++// vkquake-ios overlay 0002: on iOS the CADisplayLink drives frames via SDL, not a
++// blocking main loop (that would freeze UIKit). One Host_Frame per display refresh.
++extern void	  VKQ_iOS_SetupUI (void);		 // shell: attach the native touch overlay
++extern void	  VKQ_iOS_FramePoll (void);		 // shell: per-frame touch visibility/settings
++extern void	  VKQ_iOS_StartFrameLoop (void); // shell: CADisplayLink (ProMotion-aware)
++static double vkq_ios_lasttime;
++// Called by the shell's CADisplayLink once per display refresh (60/120 Hz).
++void VKQ_iOS_EngineFrame (void)
++{
++	double newtime = Sys_DoubleTime ();
++	double dt = newtime - vkq_ios_lasttime;
++	vkq_ios_lasttime = newtime;
++	VKQ_iOS_FramePoll ();
++	Host_Frame (dt);
++}
++#endif
++
+ int main (int argc, char *argv[])
+ {
+ 	double time, oldtime, newtime;
+@@ -87,6 +105,34 @@
+ 
+ 	parms.errstate = 0;
+ 
++#ifdef VKQ_IOS
++	// overlay 0002: first run — block on a Files folder-picker import until game
++	// data is present, BEFORE the filesystem/basedir is resolved below.
++	{
++		extern void VKQ_iOS_EnsureGameData (void);
++		VKQ_iOS_EnsureGameData ();
++	}
++	// overlay 0002: iOS gives no meaningful argv; point basedir at the app's
++	// Documents dir (Files-visible, where game data is imported/pushed).
++	{
++		extern const char *VKQ_iOS_BasedirPath (void);
++		static char *ios_argv[6];
++		int			 n = 0;
++		ios_argv[n++] = (argc > 0 && argv[0]) ? argv[0] : (char *)"vkquake";
++		ios_argv[n++] = (char *)"-basedir";
++		ios_argv[n++] = (char *)VKQ_iOS_BasedirPath ();
++		const char *bootmap = getenv ("VKQ_BOOT_MAP"); // test hook: jump straight into a level
++		if (bootmap && *bootmap)
++		{
++			ios_argv[n++] = (char *)"+map";
++			ios_argv[n++] = (char *)bootmap;
++		}
++		ios_argv[n] = NULL;
++		parms.argc = argc = n;
++		parms.argv = argv = ios_argv;
++	}
++#endif
++
+ 	COM_InitArgv (parms.argc, parms.argv);
+ 
+ 	isDedicated = (COM_CheckParm ("-dedicated") != 0);
+@@ -114,6 +160,15 @@
+ 	Sys_Printf ("Host_Init\n");
+ 	Host_Init ();
+ 
++#ifdef VKQ_IOS
++	// overlay 0002: register the display-link callback and return; SDL keeps the app
++	// alive via UIApplicationMain. Interval 1 = every display refresh (60/120 Hz).
++	VKQ_iOS_SetupUI ();
++	vkq_ios_lasttime = Sys_DoubleTime ();
++	VKQ_iOS_StartFrameLoop (); // shell owns the CADisplayLink so it can request ProMotion 120 Hz
++	return 0;
++#endif
++
+ 	oldtime = Sys_DoubleTime ();
+ 	if (isDedicated)
+ 	{

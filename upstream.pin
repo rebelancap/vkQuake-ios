@@ -1,0 +1,9 @@
+# vkQuake upstream pin — the tracked source of truth for vendor/vkQuake.
+# To bump: update `commit` below, re-clone/checkout vendor/ at it, re-apply the
+# patch overlay, rebuild oracle + device (one-command drill, Phase 1).
+
+repo=https://github.com/Novum/vkQuake
+branch=master
+commit=8fed52d06154ebb868d3045b71af5ec0d34e7015
+date=2026-07-08
+note=HEAD of master at Phase 0 start ("Fix render_scale bitfield width"). No git submodules. Meson build system.
