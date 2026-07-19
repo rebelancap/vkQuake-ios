@@ -24,14 +24,21 @@ targets:
     platform: iOS
     sources:
       - shell
-      - path: icon/generated
-        optional: true
+      # Compiled asset catalog (Assets.car). The loose-PNG + CFBundleIconFiles
+      # approach rendered on the Home Screen but left a BLANK icon in
+      # SideStore/AltStore's "My Apps" list — those tools resolve the installed
+      # icon via CFBundleIconName -> Assets.car (the modern path), which loose
+      # PNGs don't provide. The visionOS target already ships a real catalog;
+      # this brings iOS in line. actool bakes AppIcon into the car + injects
+      # CFBundleIconName. (icon/generated remains the PNG master.)
+      - path: Assets.xcassets
         buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rebelancap.vkquake
         DEVELOPMENT_TEAM: 57G8J46Z2T
         CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         # NEVER strip: SDL locates the statically-linked MoltenVK via
         # dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr") — archive-time stripping

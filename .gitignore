@@ -35,6 +35,9 @@ CLAUDE.md
 DECISIONS.md
 MEASUREMENTS.md
 QUESTIONS.md
+RELEASING.md
+# full pre-publish git history archive — must never land in the public repo
+*.bundle
 
 # Personal publishing infra (tailnet host + signing key IDs)
 scripts/publish-ota.sh
