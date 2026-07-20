@@ -77,23 +77,38 @@ lipo -info "$LIB"
 IOSDIR="$ROOT/ios"
 [ -f "$IOSDIR/project.yml" ] || { echo "FATAL: ios/project.yml missing" >&2; exit 1; }
 command -v xcodegen >/dev/null || { echo "FATAL: xcodegen not installed (brew install xcodegen)" >&2; exit 1; }
-# app icon: compiled asset catalog (Assets.car). The OLD loose-PNG +
-# CFBundleIconFiles setup rendered on the Home Screen but left a BLANK tile in
-# SideStore/AltStore's "My Apps" list, which resolves the installed icon via
-# CFBundleIconName -> Assets.car. A MULTI-size AppIcon.appiconset compiles
-# cleanly on Xcode 26 actool (the "actool rejects single-size catalogs"
-# q2repro fact is about SINGLE-size only — verified: this multi-size set builds
-# and bakes AppIcon into the car). Sizes generated from the 512px master; the
-# 1024 marketing slot is an upscale (only used in large/store contexts).
-ICON_SRC="$IOSDIR/icon/vkq_icon.png"; ICONSET="$IOSDIR/Assets.xcassets/AppIcon.appiconset"
+# app icon: compiled asset catalog (Assets.car).
+#
+# Two consumers read the icon and they read it DIFFERENTLY:
+#   1. SpringBoard / Home Screen — uses the AppIcon.appiconset (app-icon type).
+#   2. SideStore/AltStore "My Apps" list — calls
+#        UIImage(named: CFBundleIconFiles.last, in: <installed bundle>, compatibleWith: nil)
+#      i.e. UIImage(named: "AppIcon60x60", in: bundle). On a real DEVICE that
+#      resolves ONLY from the compiled Assets.car BY EXACT IMAGE NAME; it does
+#      NOT read the loose top-level PNGs (the simulator DOES read them, which is
+#      why the blank tile never reproduces on the sim — verified with an
+#      icon-resolution probe, 2026-07-19). The app-icon set is stored in the car
+#      under the name "AppIcon", so UIImage(named:"AppIcon60x60") finds nothing
+#      → blank tile. v1.0.0 (loose PNGs, no car) and v1.0.1 (car named "AppIcon")
+#      both blanked for exactly this reason.
+# Fix: ship standalone imagesets NAMED "AppIcon60x60" / "AppIcon76x76" so the car
+# contains those exact names. Keep AppIcon.appiconset for the Home Screen.
+ICON_SRC="$IOSDIR/icon/vkq_icon.png"
+ICONSET="$IOSDIR/Assets.xcassets/AppIcon.appiconset"
+SS60="$IOSDIR/Assets.xcassets/AppIcon60x60.imageset"
+SS76="$IOSDIR/Assets.xcassets/AppIcon76x76.imageset"
 if [ -f "$ICON_SRC" ]; then
-	mkdir -p "$ICONSET"
+	mkdir -p "$ICONSET" "$SS60" "$SS76"
 	sips -z 120 120   "$ICON_SRC" --out "$ICONSET/AppIcon60x60@2x.png"     >/dev/null 2>&1
 	sips -z 180 180   "$ICON_SRC" --out "$ICONSET/AppIcon60x60@3x.png"     >/dev/null 2>&1
 	sips -z 152 152   "$ICON_SRC" --out "$ICONSET/AppIcon76x76@2x.png"     >/dev/null 2>&1
 	sips -z 167 167   "$ICON_SRC" --out "$ICONSET/AppIcon83.5x83.5@2x.png" >/dev/null 2>&1
 	sips -z 1024 1024 "$ICON_SRC" --out "$ICONSET/AppIcon1024.png"         >/dev/null 2>&1
-	echo "== icon catalog refreshed from $ICON_SRC"
+	# SideStore/AltStore "My Apps" imagesets (exact names UIImage(named:) asks for)
+	sips -z 120 120   "$ICON_SRC" --out "$SS60/icon60@2x.png"              >/dev/null 2>&1
+	sips -z 180 180   "$ICON_SRC" --out "$SS60/icon60@3x.png"              >/dev/null 2>&1
+	sips -z 152 152   "$ICON_SRC" --out "$SS76/icon76@2x.png"              >/dev/null 2>&1
+	echo "== icon catalog refreshed from $ICON_SRC (appiconset + AppIcon60x60/76x76 imagesets)"
 else
 	echo "== WARNING: $ICON_SRC missing — app will build with no icon" >&2
 fi
