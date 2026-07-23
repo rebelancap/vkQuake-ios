@@ -31,6 +31,7 @@ void vkq_setting_set_f (const char *key, float val)
 // shell-visionos externs (panel/stereo live-tuning)
 extern void VKQ_iOS_Apply3DSettings (void);
 extern void VKQ_Recenter3D (void);
+extern int	vkq3d_immersive_on; // ios_touch.m — 1 while the 3D panel is up
 #endif
 
 void VKQ_iOS_ApplySettingsToEngine (void)
@@ -49,10 +50,11 @@ void VKQ_iOS_ApplySettingsToEngine (void)
 	VKQ_TouchCommand (fovcmd);
 	VKQ_iOS_SetRefresh ();
 #ifdef VKQ_VISIONOS
-	VKQ_iOS_Apply3DSettings (); // includes Surroundings Dimming (curve applied engine-side)
-	// engine-drawn FPS shows ON the 3D panel (the UIKit label lives on the
-	// 2D window, which is behind the curtain during 3D)
-	VKQ_TouchCommand (vkq_setting_f ("vp3dFps", 0.0f) > 0.5f ? "scr_showfps 1\n" : "scr_showfps 0\n");
+	VKQ_iOS_Apply3DSettings (); // includes Surroundings Dimming + panel FPS on entry
+	// Engine-drawn FPS belongs to the 3D PANEL only (the UIKit "FPS Counter"
+	// label owns the 2D window). Gate on being in 3D so 2D never double-counts,
+	// and so a live toggle of "FPS on Panel" while in 3D applies immediately.
+	VKQ_TouchCommand ((vkq3d_immersive_on && vkq_setting_f ("vp3dFps", 0.0f) > 0.5f) ? "scr_showfps 1\n" : "scr_showfps 0\n");
 #endif
 }
 

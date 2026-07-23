@@ -306,6 +306,14 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 int vkq3d_immersive_on = 0;
 
 static VKQTouchView *g_touch;
+
+// The GAME window (the one whose swapchain freezes in 3D) — for shell overlays
+// that must land on it (the 3D curtain). "The key window" is a guess that can
+// pick a SwiftUI ornament/sheet hosting window on visionOS.
+UIWindow *VKQ_iOS_GameWindow (void)
+{
+	return (UIWindow *)g_touch.superview;
+}
 static UIButton		*g_back;
 static UIButton		*g_settings; // menu-only iOS settings button (shown with the back button)
 static UIView		*g_catcher;	 // transparent; a tap during the attract demo opens the menu
@@ -880,10 +888,20 @@ void VKQ_iOS_FramePoll (void)
 		fps.textAlignment = NSTextAlignmentCenter;
 		fps.layer.cornerRadius = 4;
 		fps.layer.masksToBounds = YES;
-		CGFloat fx = win.bounds.size.width - MAX (win.safeAreaInsets.right, 8.0) - 42; // nudged right
-		CGFloat fy = MIN (win.safeAreaInsets.top, 12.0) + 4; // clamp bogus landscape top inset
-		fps.frame = CGRectMake (fx, fy, 42, 22);
+		// Auto Layout, pinned to the top-RIGHT safe-area corner. The old absolute
+		// frame was computed ONCE from win.bounds at creation and went stale when
+		// the window resized (the visionOS free-resizing window / a landscape
+		// relayout), stranding the label at the old x — the "top-centre-left"
+		// bug. Constraints re-anchor on every layout for free.
+		fps.translatesAutoresizingMaskIntoConstraints = NO;
 		[win addSubview:fps];
+		UILayoutGuide *safe = win.safeAreaLayoutGuide;
+		[NSLayoutConstraint activateConstraints:@[
+			[fps.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-8],
+			[fps.topAnchor constraintEqualToAnchor:safe.topAnchor constant:4],
+			[fps.widthAnchor constraintEqualToConstant:42],
+			[fps.heightAnchor constraintEqualToConstant:22],
+		]];
 	}
 	else if (!wantFps && fps)
 	{

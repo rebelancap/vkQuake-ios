@@ -20,3 +20,11 @@ void VKQ_Set3DPanel (float dist, float halfW, float halfH);
 void VKQ_Set3DHeight (float h); // POSITION height (metres above eye level)
 void VKQ_Set3DDim (float dim);	// surroundings dimming 0..1 (0=passthrough, 1=void)
 void VKQ_Recenter3D (void);		// re-anchor the panel to the current head pose
+
+// Eye-tracked foveation kill switch, read at CompositorLayer config time
+// (VKQVisionApp.swift). 1 = enabled (default): concentrates rasterization
+// density at the gaze point, de-blurring the 3D panel; 0 = off. Persisted in
+// settings — toggle with the `vkq3dfov` console command, then re-enter 3D (the
+// A/B path, and the recovery path if a future OS rejects the foveated config).
+int	 VKQ_Get3DFoveationWanted (void);
+void VKQ_Set3DFoveation (int on);

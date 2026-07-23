@@ -106,6 +106,21 @@ void VKQ_Set3DDim (float dim)
 	vkq_dimLevel = 1.0f - powf (1.0f - dim, 2.2f);
 }
 
+// --- foveation kill switch ---------------------------------------------------
+// Persisted via the shared settings store (ios_settings.m) so a bad-config
+// recovery survives relaunch; default ON — foveation is the 3D-panel de-blur.
+extern float vkq_setting_f (const char *key, float def);
+extern void	 vkq_setting_set_f (const char *key, float val);
+
+int VKQ_Get3DFoveationWanted (void)
+{
+	return vkq_setting_f ("vp3dFoveation", 1.0f) > 0.5f ? 1 : 0;
+}
+void VKQ_Set3DFoveation (int on)
+{
+	vkq_setting_set_f ("vp3dFoveation", on ? 1.0f : 0.0f);
+}
+
 static simd_float4x4 vkq_make_screen_anchor (simd_float4x4 originFromDevice)
 {
 	simd_float3 headPos = originFromDevice.columns[3].xyz;
@@ -418,8 +433,7 @@ void VKQ_Immersive_Run (cp_layer_renderer_t layer_renderer)
 			}
 			int eyeDone = VKQ_Get3DEyeDone ();
 
-			id<MTLTexture> color = cp_drawable_get_color_texture (drawable, 0);
-			id<MTLTexture> depth = cp_drawable_get_depth_texture (drawable, 0);
+			id<MTLTexture> color = cp_drawable_get_color_texture (drawable, 0); // format probe only
 			size_t		   views = cp_drawable_get_view_count (drawable);
 
 			simd_float4x4 placement =
@@ -448,16 +462,36 @@ void VKQ_Immersive_Run (cp_layer_renderer_t layer_renderer)
 
 			for (size_t v = 0; v < views; v++)
 			{
+				// Layout-agnostic per-view targeting via the view's texture map
+				// (dedicated layout: a texture per view, slice 0; layered:
+				// texture 0, slice per view). With foveation each DEDICATED view
+				// carries its OWN rasterization rate map, indexed by the view's
+				// texture index — attaching the wrong eye's map is the "right eye
+				// fisheye that warps with head motion" trap. Never hardcode
+				// texture 0 / slice v.
+				cp_view_t			  view = cp_drawable_get_view (drawable, v);
+				cp_view_texture_map_t tmap = cp_view_get_view_texture_map (view);
+				size_t				  texIdx = cp_view_texture_map_get_texture_index (tmap);
+				size_t				  slice = cp_view_texture_map_get_slice_index (tmap);
+				MTLViewport			  vp = cp_view_texture_map_get_viewport (tmap);
+
 				MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-				pass.colorAttachments[0].texture = color;
-				pass.colorAttachments[0].slice = v; // this eye's array slice
+				pass.colorAttachments[0].texture = cp_drawable_get_color_texture (drawable, texIdx);
+				pass.colorAttachments[0].slice = slice;
 				pass.colorAttachments[0].loadAction = MTLLoadActionClear;
 				pass.colorAttachments[0].storeAction = MTLStoreActionStore;
 				pass.colorAttachments[0].clearColor = MTLClearColorMake (0.0, 0.0, 0.0, 0.0);
-				if (depth)
+				// Foveation: attach this view's rasterization rate map. Count is 0
+				// when foveation is off (e.g. the simulator), so this is nil-safe.
+				size_t rmCount = cp_drawable_get_rasterization_rate_map_count (drawable);
+				if (rmCount > 0)
+					pass.rasterizationRateMap =
+						cp_drawable_get_rasterization_rate_map (drawable, texIdx < rmCount ? texIdx : 0);
+				id<MTLTexture> depthTex = cp_drawable_get_depth_texture (drawable, texIdx);
+				if (depthTex)
 				{
-					pass.depthAttachment.texture = depth;
-					pass.depthAttachment.slice = v;
+					pass.depthAttachment.texture = depthTex;
+					pass.depthAttachment.slice = slice;
 					pass.depthAttachment.loadAction = MTLLoadActionClear;
 					pass.depthAttachment.storeAction = MTLStoreActionStore;
 					pass.depthAttachment.clearDepth = 1.0;
@@ -466,6 +500,9 @@ void VKQ_Immersive_Run (cp_layer_renderer_t layer_renderer)
 				id<MTLTexture> tex = (v < 2 && vkq_eyeCopy[v]) ? vkq_eyeCopy[v] : monoTex;
 
 				id<MTLRenderCommandEncoder> enc = [command_buffer renderCommandEncoderWithDescriptor:pass];
+				// Foveation contract: rasterize in the view's LOGICAL viewport
+				// (from the texture map); the rate map compresses it to physical.
+				[enc setViewport:vp];
 				// Surroundings dimming under the panel (0 = passthrough, 1 = void).
 				float dimNow = vkq_dimLevel;
 				if (dimNow > 0.003f && vkq_dimPipeline)
@@ -477,7 +514,6 @@ void VKQ_Immersive_Run (cp_layer_renderer_t layer_renderer)
 				}
 				if (tex && vkq_pipeline)
 				{
-					cp_view_t	  view = cp_drawable_get_view (drawable, v);
 					simd_float4x4 deviceFromEye = cp_view_get_transform (view);
 					simd_float4x4 eyeFromOrigin = simd_inverse (simd_mul (originFromDevice, deviceFromEye));
 					simd_float4x4 proj = matrix_identity_float4x4;

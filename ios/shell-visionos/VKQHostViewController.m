@@ -66,7 +66,16 @@ static void VKQ_Enter3DCommit (void)
 	// other restart is scheduled, so the animation is harmless.
 	dispatch_after (dispatch_time (DISPATCH_TIME_NOW, (int64_t) (1.5 * NSEC_PER_SEC)), dispatch_get_main_queue (), ^{
 		if (vkq3d_immersive_on)
+		{
 			VKQ_3DSmallWindow ();
+			VKQ_SetCurtain (true); // re-assert on top once the park is underway
+			// …and once the park ANIMATION has fully settled (belt & suspenders
+			// for the device-only animated-layout path the sim can't reproduce).
+			dispatch_after (dispatch_time (DISPATCH_TIME_NOW, (int64_t) (1.5 * NSEC_PER_SEC)), dispatch_get_main_queue (), ^{
+				if (vkq3d_immersive_on)
+					VKQ_SetCurtain (true);
+			});
+		}
 	});
 }
 
@@ -109,6 +118,12 @@ void VKQ_iOS_Apply3DSettings (void)
 	VKQ_Set3DParams (vkq_setting_f ("vp3dSep", 2.5f), vkq_setting_f ("vp3dConv", 240.0f)); // 240 units ≈ 20 ft
 	VKQ_Set3DBothEyes (1); // always on (setting removed — it's pure upside here)
 	VKQ_Set3DDim (vkq_setting_f ("vp3dDim", 0.8f));
+	// Engine-drawn FPS on the panel ("FPS on Panel" setting). The UIKit FPS
+	// label lives on the 2D window, which is behind the curtain in 3D — so the
+	// panel needs the engine counter. Apply it on 3D ENTRY (not only when the
+	// settings sheet changes) or toggling it before entering 3D silently no-ops.
+	extern void VKQ_TouchCommand (const char *cmd);
+	VKQ_TouchCommand (vkq_setting_f ("vp3dFps", 0.0f) > 0.5f ? "scr_showfps 1\n" : "scr_showfps 0\n");
 }
 
 // Target render size (PIXELS) for the panel's current shape: the aspect comes
@@ -164,6 +179,10 @@ void VKQ_iOS_Sync3DAspect (void)
 // exit-freeze report): the engine was still in offscreen 3D mode.
 void VKQ_Exit3DFinalize (void)
 {
+	// Panel FPS off back in 2D — the UIKit "FPS Counter" label takes over there,
+	// and leaving the engine counter on would double it up on the window.
+	extern void VKQ_TouchCommand (const char *cmd);
+	VKQ_TouchCommand ("scr_showfps 0\n");
 	dispatch_async (dispatch_get_main_queue (), ^{
 		// Restore the window FIRST and let its animation finish before the
 		// back-to-2D restart (restart + geometry animation = swapchain wedge).
@@ -199,18 +218,39 @@ static void VKQ_SetCurtain (bool show)
 	if (show)
 	{
 		if (vkq_curtain)
+		{
+			// Re-assert: the parked-window animation/layout (or a view added
+			// later, e.g. the FPS label) can displace or cover the curtain —
+			// put it back on top of whatever the window holds now.
+			NSLog (@"[vkquake] curtain re-assert (superview=%p)", vkq_curtain.superview);
+			[vkq_curtain.superview bringSubviewToFront:vkq_curtain];
 			return;
-		UIWindow *win = nil;
-		for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
-			if ([s isKindOfClass:UIWindowScene.class])
-				for (UIWindow *w in ((UIWindowScene *)s).windows)
-					if (w.isKeyWindow || win == nil)
-						win = w;
+		}
+		// Land on the GAME window explicitly — "the key window" can be a SwiftUI
+		// ornament/sheet hosting window right after a button tap on visionOS.
+		extern UIWindow *VKQ_iOS_GameWindow (void);
+		UIWindow *win = VKQ_iOS_GameWindow ();
+		NSLog (@"[vkquake] curtain: gameWindow=%p", win);
 		if (!win)
+			for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+				if ([s isKindOfClass:UIWindowScene.class])
+					for (UIWindow *w in ((UIWindowScene *)s).windows)
+						if (w.isKeyWindow || win == nil)
+							win = w;
+		if (!win)
+		{
+			NSLog (@"[vkquake] curtain: NO WINDOW FOUND — curtain skipped");
 			return;
-		vkq_curtain = [[UIView alloc] initWithFrame:win.bounds];
+		}
+		vkq_curtain = [[UIView alloc] init];
 		vkq_curtain.backgroundColor = UIColor.blackColor;
-		vkq_curtain.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+		// EDGE CONSTRAINTS, not frame+autoresizing: once anything constraint-
+		// based lives on the window (the FPS label), the window lays out with
+		// Auto Layout, and on-device the ANIMATED park left an autoresizing
+		// curtain at stale pre-park geometry (regression: parked card showed the
+		// frozen game frame, no "Playing in 3D"). Constraints track any window
+		// geometry, animated or not.
+		vkq_curtain.translatesAutoresizingMaskIntoConstraints = NO;
 		UILabel *l = [UILabel new];
 		l.text = @"Playing in 3D";
 		l.numberOfLines = 0;
@@ -225,6 +265,13 @@ static void VKQ_SetCurtain (bool show)
 			[l.widthAnchor constraintLessThanOrEqualToAnchor:vkq_curtain.widthAnchor multiplier:0.8],
 		]];
 		[win addSubview:vkq_curtain];
+		[NSLayoutConstraint activateConstraints:@[
+			[vkq_curtain.leadingAnchor constraintEqualToAnchor:win.leadingAnchor],
+			[vkq_curtain.trailingAnchor constraintEqualToAnchor:win.trailingAnchor],
+			[vkq_curtain.topAnchor constraintEqualToAnchor:win.topAnchor],
+			[vkq_curtain.bottomAnchor constraintEqualToAnchor:win.bottomAnchor],
+		]];
+		NSLog (@"[vkquake] curtain up on %p (%.0fx%.0f)", win, win.bounds.size.width, win.bounds.size.height);
 	}
 	else
 	{
@@ -273,6 +320,16 @@ static void VKQ_Cmd_3DTune (void)
 		dispatch_async (dispatch_get_main_queue (), ^{ VKQ_iOS_Sync3DAspect (); });
 	}
 	Con_Printf ("vkq3dtune: sep=%s conv=%s\n", Cmd_Argv (1), Cmd_Argv (2));
+}
+
+// vkq3dfov [0|1] — eye-tracked foveation (the 3D-panel de-blur). No arg flips.
+// Persisted; read at CompositorLayer config time, so re-enter 3D to apply — the
+// A/B toggle and the recovery path if a future OS rejects the foveated config.
+static void VKQ_Cmd_3DFov (void)
+{
+	int on = (Cmd_Argc () > 1) ? atoi (Cmd_Argv (1)) : !VKQ_Get3DFoveationWanted ();
+	VKQ_Set3DFoveation (on);
+	Con_Printf ("vkq3dfov: foveation %s — re-enter 3D to apply\n", on ? "ON" : "off");
 }
 
 // --- 2D <-> 3D transitions ----------------------------------------------------
@@ -392,6 +449,7 @@ void VKQ_Immersive_Ended (void)
 		vkq_engine_main (1, argv); // returns after Host_Init + display-link start
 		Cmd_AddCommand2 ("vkq3d", VKQ_Cmd_3D, VKQ_CMD_SRC_COMMAND);
 		Cmd_AddCommand2 ("vkq3dtune", VKQ_Cmd_3DTune, VKQ_CMD_SRC_COMMAND);
+		Cmd_AddCommand2 ("vkq3dfov", VKQ_Cmd_3DFov, VKQ_CMD_SRC_COMMAND);
 		Cmd_AddCommand2 ("vkqsettings", VKQ_Cmd_Settings, VKQ_CMD_SRC_COMMAND);
 		NSLog (@"[vkquake] SwiftUI shell: engine booted, 3D commands registered");
 	});

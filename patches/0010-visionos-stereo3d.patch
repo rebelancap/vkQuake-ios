@@ -1,3 +1,130 @@
+Binary files a/.DS_Store and b/.DS_Store differ
+diff -ruN a/Quake/gl_rmain.c b/Quake/gl_rmain.c
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -342,6 +342,25 @@
+ 	TranslationMatrix (translation_matrix, -r_refdef.vieworg[0], -r_refdef.vieworg[1], -r_refdef.vieworg[2]);
+ 	MatrixMultiply (vulkan_globals.view_matrix, translation_matrix);
+ 
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0010: stereoscopic eye offset for the visionOS 3D panel.
++	// The shell renders alternating eyes (1=left, 2=right). Camera shifts ±sep/2
++	// along view-space X (a post-translation on the composed view matrix — the
++	// affine bottom row keeps columns 0-2 unchanged), and the projection gets the
++	// matching off-axis skew so parallax is zero at the convergence distance:
++	// objects at vkq_stereo3d_conv units appear AT the panel, nearer pops out.
++	{
++		extern int	 vkq_stereo3d_active, vkq_stereo3d_eye;
++		extern float vkq_stereo3d_sep, vkq_stereo3d_conv;
++		if (vkq_stereo3d_active && vkq_stereo3d_eye)
++		{
++			const float e = (vkq_stereo3d_eye == 2 ? 1.0f : -1.0f) * 0.5f * vkq_stereo3d_sep;
++			vulkan_globals.view_matrix[3 * 4 + 0] -= e;
++			vulkan_globals.projection_matrix[2 * 4 + 0] = -vulkan_globals.projection_matrix[0 * 4 + 0] * e / vkq_stereo3d_conv;
++		}
++	}
++#endif
++
+ 	// View projection matrix
+ 	memcpy (vulkan_globals.view_projection_matrix, vulkan_globals.projection_matrix, 16 * sizeof (float));
+ 	MatrixMultiply (vulkan_globals.view_projection_matrix, vulkan_globals.view_matrix);
+diff -ruN a/Quake/gl_screen.c b/Quake/gl_screen.c
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -648,10 +648,20 @@
+ 	{
+ 		char st[16];
+ 		int	 x, y;
++#ifdef VKQ_VISIONOS
++		// overlay 0010: on the 3D panel show just the number (a request),
++		// pinned TOP-RIGHT to match the 2D HUD FPS — the vanilla bottom-right
++		// lands off the user's gaze on the wide world-locked panel.
++		q_snprintf (st, sizeof (st), "%4.0f", lastfps);
++		x = 320 - (strlen (st) << 3);
++		y = CHARACTER_SIZE / 2;
++		GL_SetCanvas (cbx, CANVAS_TOPRIGHT);
++#else
+ 		q_snprintf (st, sizeof (st), "%4.0f fps", lastfps);
+ 		x = 320 - (strlen (st) << 3);
+ 		y = 200 - CHARACTER_SIZE;
+ 		GL_SetCanvas (cbx, CANVAS_BOTTOMRIGHT);
++#endif
+ 		Draw_String (cbx, x, y, st);
+ 	}
+ }
+@@ -1709,8 +1719,36 @@
+ needs almost the entire 256k of stack space!
+ ==================
+ */
++#ifdef VKQ_VISIONOS
++static void SCR_UpdateScreenOnce (qboolean use_tasks);
++
++// overlay 0010: stereoscopic BOTH-EYES rendering — in 3D, render the complete
++// frame twice per host frame (left then right, same game time, eye-offset
++// matrices only) into the per-eye present images. Each eye updates at the full
++// engine rate with zero inter-eye lag — the alternating fallback
++// (vkq_stereo3d_both 0) halves each eye's rate and carries one frame of
++// disparity, which shows as judder while moving. The eye global is set
++// synchronously between renders: the tasks path joins draw_done inside each
++// render, so frame N's matrices are computed before eye N+1 is selected.
+ void SCR_UpdateScreen (qboolean use_tasks)
+ {
++	extern int vkq_stereo3d_active, vkq_stereo3d_eye, vkq_stereo3d_both;
++	if (vkq_stereo3d_active && vkq_stereo3d_both)
++	{
++		vkq_stereo3d_eye = 1;
++		SCR_UpdateScreenOnce (use_tasks);
++		vkq_stereo3d_eye = 2;
++		SCR_UpdateScreenOnce (use_tasks);
++		return;
++	}
++	SCR_UpdateScreenOnce (use_tasks);
++}
++
++static void SCR_UpdateScreenOnce (qboolean use_tasks)
++#else
++void SCR_UpdateScreen (qboolean use_tasks)
++#endif
++{
+ 	if (!scr_initialized || !con_initialized || in_update_screen)
+ 		return; // not initialized yet
+ 
+@@ -1740,6 +1778,16 @@
+ 	// decide on the height of the console
+ 	con_forcedup = !cl.worldmodel || cls.signon != SIGNONS;
+ 
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0010: in stereoscopic 3D the 2D window is hidden — never
++	// touch its swapchain (the drawable acquire stalls MoltenVK); the frame instead
++	// lands in the offscreen present image the immersive compositor samples.
++	extern int	   vkq_stereo3d_active;
++	const qboolean vkq_to_swapchain = !vkq_stereo3d_active;
++#else
++	const qboolean vkq_to_swapchain = true;
++#endif
++
+ 	task_handle_t begin_rendering_task = INVALID_TASK_HANDLE;
+ 	if (!GL_BeginRendering (use_tasks, &begin_rendering_task, &glwidth, &glheight))
+ 	{
+@@ -1759,7 +1807,7 @@
+ 		task_handle_t setup_frame_task = Task_AllocateAndAssignFunc (SCR_SetupFrame, NULL, 0);
+ 		V_RenderView (use_tasks, begin_rendering_task, setup_frame_task, draw_done_task);
+ 		task_handle_t draw_gui_task = Task_AllocateAndAssignFunc (SCR_DrawGUI, NULL, 0);
+-		task_handle_t end_rendering_task = GL_EndRendering (use_tasks, true);
++		task_handle_t end_rendering_task = GL_EndRendering (use_tasks, vkq_to_swapchain);
+ 
+ 		Task_AddDependency (begin_rendering_task, draw_gui_task);
+ 		Task_AddDependency (setup_frame_task, draw_gui_task);
+@@ -1781,7 +1829,7 @@
+ 		S_ExtraUpdate ();
+ 		SCR_DrawGUI (NULL);
+ 		SCR_DrawDone (NULL);
+-		GL_EndRendering (false, true);
++		GL_EndRendering (false, vkq_to_swapchain);
+ 	}
+ 
+ 	in_update_screen = false;
+diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
 @@ -152,6 +152,34 @@
@@ -79,11 +206,10 @@
  	uint32_t i;
  	VkResult err;
  
-@@ -3070,7 +3121,92 @@
- 			Sys_Error ("vkCreateFramebuffer failed with code %i", (int)err);
+@@ -3071,6 +3122,91 @@
  
  		GL_SetObjectName ((uint64_t)ui_framebuffers[i], VK_OBJECT_TYPE_FRAMEBUFFER, "ui");
-+	}
+ 	}
 +
 +#ifdef VKQ_VISIONOS
 +	// overlay 0010: offscreen "present image" for stereoscopic 3D. In 3D the swapchain
@@ -167,7 +293,7 @@
 +
 +		vkq_stereo_present_w = (int)vid.width;
 +		vkq_stereo_present_h = (int)vid.height;
- 	}
++	}
 +#endif
  }
  
@@ -281,12 +407,10 @@
  	task_handle_t end_rendering_task = INVALID_TASK_HANDLE;
  	if (use_tasks)
  		end_rendering_task = Task_AllocateAndAssignFunc ((task_func_t)GL_EndRenderingTask, &parms, sizeof (parms));
-@@ -5414,5 +5615,125 @@
- 	if (vulkan_globals.want_full_screen_exclusive)
- 	{
+@@ -5416,3 +5617,123 @@
  		vid.restart_next_frame = true;
-+	}
-+}
+ 	}
+ }
 +
 +#ifdef VKQ_VISIONOS
 +// vkquake-ios overlay 0010 — C accessors for the visionOS stereoscopic shell.
@@ -339,14 +463,14 @@
 +	{
 +		vid.width = w;
 +		vid.height = h;
- 	}
++	}
 +	else
 +	{
 +		vid.width = VID_GetCurrentWidth ();	  // override already cleared above,
 +		vid.height = VID_GetCurrentHeight (); // so these report the window
 +	}
 +	vid.restart_next_frame = true;
- }
++}
 +
 +int VKQ_Get3DBothEyes (void)
 +{
@@ -407,121 +531,7 @@
 +		SDL_SetWindowSize (draw_context, w, h);
 +}
 +#endif
---- a/Quake/gl_rmain.c
-+++ b/Quake/gl_rmain.c
-@@ -342,6 +342,25 @@
- 	TranslationMatrix (translation_matrix, -r_refdef.vieworg[0], -r_refdef.vieworg[1], -r_refdef.vieworg[2]);
- 	MatrixMultiply (vulkan_globals.view_matrix, translation_matrix);
- 
-+#ifdef VKQ_VISIONOS
-+	// vkquake-ios overlay 0010: stereoscopic eye offset for the visionOS 3D panel.
-+	// The shell renders alternating eyes (1=left, 2=right). Camera shifts ±sep/2
-+	// along view-space X (a post-translation on the composed view matrix — the
-+	// affine bottom row keeps columns 0-2 unchanged), and the projection gets the
-+	// matching off-axis skew so parallax is zero at the convergence distance:
-+	// objects at vkq_stereo3d_conv units appear AT the panel, nearer pops out.
-+	{
-+		extern int	 vkq_stereo3d_active, vkq_stereo3d_eye;
-+		extern float vkq_stereo3d_sep, vkq_stereo3d_conv;
-+		if (vkq_stereo3d_active && vkq_stereo3d_eye)
-+		{
-+			const float e = (vkq_stereo3d_eye == 2 ? 1.0f : -1.0f) * 0.5f * vkq_stereo3d_sep;
-+			vulkan_globals.view_matrix[3 * 4 + 0] -= e;
-+			vulkan_globals.projection_matrix[2 * 4 + 0] = -vulkan_globals.projection_matrix[0 * 4 + 0] * e / vkq_stereo3d_conv;
-+		}
-+	}
-+#endif
-+
- 	// View projection matrix
- 	memcpy (vulkan_globals.view_projection_matrix, vulkan_globals.projection_matrix, 16 * sizeof (float));
- 	MatrixMultiply (vulkan_globals.view_projection_matrix, vulkan_globals.view_matrix);
---- a/Quake/gl_screen.c
-+++ b/Quake/gl_screen.c
-@@ -648,7 +648,12 @@
- 	{
- 		char st[16];
- 		int	 x, y;
-+#ifdef VKQ_VISIONOS
-+		// overlay 0010: on the 3D panel show just the number (a request)
-+		q_snprintf (st, sizeof (st), "%4.0f", lastfps);
-+#else
- 		q_snprintf (st, sizeof (st), "%4.0f fps", lastfps);
-+#endif
- 		x = 320 - (strlen (st) << 3);
- 		y = 200 - CHARACTER_SIZE;
- 		GL_SetCanvas (cbx, CANVAS_BOTTOMRIGHT);
-@@ -1709,8 +1714,36 @@
- needs almost the entire 256k of stack space!
- ==================
- */
-+#ifdef VKQ_VISIONOS
-+static void SCR_UpdateScreenOnce (qboolean use_tasks);
-+
-+// overlay 0010: stereoscopic BOTH-EYES rendering — in 3D, render the complete
-+// frame twice per host frame (left then right, same game time, eye-offset
-+// matrices only) into the per-eye present images. Each eye updates at the full
-+// engine rate with zero inter-eye lag — the alternating fallback
-+// (vkq_stereo3d_both 0) halves each eye's rate and carries one frame of
-+// disparity, which shows as judder while moving. The eye global is set
-+// synchronously between renders: the tasks path joins draw_done inside each
-+// render, so frame N's matrices are computed before eye N+1 is selected.
- void SCR_UpdateScreen (qboolean use_tasks)
- {
-+	extern int vkq_stereo3d_active, vkq_stereo3d_eye, vkq_stereo3d_both;
-+	if (vkq_stereo3d_active && vkq_stereo3d_both)
-+	{
-+		vkq_stereo3d_eye = 1;
-+		SCR_UpdateScreenOnce (use_tasks);
-+		vkq_stereo3d_eye = 2;
-+		SCR_UpdateScreenOnce (use_tasks);
-+		return;
-+	}
-+	SCR_UpdateScreenOnce (use_tasks);
-+}
-+
-+static void SCR_UpdateScreenOnce (qboolean use_tasks)
-+#else
-+void SCR_UpdateScreen (qboolean use_tasks)
-+#endif
-+{
- 	if (!scr_initialized || !con_initialized || in_update_screen)
- 		return; // not initialized yet
- 
-@@ -1740,6 +1773,16 @@
- 	// decide on the height of the console
- 	con_forcedup = !cl.worldmodel || cls.signon != SIGNONS;
- 
-+#ifdef VKQ_VISIONOS
-+	// vkquake-ios overlay 0010: in stereoscopic 3D the 2D window is hidden — never
-+	// touch its swapchain (the drawable acquire stalls MoltenVK); the frame instead
-+	// lands in the offscreen present image the immersive compositor samples.
-+	extern int	   vkq_stereo3d_active;
-+	const qboolean vkq_to_swapchain = !vkq_stereo3d_active;
-+#else
-+	const qboolean vkq_to_swapchain = true;
-+#endif
-+
- 	task_handle_t begin_rendering_task = INVALID_TASK_HANDLE;
- 	if (!GL_BeginRendering (use_tasks, &begin_rendering_task, &glwidth, &glheight))
- 	{
-@@ -1759,7 +1802,7 @@
- 		task_handle_t setup_frame_task = Task_AllocateAndAssignFunc (SCR_SetupFrame, NULL, 0);
- 		V_RenderView (use_tasks, begin_rendering_task, setup_frame_task, draw_done_task);
- 		task_handle_t draw_gui_task = Task_AllocateAndAssignFunc (SCR_DrawGUI, NULL, 0);
--		task_handle_t end_rendering_task = GL_EndRendering (use_tasks, true);
-+		task_handle_t end_rendering_task = GL_EndRendering (use_tasks, vkq_to_swapchain);
- 
- 		Task_AddDependency (begin_rendering_task, draw_gui_task);
- 		Task_AddDependency (setup_frame_task, draw_gui_task);
-@@ -1781,7 +1824,7 @@
- 		S_ExtraUpdate ();
- 		SCR_DrawGUI (NULL);
- 		SCR_DrawDone (NULL);
--		GL_EndRendering (false, true);
-+		GL_EndRendering (false, vkq_to_swapchain);
- 	}
- 
- 	in_update_screen = false;
+diff -ruN a/Quake/in_sdl3.c b/Quake/in_sdl3.c
 --- a/Quake/in_sdl3.c
 +++ b/Quake/in_sdl3.c
 @@ -132,12 +132,31 @@
@@ -556,6 +566,7 @@
  			vid.width = event.window.data1;
  			vid.height = event.window.data2;
  			vid.restart_next_frame = true;
+diff -ruN a/Quake/main_sdl.c b/Quake/main_sdl.c
 --- a/Quake/main_sdl.c
 +++ b/Quake/main_sdl.c
 @@ -24,7 +24,7 @@

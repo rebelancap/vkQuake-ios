@@ -67,11 +67,29 @@ struct VKQCompositorConfiguration: CompositorLayerConfiguration {
     func makeConfiguration(capabilities: LayerRenderer.Capabilities,
                            configuration: inout LayerRenderer.Configuration) {
         let layouts = capabilities.supportedLayouts(options: [])
-        configuration.layout = layouts.contains(.layered) ? .layered : .dedicated
-        configuration.isFoveationEnabled = false
+        // Eye-tracked foveation concentrates rasterization density where the
+        // user looks — the same mechanism that keeps system 2D windows crisp.
+        // Our panel pass renders with the drawable's rasterization rate map
+        // (VKQImmersive.m); enabling it de-blurs the 3D panel. The old
+        // "foveation OFF" line was a MoltenVK/Vulkan-era constraint that this
+        // native-Metal composite pass never had. CVar-gated for A/B + recovery.
+        let fov = capabilities.supportsFoveation && VKQ_Get3DFoveationWanted() != 0
+        configuration.isFoveationEnabled = fov
+        // TRAP: with LAYERED layout the drawable carries ONE multi-layer rate
+        // map, and our per-slice passes always rasterize with layer 0's (left
+        // eye's) map — the right eye becomes a head-coupled fisheye. Dedicated
+        // layout gives each eye its own texture AND its own rate map, which the
+        // texture-map-driven loop targets correctly.
+        if fov && layouts.contains(.dedicated) {
+            configuration.layout = .dedicated
+        } else {
+            configuration.layout = layouts.contains(.layered) ? .layered : .dedicated
+        }
         configuration.colorFormat = capabilities.supportedColorFormats.first ?? .bgra8Unorm_srgb
         configuration.depthFormat = capabilities.supportedDepthFormats.first ?? .depth32Float
-        NSLog("[vkquake] Swift: compositor configured (layered=\(layouts.contains(.layered)))")
+        // Do NOT raise maxRenderQuality — it aborts the compositor at 3D entry
+        // (simulator AND device). Foveation alone is the crispness lever.
+        NSLog("[vkquake] Swift: compositor configured (layered=\(layouts.contains(.layered)) foveation=\(fov))")
     }
 }
 
