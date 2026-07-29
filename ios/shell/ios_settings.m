@@ -48,6 +48,14 @@ void VKQ_iOS_ApplySettingsToEngine (void)
 	char fovcmd[32];
 	snprintf (fovcmd, sizeof (fovcmd), "fov %.0f\n", vkq_setting_f ("fov", 90.0f));
 	VKQ_TouchCommand (fovcmd);
+	// Brightness is stored 0..1 (dark..bright) and drives the engine's gamma,
+	// which runs the other way over the same range its own menu uses: 1.0 is
+	// darkest, 0.5 brightest. The engine default (gamma 0.9) is 0.2 here.
+	float b = vkq_setting_f ("brightness", 0.2f);
+	b = fmaxf (0.0f, fminf (1.0f, b));
+	char gammacmd[32];
+	snprintf (gammacmd, sizeof (gammacmd), "gamma %.3f\n", 1.0f - 0.5f * b);
+	VKQ_TouchCommand (gammacmd);
 	VKQ_iOS_SetRefresh ();
 #ifdef VKQ_VISIONOS
 	VKQ_iOS_Apply3DSettings (); // includes Surroundings Dimming + panel FPS on entry
@@ -67,6 +75,20 @@ typedef enum
 	ROW_INFO, // read-only feedback (panel width / aspect / height)
 	ROW_SEG	  // segmented m|ft (units)
 } VKQRowType;
+
+// Live readout for a slider row, so you can see what you are sliding TO rather
+// than guessing from the knob position. Multipliers read "1.25x", angles carry
+// a degree sign, 0..1 amounts read as a percentage.
+static NSString *vkq_value_text (NSString *key, float v)
+{
+	if ([key isEqualToString:@"fov"])
+		return [NSString stringWithFormat:@"%.0f°", v];
+	if ([key isEqualToString:@"touchOpacity"] || [key isEqualToString:@"brightness"])
+		return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
+	if ([key isEqualToString:@"gyro"]) // 0 disables gyro aim entirely — say so
+		return v < 0.05f ? @"Off" : [NSString stringWithFormat:@"%.2f×", v];
+	return [NSString stringWithFormat:@"%.2f×", v];
+}
 
 #ifdef VKQ_VISIONOS
 extern void VKQ_GetWindowSize (int *w, int *h); // engine (points; drawable is 2x)
@@ -89,9 +111,20 @@ static NSString *vkq_vp3d_value_text (NSString *key, float v)
 		return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
 	if ([key isEqualToString:@"vp3dConv"]) // game units ~1 inch each
 		return ft ? [NSString stringWithFormat:@"%.0f ft", v * 0.0254f * 3.28084f] : [NSString stringWithFormat:@"%.1f m", v * 0.0254f];
-	return [NSString stringWithFormat:@"%.1f", v];
+	return vkq_value_text (key, v);
 }
 #endif
+
+// One entry point for every slider readout: panel/stereo rows carry real-world
+// units, everything else falls through to the shared formatter.
+static NSString *vkq_row_value_text (NSString *key, float v)
+{
+#ifdef VKQ_VISIONOS
+	if ([key hasPrefix:@"vp3d"])
+		return vkq_vp3d_value_text (key, v);
+#endif
+	return vkq_value_text (key, v);
+}
 
 @interface VKQRow : NSObject
 @property (nonatomic, copy) NSString *title;
@@ -173,18 +206,30 @@ static const char *ctl_key (UIControl *ctl)
 		],
 		@[
 			mkrow (@"Field of View", @"fov", ROW_SLIDER, 90, 120, 90),
+			// Drives the engine's gamma over the same range its own menu uses
+			// (1.0 dark .. 0.5 bright); 0.2 here reproduces the stock gamma 0.9.
+			mkrow (@"Brightness", @"brightness", ROW_SLIDER, 0.0, 1.0, 0.2),
 			mkrow (@"Menu / HUD Size", @"menuSize", ROW_SLIDER, 0.6, 2.5, 1.3),
 			mkrow (@"120 Hz (ProMotion)", @"refresh120", ROW_SWITCH, 0, 1, 1),
 		],
 		@[
-			mkrow (@"Button Size", @"touchSize", ROW_SLIDER, 0.6, 1.6, 1.0),
+			// Button size lives in the layout editor now, as a live slider you can
+			// see the result of. Opacity stays here — it reads fine as a number.
 			mkrow (@"Button Opacity", @"touchOpacity", ROW_SLIDER, 0.2, 1.0, 0.8),
-			mkrow (@"Lefty Layout", @"lefty", ROW_SWITCH, 0, 1, 0),
+			// No lefty toggle: the move stick's zone is draggable like every other
+			// control, which covers stick-on-the-right and every position between.
+			mkrow (@"Customize Touch Layout…", @"layoutEdit", ROW_BUTTON, 0, 0, 0),
 			mkrow (@"Fire Haptics", @"haptics", ROW_SWITCH, 0, 1, 1),
 		],
 		@[
 			mkrow (@"Always Run", @"alwaysRun", ROW_SWITCH, 0, 1, 1),
 			mkrow (@"FPS Counter", @"fps", ROW_SWITCH, 0, 1, 0),
+#ifdef VKQ_DEV_BUILD
+			// DEV BUILDS ONLY — compiled out of anything with a public version
+			// number. Opens the engine console on TCP 27999 to the local network
+			// and tailnet, unauthenticated, so it must never ship publicly.
+			mkrow (@"Remote Console (port 27999)", @"remoteConsole", ROW_SWITCH, 0, 1, 0),
+#endif
 		],
 	];
 }
@@ -269,22 +314,24 @@ static const char *ctl_key (UIControl *ctl)
 	}
 	else
 	{
+		// Slider + live value readout. The readout is the point of the row — a
+		// bare knob tells you nothing about what you are sliding to. visionOS
+		// gets the wider treatment (m/ft honoring the units toggle).
 #ifdef VKQ_VISIONOS
-		// Wider slider + live value readout (m/ft honoring the units toggle).
-		const CGFloat labelW = 84, sliderW = 360, gap = 8;
+		const CGFloat labelW = 84, sliderW = 360, gap = 8, valFont = 16;
+#else
+		const CGFloat labelW = 58, sliderW = 180, gap = 8, valFont = 14;
+#endif
 		UIView	 *box = [[UIView alloc] initWithFrame:CGRectMake (0, 0, sliderW + gap + labelW, 34)];
 		UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake (0, 2, sliderW, 30)];
 		UILabel	 *val = [[UILabel alloc] initWithFrame:CGRectMake (sliderW + gap, 2, labelW, 30)];
 		val.textColor = [UIColor colorWithWhite:0.85 alpha:1];
-		val.font = [UIFont monospacedDigitSystemFontOfSize:16 weight:UIFontWeightMedium];
+		val.font = [UIFont monospacedDigitSystemFontOfSize:valFont weight:UIFontWeightMedium];
 		val.textAlignment = NSTextAlignmentRight;
-		val.text = [r.key hasPrefix:@"vp3d"] ? vkq_vp3d_value_text (r.key, v) : [NSString stringWithFormat:@"%.1f", v];
+		val.text = vkq_row_value_text (r.key, v);
 		objc_setAssociatedObject (sl, "vkq_val_label", val, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		[box addSubview:sl];
 		[box addSubview:val];
-#else
-		UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake (0, 0, 190, 30)];
-#endif
 		sl.minimumValue = r.mn;
 		sl.maximumValue = r.mx;
 		sl.value = v;
@@ -292,11 +339,7 @@ static const char *ctl_key (UIControl *ctl)
 		tag_ctl (sl, r);
 		[sl addTarget:self action:@selector (sliderChanged:) forControlEvents:UIControlEventValueChanged];
 		[sl addTarget:self action:@selector (sliderReleased:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
-#ifdef VKQ_VISIONOS
 		c.accessoryView = box;
-#else
-		c.accessoryView = sl;
-#endif
 	}
 	return c;
 }
@@ -314,6 +357,41 @@ static const char *ctl_key (UIControl *ctl)
 {
 	vkq_setting_set_f (ctl_key (sw), sw.on ? 1.0f : 0.0f);
 	VKQ_iOS_ApplySettingsToEngine ();
+	// Start the bridge the moment it is switched on, so it does not need a
+	// relaunch. Switching it off takes effect on next launch (the listener is not
+	// torn down mid-session) — the row title says port, the OTA notes say the rest.
+#ifdef VKQ_DEV_BUILD
+	if (!strcmp (ctl_key (sw), "remoteConsole") && sw.on)
+	{
+		extern void VKQ_iOS_ConsoleBridgeStart (void);
+		VKQ_iOS_ConsoleBridgeStart ();
+	}
+#endif
+}
+
+// ROW_BUTTON rows had no tap handler at all until now — this table view never
+// implemented didSelectRowAtIndexPath, so "Recenter Screen" on Vision Pro drew
+// as a tappable row and did nothing when tapped.
+- (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip
+{
+	VKQRow *r = _rows[ip.section][ip.row];
+	[t deselectRowAtIndexPath:ip animated:YES];
+	if (r.type != ROW_BUTTON)
+		return;
+	if ([r.key isEqualToString:@"layoutEdit"])
+	{
+		// The sheet covers the screen you are about to arrange — close it first,
+		// then hand over to the on-screen editor.
+		extern void VKQ_iOS_ToggleLayoutEdit (void);
+		[self done];
+		dispatch_after (dispatch_time (DISPATCH_TIME_NOW, (int64_t) (0.35 * NSEC_PER_SEC)), dispatch_get_main_queue (),
+						^{ VKQ_iOS_ToggleLayoutEdit (); });
+		return;
+	}
+#ifdef VKQ_VISIONOS
+	if ([r.key isEqualToString:@"vp3dRecenter"])
+		VKQ_Recenter3D ();
+#endif
 }
 
 #ifdef VKQ_VISIONOS
@@ -375,13 +453,13 @@ static const char *ctl_key (UIControl *ctl)
 	// overlay; engine cvars (menu size) are pushed on release to avoid flooding the
 	// command buffer while dragging.
 	vkq_setting_set_f (ctl_key (sl), sl.value);
-#ifdef VKQ_VISIONOS
-	// panel/stereo sliders are plain C state — safe (and delightful) to apply
-	// live while dragging, with instant feedback on the 3D panel
 	NSString *key = [NSString stringWithUTF8String:ctl_key (sl)];
 	UILabel	 *val = objc_getAssociatedObject (sl, "vkq_val_label");
 	if (val)
-		val.text = [key hasPrefix:@"vp3d"] ? vkq_vp3d_value_text (key, sl.value) : [NSString stringWithFormat:@"%.1f", sl.value];
+		val.text = vkq_row_value_text (key, sl.value); // track the thumb live
+#ifdef VKQ_VISIONOS
+	// panel/stereo sliders are plain C state — safe (and delightful) to apply
+	// live while dragging, with instant feedback on the 3D panel
 	if ([key hasPrefix:@"vp3d"])
 		VKQ_iOS_Apply3DSettings ();
 #endif

@@ -1,0 +1,78 @@
+vkquake-ios overlay 0012: console seams for the touch layout editor.
+
+`touchedit` opens/closes the on-screen editor, `touchedit reset` restores
+the shipped positions, and `vkq_faketouch` drives a synthetic finger through
+the SAME editDrag* methods the real touch handlers call. All three exist
+because injected UIKit touches do not reach the touch path on the simulator,
+so this is the only way to verify the editor without a finger on glass.
+Applies on top of 0004's VKQ_IOS block.
+
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -169,6 +169,8 @@
+ // keyboard and feeds characters back via VKQ_TouchChar / VKQ_TouchKey.
+ extern void VKQ_iOS_SetTextActive (int active);
+ static void IN_TouchLook_f (void); // defined with the touch bridge below
++static void IN_TouchEdit_f (void);  // ditto
++static void IN_FakeTouch_f (void);  // ditto
+ // Shell still uses this to position SDL's view-shift when the native keyboard shows.
+ void VKQ_iOS_SetTextInputRect (int x, int y, int w, int h)
+ {
+@@ -213,6 +215,8 @@
+ 	// UIKit entirely, so a touch-look regression could never be caught without
+ 	// hands on glass. Feeds the same accumulator a finger drag does.
+ 	Cmd_AddCommand ("vkq_touchlook", IN_TouchLook_f);
++	Cmd_AddCommand ("touchedit", IN_TouchEdit_f);
++	Cmd_AddCommand ("vkq_faketouch", IN_FakeTouch_f);
+ #endif
+ 	if (safemode || COM_CheckParm ("-nomouse"))
+ 	{
+@@ -689,7 +693,48 @@
+ 		return;
+ 	}
+ 	VKQ_TouchLook ((float)atof (Cmd_Argv (1)), (float)atof (Cmd_Argv (2)));
++}
++// `touchedit` opens/closes the on-screen layout editor; `touchedit reset` puts
++// every button back to its shipped position. Reachable from the console bridge,
++// which is how both get verified headlessly.
++static void IN_TouchEdit_f (void)
++{
++	extern void VKQ_iOS_ToggleLayoutEdit (void);
++	extern void VKQ_iOS_ResetLayout (void);
++	extern void VKQ_iOS_LayoutDescription (char *out, int outsz);
++	if (Cmd_Argc () == 2 && !strcmp (Cmd_Argv (1), "reset"))
++	{
++		VKQ_iOS_ResetLayout ();
++		return;
++	}
++	if (Cmd_Argc () == 2 && !strcmp (Cmd_Argv (1), "print"))
++	{
++		char desc[1024] = {0};
++		VKQ_iOS_LayoutDescription (desc, sizeof (desc));
++		Con_Printf ("%s", desc);
++		return;
++	}
++	VKQ_iOS_ToggleLayoutEdit ();
+ }
++
++// `vkq_faketouch <x 0..1> <y 0..1> <down|move|up>` — synthetic finger for the
++// layout editor; injected UIKit touches never reach the touch path on a sim, so
++// this drives the same editDrag* methods the real touch handlers call.
++static void IN_FakeTouch_f (void)
++{
++	extern void VKQ_iOS_FakeTouch (float nx, float ny, int phase);
++	const char *ph;
++	int			phase;
++	if (Cmd_Argc () != 4)
++	{
++		Con_Printf ("vkq_faketouch <x 0..1> <y 0..1> <down|move|up|zone>\n");
++		return;
++	}
++	ph = Cmd_Argv (3);
++	phase = !strcmp (ph, "down") ? 0 : (!strcmp (ph, "move") ? 1 : (!strcmp (ph, "zone") ? 3 : 2));
++	VKQ_iOS_FakeTouch ((float)atof (Cmd_Argv (1)), (float)atof (Cmd_Argv (2)), phase);
++}
++
+ void VKQ_TouchKey (int key, int down) { Key_Event (key, down ? true : false); }
+ void VKQ_TouchChar (int c) { Char_Event (c); } // native iOS keyboard -> engine text input
+ void VKQ_TouchCommand (const char *text) { Cbuf_AddText (text); }

@@ -46,31 +46,63 @@ static float look_accel (float d)
 	return d * (boost > 2.4f ? 2.4f : boost);
 }
 
-static bool g_lefty = false; // mirror layout (read in layout + move-zone)
+// The move stick is FLOATING: it materialises wherever your thumb lands inside
+// its activation zone and vanishes on release. So the stick has no fixed
+// position — what it has is a zone, and that zone is draggable like everything
+// else. The default is a circle covering roughly the old left half, so the feel
+// is unchanged: a generous target you cannot really miss.
+//
+// This replaces the old Lefty Layout toggle outright. Handedness was never the
+// real axis — gamepads have no left/right-handed layouts because both thumbs are
+// engaged at once, and a left-handed player aims with the right thumb just fine.
+// What people actually want is the stick somewhere else, which dragging gives
+// you at any position, not just mirrored.
+#define STICK_ZONE_DIAMETER 300.0f
 
 // ---------------------------------------------------------------------------
 @interface VKQButton : UIView
 @property (nonatomic, copy) NSString *downCmd; // executed on press (nil = none)
 @property (nonatomic, copy) NSString *upCmd;   // executed on release (nil = none)
+@property (nonatomic, copy) NSString *ident;   // stable id — key for the saved position
 @property (nonatomic) int keyCode;             // key event on press/release (0 = none)
 @property (nonatomic) BOOL haptic;
 @property (nonatomic) BOOL settingsButton;     // opens the native settings panel
 @property (nonatomic) BOOL engineWheel; // opens the engine weapon wheel (hold + drag)
-@property (nonatomic) CGPoint unit;            // placement, 0..1 of safe area
+@property (nonatomic) BOOL zoneOnly;    // not a button — the move-stick activation zone
+@property (nonatomic) CGPoint unit;            // effective placement, 0..1 of safe area
+@property (nonatomic) CGPoint defaultUnit;     // shipped placement, for Reset
 @property (nonatomic) CGFloat baseSize;
 @property (nonatomic, weak) UITouch *touch;
 @end
 @implementation VKQButton @end
 
+// Saved position keys: vkq.btn.<ident>.x / .y, alongside vkq.layoutSet which
+// records whether the user has customised anything at all.
+static NSString *vkq_btn_key (NSString *ident, const char *axis) { return [NSString stringWithFormat:@"btn.%@.%s", ident, axis]; }
+
 // ---------------------------------------------------------------------------
 @interface VKQTouchView : UIView
-- (void)applyAppearance:(CGFloat)scale opacity:(CGFloat)op lefty:(BOOL)lefty;
+- (void)applyAppearance:(CGFloat)scale opacity:(CGFloat)op;
+- (void)reloadButtonPositions;
+- (NSArray<VKQButton *> *)placeableButtons;
+- (void)seedMirroredLayoutForLegacyLefty;
+- (BOOL)isEditingLayout;
+- (BOOL)pointInMoveZone:(CGPoint)p;
+- (void)beginEditingLayout;
+- (void)endEditingLayout;
+- (void)resetLayoutToDefaults;
+// Edit-mode drag, factored so the real finger path and the synthetic finger
+// (vkq_faketouch) drive exactly the same code.
+- (BOOL)editDragBegin:(CGPoint)p;
+- (void)editDragMove:(CGPoint)p;
+- (void)editDragEnd;
 @end
 
 @implementation VKQTouchView {
 	UITouch *moveTouch, *lookTouch;
 	CGPoint	 moveOrigin, lastLook;
 	UIView	*stickBase, *stickNub;
+	VKQButton					*stickZone; // move-stick activation zone (draggable, drawn only in the editor)
 	NSMutableArray<VKQButton *> *buttons;
 #ifdef VKQ_VISIONOS
 	id haptics; // UIImpactFeedbackGenerator is unavailable on visionOS (no haptics)
@@ -79,6 +111,13 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 #endif
 	UITouch						*wheelTouch;		// touch driving the engine weapon wheel
 	CGPoint						 engineWheelCenter; // wheel-button centre, in this view's coords
+	// layout edit mode
+	BOOL	   _editing;
+	VKQButton *_dragBtn;   // button under the editing finger
+	CGSize	   _dragOffset; // finger -> button centre, so it doesn't jump on grab
+	UIView	  *_editBar;
+	UISlider  *_editSlider;
+	UILabel	  *_editPct;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame
@@ -110,10 +149,12 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 	return v;
 }
 
-- (VKQButton *)addButton:(NSString *)label size:(CGFloat)size at:(CGPoint)unit
+- (VKQButton *)addButton:(NSString *)label ident:(NSString *)ident size:(CGFloat)size at:(CGPoint)unit
 {
 	VKQButton *b = [[VKQButton alloc] initWithFrame:CGRectMake (0, 0, size, size)];
-	b.unit = unit;
+	b.ident = ident;
+	b.defaultUnit = unit;
+	b.unit = unit; // reloadButtonPositions overrides from saved settings
 	b.baseSize = size;
 	b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
 	b.layer.cornerRadius = size / 2;
@@ -131,7 +172,51 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 
 	[buttons addObject:b];
 	[self addSubview:b];
+	if ([ident isEqualToString:@"stick"])
+		stickZone = b;
 	return b;
+}
+
+// Effective position for every button: the saved one if the layout has been
+// customised, otherwise the shipped default. Called at build time and whenever
+// the editor writes or resets a position.
+- (void)reloadButtonPositions
+{
+	BOOL custom = vkq_setting_f ("layoutSet", 0.0f) > 0.5f;
+	for (VKQButton *b in buttons)
+	{
+		if (custom)
+			b.unit = CGPointMake (vkq_setting_f (vkq_btn_key (b.ident, "x").UTF8String, b.defaultUnit.x),
+								  vkq_setting_f (vkq_btn_key (b.ident, "y").UTF8String, b.defaultUnit.y));
+		else
+			b.unit = b.defaultUnit;
+	}
+	[self setNeedsLayout];
+}
+
+// Legacy Lefty Layout mirrored button x at layout time. Bake that mirror into
+// saved positions so the migration is invisible to the player.
+- (void)seedMirroredLayoutForLegacyLefty
+{
+	for (VKQButton *b in buttons)
+	{
+		vkq_setting_set_f (vkq_btn_key (b.ident, "x").UTF8String, 1.0f - b.defaultUnit.x);
+		vkq_setting_set_f (vkq_btn_key (b.ident, "y").UTF8String, b.defaultUnit.y);
+	}
+	vkq_setting_set_f ("layoutSet", 1.0f);
+}
+
+- (NSArray<VKQButton *> *)placeableButtons { return buttons; }
+
+- (void)resetLayoutToDefaults
+{
+	vkq_setting_set_f ("layoutSet", 0.0f);
+	for (VKQButton *b in buttons)
+	{
+		vkq_setting_set_f (vkq_btn_key (b.ident, "x").UTF8String, b.defaultUnit.x);
+		vkq_setting_set_f (vkq_btn_key (b.ident, "y").UTF8String, b.defaultUnit.y);
+	}
+	[self reloadButtonPositions];
 }
 
 - (void)layoutSubviews
@@ -140,15 +225,19 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 	CGRect r = UIEdgeInsetsInsetRect (self.bounds, self.safeAreaInsets);
 	for (VKQButton *b in buttons)
 	{
-		CGFloat ux = g_lefty ? (1.0 - b.unit.x) : b.unit.x;
-		b.center = CGPointMake (r.origin.x + r.size.width * ux, r.origin.y + r.size.height * b.unit.y);
+		// No lefty mirroring here any more — the editor owns button placement.
+		b.center = CGPointMake (r.origin.x + r.size.width * b.unit.x, r.origin.y + r.size.height * b.unit.y);
 	}
+	if (_editing)
+		[self centerStickGraphicOnZone]; // follows the zone through relayouts
 }
 
 - (VKQButton *)buttonAt:(CGPoint)p
 {
 	for (VKQButton *b in buttons)
 	{
+		if (b.zoneOnly)
+			continue; // the stick zone is not pressable — only draggable in the editor
 		CGFloat dx = p.x - b.center.x, dy = p.y - b.center.y;
 		CGFloat hit = b.bounds.size.width * 0.5 * 1.3; // generous hit circle
 		if (dx * dx + dy * dy <= hit * hit)
@@ -157,8 +246,252 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 	return nil;
 }
 
+// Edit mode grabs anything placeable, the stick zone included. Smallest-first so
+// a small button sitting inside the big stick circle stays grabbable.
+- (VKQButton *)placeableAt:(CGPoint)p
+{
+	VKQButton *best = nil;
+	for (VKQButton *b in buttons)
+	{
+		CGFloat dx = p.x - b.center.x, dy = p.y - b.center.y;
+		CGFloat hit = b.bounds.size.width * 0.5 * (b.zoneOnly ? 1.0 : 1.3);
+		if (dx * dx + dy * dy <= hit * hit && (!best || b.bounds.size.width < best.bounds.size.width))
+			best = b;
+	}
+	return best;
+}
+
+- (BOOL)pointInMoveZone:(CGPoint)p
+{
+	if (!stickZone)
+		return p.x < self.bounds.size.width * 0.5f; // pre-build fallback
+	CGFloat dx = p.x - stickZone.center.x, dy = p.y - stickZone.center.y;
+	CGFloat r = stickZone.bounds.size.width * 0.5f;
+	return dx * dx + dy * dy <= r * r;
+}
+
+// ---- layout edit mode ------------------------------------------------------
+- (BOOL)isEditingLayout { return _editing; }
+
+- (BOOL)editDragBegin:(CGPoint)p
+{
+	_dragBtn = [self placeableAt:p];
+	if (!_dragBtn)
+		return NO;
+	_dragOffset = CGSizeMake (_dragBtn.center.x - p.x, _dragBtn.center.y - p.y);
+	_dragBtn.backgroundColor = [UIColor colorWithRed:1 green:0.85 blue:0.4 alpha:0.45];
+	return YES;
+}
+
+- (void)editDragMove:(CGPoint)p
+{
+	if (!_dragBtn)
+		return;
+	// Only constraint: the CENTRE stays on screen, so anything you place can
+	// always be grabbed again. Deliberately not the safe rect and not inset by the
+	// radius — that was far too strict, and it refused to let buttons reach the
+	// edges they already ship at. Overshoot is cheap here; Reset is right there.
+	CGFloat cx = fmax (0, fmin (self.bounds.size.width, p.x + _dragOffset.width));
+	CGFloat cy = fmax (0, fmin (self.bounds.size.height, p.y + _dragOffset.height));
+	_dragBtn.center = CGPointMake (cx, cy);
+	if (_dragBtn == stickZone)
+		[self centerStickGraphicOnZone];
+}
+
+- (void)editDragEnd
+{
+	if (!_dragBtn)
+		return;
+	CGRect r = UIEdgeInsetsInsetRect (self.bounds, self.safeAreaInsets);
+	if (r.size.width > 0 && r.size.height > 0)
+	{
+		CGPoint u = CGPointMake ((_dragBtn.center.x - r.origin.x) / r.size.width, (_dragBtn.center.y - r.origin.y) / r.size.height);
+		_dragBtn.unit = u;
+		vkq_setting_set_f (vkq_btn_key (_dragBtn.ident, "x").UTF8String, u.x);
+		vkq_setting_set_f (vkq_btn_key (_dragBtn.ident, "y").UTF8String, u.y);
+		vkq_setting_set_f ("layoutSet", 1.0f);
+		NSLog (@"[vkquake] layout: %@ -> (%.3f, %.3f)", _dragBtn.ident, u.x, u.y);
+	}
+	_dragBtn.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+	_dragBtn = nil;
+}
+
+- (void)beginEditingLayout
+{
+	if (_editing)
+		return;
+	_editing = YES;
+	// Drop anything mid-press so a held button doesn't stick down for the whole
+	// edit session, and so the engine isn't left with +attack asserted.
+	[self releaseAllInput];
+	for (VKQButton *b in buttons)
+		b.layer.borderColor = [UIColor colorWithRed:1 green:0.85 blue:0.4 alpha:0.95].CGColor;
+	// Reveal the move-stick zone, drawn at its true radius so what you drag is
+	// exactly the region that will respond — with the stick itself parked in the
+	// middle of it, so the circle obviously belongs to the stick.
+	stickZone.hidden = NO;
+	stickZone.backgroundColor = [UIColor colorWithWhite:1 alpha:0.05];
+	stickZone.layer.borderColor = [UIColor colorWithRed:1 green:0.85 blue:0.4 alpha:0.35].CGColor;
+	stickZone.layer.borderWidth = 2.0;
+	[self sendSubviewToBack:stickZone]; // never cover a button you want to grab
+	stickBase.hidden = stickNub.hidden = NO;
+	[self centerStickGraphicOnZone];
+
+	// Chrome: reset · live scale slider · done, bottom-left (Shipwright's layout).
+	// No instruction text — dragging a button is self-evident once you are here.
+	UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+	bar.backgroundColor = UIColor.clearColor;
+	bar.translatesAutoresizingMaskIntoConstraints = NO;
+	[self addSubview:bar];
+	_editBar = bar;
+
+	UIButton *reset = [UIButton buttonWithType:UIButtonTypeSystem];
+	reset.backgroundColor = [UIColor colorWithRed:0.85 green:0.20 blue:0.22 alpha:0.95];
+	[reset setImage:[[UIImage systemImageNamed:@"arrow.uturn.backward"]
+						imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:17
+																							   weight:UIImageSymbolWeightBold]]
+		   forState:UIControlStateNormal];
+	reset.tintColor = UIColor.whiteColor;
+	reset.layer.cornerRadius = 21;
+	[reset addTarget:self action:@selector (editResetTapped) forControlEvents:UIControlEventTouchUpInside];
+
+	UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
+	done.backgroundColor = [UIColor colorWithRed:0.18 green:0.78 blue:0.34 alpha:0.95];
+	[done setImage:[[UIImage systemImageNamed:@"checkmark"]
+					   imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:20
+																							  weight:UIImageSymbolWeightBold]]
+		  forState:UIControlStateNormal];
+	done.tintColor = UIColor.whiteColor;
+	done.layer.cornerRadius = 21;
+	[done addTarget:self action:@selector (endEditingLayout) forControlEvents:UIControlEventTouchUpInside];
+
+	UISlider *sl = [UISlider new];
+	sl.minimumValue = 0.6f;
+	sl.maximumValue = 1.6f;
+	sl.value = vkq_setting_f ("touchSize", 1.0f);
+	sl.minimumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.9];
+	[sl addTarget:self action:@selector (editScaleChanged:) forControlEvents:UIControlEventValueChanged];
+	_editSlider = sl;
+
+	UILabel *pct = [UILabel new];
+	pct.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold];
+	pct.textColor = [UIColor colorWithWhite:1 alpha:0.9];
+	pct.textAlignment = NSTextAlignmentCenter;
+	_editPct = pct;
+	[self updateScaleLabel];
+
+	for (UIView *v in @[ reset, done, sl, pct ])
+	{
+		v.translatesAutoresizingMaskIntoConstraints = NO;
+		[bar addSubview:v];
+	}
+	[NSLayoutConstraint activateConstraints:@[
+		[bar.leadingAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.leadingAnchor constant:14],
+		[bar.bottomAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.bottomAnchor constant:-14],
+		[bar.heightAnchor constraintEqualToConstant:42],
+		[bar.trailingAnchor constraintEqualToAnchor:done.trailingAnchor],
+
+		[reset.leadingAnchor constraintEqualToAnchor:bar.leadingAnchor],
+		[reset.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+		[reset.widthAnchor constraintEqualToConstant:42],
+		[reset.heightAnchor constraintEqualToConstant:42],
+
+		[sl.leadingAnchor constraintEqualToAnchor:reset.trailingAnchor constant:16],
+		[sl.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+		[sl.widthAnchor constraintEqualToConstant:220],
+
+		[pct.centerXAnchor constraintEqualToAnchor:sl.centerXAnchor],
+		[pct.bottomAnchor constraintEqualToAnchor:sl.topAnchor constant:-2],
+
+		[done.leadingAnchor constraintEqualToAnchor:sl.trailingAnchor constant:16],
+		[done.centerYAnchor constraintEqualToAnchor:bar.centerYAnchor],
+		[done.widthAnchor constraintEqualToConstant:42],
+		[done.heightAnchor constraintEqualToConstant:42],
+	]];
+	NSLog (@"[vkquake] touch layout editor entered");
+}
+
+- (void)updateScaleLabel { _editPct.text = [NSString stringWithFormat:@"%.0f%%", vkq_setting_f ("touchSize", 1.0f) * 100.0f]; }
+
+// Live scale: write the same setting the old Button Size row wrote, then apply
+// immediately so the buttons resize under the finger.
+- (void)editScaleChanged:(UISlider *)s
+{
+	vkq_setting_set_f ("touchSize", s.value);
+	[self applyAppearance:s.value opacity:vkq_setting_f ("touchOpacity", 0.8f)];
+	[self updateScaleLabel];
+	[self centerStickGraphicOnZone];
+}
+
+// Park the floating stick graphic in the middle of its zone while editing, so
+// the circle reads as the stick's, not as some anonymous region.
+- (void)centerStickGraphicOnZone
+{
+	if (!stickZone)
+		return;
+	stickBase.center = stickNub.center = stickZone.center;
+}
+
+- (void)editResetTapped
+{
+	vkq_setting_set_f ("touchSize", 1.0f); // scale is part of the layout now
+	[self resetLayoutToDefaults];
+	[self applyAppearance:1.0f opacity:vkq_setting_f ("touchOpacity", 0.8f)];
+	_editSlider.value = 1.0f;
+	[self updateScaleLabel];
+	[self centerStickGraphicOnZone];
+	NSLog (@"[vkquake] touch layout reset to defaults");
+}
+
+- (void)endEditingLayout
+{
+	if (!_editing)
+		return;
+	[self editDragEnd]; // commit anything still under the finger
+	_editing = NO;
+	for (VKQButton *b in buttons)
+		b.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
+	stickZone.hidden = YES; // invisible in play — the stick floats to your thumb
+	stickBase.hidden = stickNub.hidden = YES;
+	[_editBar removeFromSuperview];
+	_editBar = nil;
+	_editSlider = nil;
+	_editPct = nil;
+	NSLog (@"[vkquake] touch layout editor exited");
+}
+
+// Release every in-flight input so entering edit mode (or losing the overlay)
+// never leaves a key or button asserted in the engine.
+- (void)releaseAllInput
+{
+	if (wheelTouch)
+	{
+		SCR_WeaponWheel_TouchClose ();
+		wheelTouch = nil;
+	}
+	moveTouch = nil;
+	lookTouch = nil;
+	stickBase.hidden = stickNub.hidden = YES;
+	VKQ_TouchMove (0, 0);
+	for (VKQButton *b in buttons)
+		if (b.touch)
+		{
+			b.touch = nil;
+			b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+			if (b.keyCode)
+				VKQ_TouchKey (b.keyCode, 0);
+			if (b.upCmd)
+				VKQ_TouchCommand (b.upCmd.UTF8String);
+		}
+}
+
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
+	if (_editing)
+	{
+		[self editDragBegin:[touches.anyObject locationInView:self]];
+		return;
+	}
 	for (UITouch *t in touches)
 	{
 		CGPoint	   p = [t locationInView:self];
@@ -191,8 +524,8 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 #endif
 			continue;
 		}
-		// move-stick zone: left half normally, right half in lefty layout
-		BOOL inMoveZone = g_lefty ? (p.x > self.bounds.size.width * 0.5f) : (p.x < self.bounds.size.width * 0.5f);
+		// move-stick zone: the draggable circle (default ~ the old left half)
+		BOOL inMoveZone = [self pointInMoveZone:p];
 		if (inMoveZone && !moveTouch)
 		{
 			moveTouch = t;
@@ -210,6 +543,11 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
+	if (_editing)
+	{
+		[self editDragMove:[touches.anyObject locationInView:self]];
+		return;
+	}
 	for (UITouch *t in touches)
 	{
 		// predicted touch cancels the frame of lag from the engine holding the main thread
@@ -249,6 +587,11 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 
 - (void)endTouches:(NSSet<UITouch *> *)touches
 {
+	if (_editing)
+	{
+		[self editDragEnd];
+		return;
+	}
 	for (UITouch *t in touches)
 	{
 		if (t == wheelTouch)
@@ -286,10 +629,12 @@ static bool g_lefty = false; // mirror layout (read in layout + move-zone)
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self endTouches:touches]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self endTouches:touches]; }
 
-- (void)applyAppearance:(CGFloat)scale opacity:(CGFloat)op lefty:(BOOL)lefty
+- (void)applyAppearance:(CGFloat)scale opacity:(CGFloat)op
 {
-	g_lefty = lefty;
 	self.alpha = op;
+	// The scale slider lives in the editor now, where its effect is visible live —
+	// including on the move zone, which resizes with everything else. (It was
+	// excluded while the control was a blind settings row.)
 	for (VKQButton *b in buttons)
 	{
 		CGFloat sz = b.baseSize * scale;
@@ -316,6 +661,7 @@ UIWindow *VKQ_iOS_GameWindow (void)
 }
 static UIButton		*g_back;
 static UIButton		*g_settings; // menu-only iOS settings button (shown with the back button)
+static UIButton		*g_qsave, *g_qload; // main-menu-only quick save / quick load
 static UIView		*g_catcher;	 // transparent; a tap during the attract demo opens the menu
 static UIButton		*g_kbdismiss; // dismiss-keyboard (checkmark) button, shown while the keyboard is up
 
@@ -533,6 +879,43 @@ static UIWindow *vkq_key_window (void)
 + (void)press { VKQ_iOS_PresentSettings (); }
 @end
 
+// vkq_quicksave / vkq_quickload do the menu teardown the engine's own load path
+// does, so both return straight to the game (see overlay patch 0013).
+@interface VKQQuickSaveBtn : NSObject
++ (void)press;
+@end
+@implementation VKQQuickSaveBtn
++ (void)press { VKQ_TouchCommand ("vkq_quicksave\n"); }
+@end
+@interface VKQQuickLoadBtn : NSObject
++ (void)press;
+@end
+@implementation VKQQuickLoadBtn
++ (void)press { VKQ_TouchCommand ("vkq_quickload\n"); }
+@end
+
+// Labelled pill for the menu chrome column (glyph + caption).
+static UIButton *vkq_menu_pill (NSString *symbol, NSString *title, Class target)
+{
+	UIButtonConfiguration *cfg = [UIButtonConfiguration plainButtonConfiguration];
+	cfg.image = [UIImage systemImageNamed:symbol];
+	cfg.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:15
+																							   weight:UIImageSymbolWeightBold];
+	cfg.imagePadding = 6;
+	cfg.contentInsets = NSDirectionalEdgeInsetsMake (6, 10, 6, 10);
+	cfg.attributedTitle = [[NSAttributedString alloc]
+		initWithString:title
+			attributes:@{NSFontAttributeName : [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]}];
+	UIButton *b = [UIButton buttonWithConfiguration:cfg primaryAction:nil];
+	b.tintColor = [UIColor colorWithWhite:1 alpha:0.9];
+	b.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+	b.layer.cornerRadius = 10;
+	b.frame = CGRectMake (0, 0, 148, 40);
+	[b addTarget:target action:@selector (press) forControlEvents:UIControlEventTouchUpInside];
+	b.hidden = YES;
+	return b;
+}
+
 // -------- SCR_ModalMessage (y/n prompt) touch support --------
 // The engine's SCR_ModalMessage spins a blocking do/while loop that starves the
 // display link AND the UIKit run loop, so touches never arrive -> deadlock.
@@ -593,12 +976,91 @@ void VKQ_iOS_ModalEnd (void)
 	g_modal = nil;
 }
 
+// ---------------------------------------------------------------------------
+// Layout editor entry points, callable from the engine console and the iOS
+// settings sheet. Everything here is main-thread: the console bridge runs
+// commands through Cbuf on the engine's (main) thread, same as the display link.
+void VKQ_iOS_ToggleLayoutEdit (void)
+{
+	if (!g_touch)
+		return;
+	if ([g_touch isEditingLayout])
+		[g_touch endEditingLayout];
+	else
+		[g_touch beginEditingLayout];
+}
+
+void VKQ_iOS_ResetLayout (void)
+{
+	[g_touch resetLayoutToDefaults];
+}
+
+// Dump the live layout in the exact form the defaults table takes, so a layout
+// arranged on the device can be read over the console bridge and promoted to the
+// shipped defaults without anyone transcribing numbers by eye.
+void VKQ_iOS_LayoutDescription (char *out, int outsz)
+{
+	if (!g_touch || outsz <= 0)
+		return;
+	NSMutableString *s = [NSMutableString stringWithFormat:@"touch layout — scale %.2f, customised=%@\n",
+														   vkq_setting_f ("touchSize", 1.0f),
+														   vkq_setting_f ("layoutSet", 0.0f) > 0.5f ? @"yes" : @"no (showing defaults)"];
+	for (VKQButton *b in [g_touch placeableButtons])
+		[s appendFormat:@"  %-8s size %3.0f  at CGPointMake (%.3f, %.3f)\n", b.ident.UTF8String, b.baseSize, b.unit.x, b.unit.y];
+	strlcpy (out, s.UTF8String, (size_t)outsz);
+}
+
+// Synthetic finger for the layout editor. Injected UIKit touches do not reach
+// the touch path on the simulator, so this is the only way to exercise dragging
+// without a finger on real glass — it drives the SAME editDrag* methods the real
+// touch handlers call, not a parallel copy. x/y are 0..1 of the view.
+void VKQ_iOS_FakeTouch (float nx, float ny, int phase)
+{
+	if (!g_touch)
+		return;
+	CGSize	sz = g_touch.bounds.size;
+	CGPoint p = CGPointMake (nx * sz.width, ny * sz.height);
+	if (phase == 3)
+	{
+		// Query, not a drag: does this point fall in the move-stick zone? Lets the
+		// runtime hit test be checked against the circle the editor draws, which
+		// is the only part of the stick zone a screenshot can show.
+		NSLog (@"[vkquake] movezone (%.0f,%.0f) -> %@", p.x, p.y, [g_touch pointInMoveZone:p] ? @"INSIDE" : @"outside");
+		return;
+	}
+	if (![g_touch isEditingLayout])
+	{
+		NSLog (@"[vkquake] vkq_faketouch ignored — layout editor is not open");
+		return;
+	}
+	switch (phase)
+	{
+	case 0:
+		NSLog (@"[vkquake] faketouch down (%.0f,%.0f) grabbed=%d", p.x, p.y, [g_touch editDragBegin:p]);
+		break;
+	case 1:
+		[g_touch editDragMove:p];
+		break;
+	default:
+		[g_touch editDragEnd];
+		break;
+	}
+}
+
 // place a centered SF Symbol on an icon button
 static void set_symbol (VKQButton *b, NSString *name)
 {
 	CGFloat	 s = b.baseSize * 0.5;
-	UIImage *img = [[UIImage systemImageNamed:name]
-		imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:s weight:UIImageSymbolWeightSemibold]];
+	UIImage *base = [UIImage systemImageNamed:name];
+	if (!base)
+	{
+		// Unknown symbol name on this OS: leave the button's text label alone
+		// rather than clearing it below and shipping a blank circle.
+		NSLog (@"[vkquake] SF Symbol '%@' unavailable — keeping text label", name);
+		return;
+	}
+	UIImage *img = [base imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:s
+																							   weight:UIImageSymbolWeightSemibold]];
 	UIImageView *iv = [[UIImageView alloc] initWithImage:img];
 	iv.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
 	iv.contentMode = UIViewContentModeCenter;
@@ -628,27 +1090,58 @@ static void vkq_build_ui (void)
 	VKQButton *b;
 	// Weapon-wheel button: hold to open the engine wheel centered on the thumb, drag
 	// toward a weapon, release to switch (mirrors RB on the controller).
-	b = [g_touch addButton:@"" size:60 at:CGPointMake (0.90, 0.40)];
+	// Move-stick activation zone. Placeable like everything else, but invisible
+	// during play and never pressable — the stick itself still floats to wherever
+	// your thumb lands inside it. Default centre/radius reproduce the old
+	// left-half zone, so movement feels exactly as forgiving as before.
+	b = [g_touch addButton:@"" ident:@"stick" size:STICK_ZONE_DIAMETER at:CGPointMake (0.214, 0.608)];
+	b.zoneOnly = YES;
+	b.hidden = YES;
+
+	// Every button carries a stable ident — it is the key its dragged position is
+	// saved under, so renaming one silently resets that button for everybody.
+	b = [g_touch addButton:@"" ident:@"wheel" size:60 at:CGPointMake (0.90, 0.40)];
 	b.engineWheel = YES;
 	set_symbol (b, @"circle.hexagongrid.fill");
-	b = [g_touch addButton:@"JMP" size:64 at:CGPointMake (0.975, 0.47)];
+	// Action buttons carry glyphs, not text. The label string stays as the
+	// fallback set_symbol leaves in place if a symbol ever fails to resolve.
+	b = [g_touch addButton:@"JMP" ident:@"jump" size:64 at:CGPointMake (0.997, 0.548)];
 	b.downCmd = @"+jump\n";
 	b.upCmd = @"-jump\n";
-	b = [g_touch addButton:@"FIRE" size:80 at:CGPointMake (0.92, 0.74)];
+	set_symbol (b, @"arrow.up");
+	b = [g_touch addButton:@"FIRE" ident:@"fire" size:80 at:CGPointMake (0.92, 0.74)];
 	b.downCmd = @"+attack\n";
 	b.upCmd = @"-attack\n";
 	b.haptic = YES;
-	b = [g_touch addButton:@"CRO" size:56 at:CGPointMake (0.83, 0.97)];
+	set_symbol (b, @"scope"); // crosshairs
+	// Positions below marked "the maintainer's layout" were arranged on the device and
+	// read back over the console bridge (touchedit print, 2026-07-28), then
+	// promoted to defaults. Crouch sits hard right and off the bottom edge, which
+	// clears the Quake status bar entirely.
+	b = [g_touch addButton:@"CRO" ident:@"crouch" size:56 at:CGPointMake (0.995, 0.922)];
 	b.downCmd = @"+movedown\n"; // swim/sink down (useful underwater in Quake 1)
 	b.upCmd = @"-movedown\n";
+	set_symbol (b, @"arrow.down");
 	// top-row icon buttons — bigger, crisp SF Symbols
-	b = [g_touch addButton:@"" size:54 at:CGPointMake (0.975, 0.11)];
+	b = [g_touch addButton:@"" ident:@"menu" size:54 at:CGPointMake (0.975, 0.11)];
 	b.keyCode = K_ESCAPE; // open the Quake menu
 	set_symbol (b, @"line.3.horizontal");
-	b = [g_touch addButton:@"" size:54 at:CGPointMake (0.895, 0.11)];
+	b = [g_touch addButton:@"" ident:@"scores" size:54 at:CGPointMake (0.895, 0.11)];
 	b.downCmd = @"+showscores\n"; // scores / objectives
 	b.upCmd = @"-showscores\n";
 	set_symbol (b, @"list.number");
+
+	// One-time migration for players who had the old Lefty Layout on. That toggle
+	// is gone — the editor covers it, and the stick zone moves too — so seed the
+	// mirrored positions (buttons AND stick zone, since both live in `buttons`)
+	// as their saved layout. Without this their whole control scheme would jump
+	// across the screen on update.
+	if (vkq_setting_f ("lefty", 0.0f) > 0.5f && vkq_setting_f ("layoutSet", 0.0f) < 0.5f)
+	{
+		[g_touch seedMirroredLayoutForLegacyLefty];
+		NSLog (@"[vkquake] migrated legacy Lefty Layout into a saved custom layout");
+	}
+	[g_touch reloadButtonPositions];
 	[win addSubview:g_touch];
 
 	// menu-only back button (menus have no on-screen back without a keyboard)
@@ -676,6 +1169,15 @@ static void vkq_build_ui (void)
 	[g_settings addTarget:VKQSettingsBtn.class action:@selector (press) forControlEvents:UIControlEventTouchUpInside];
 	g_settings.hidden = YES;
 	[win addSubview:g_settings];
+
+	// Quick save / quick load. Deliberately NOT part of the touch layout: these
+	// are menu chrome like back and gear, offered only from the first main menu
+	// of a live single-player game, never over the HUD. Labelled rather than
+	// glyph-only — an icon for "quick load" is a guess, and there is room here.
+	g_qsave = vkq_menu_pill (@"tray.and.arrow.down.fill", @"QUICK SAVE", VKQQuickSaveBtn.class);
+	g_qload = vkq_menu_pill (@"tray.and.arrow.up.fill", @"QUICK LOAD", VKQQuickLoadBtn.class);
+	[win addSubview:g_qsave];
+	[win addSubview:g_qload];
 
 	// attract-demo catcher: a tap during the demo opens the menu
 	g_catcher = [[UIView alloc] initWithFrame:win.bounds];
@@ -783,7 +1285,9 @@ void VKQ_iOS_FramePoll (void)
 	int	 keydest = VKQ_TouchKeyDest ();
 	BOOL inGame = VKQ_TouchInGame () != 0; // a real level — not demo, menu or disconnected
 	BOOL isDemo = VKQ_TouchIsDemo () != 0;
-	BOOL showGame = inGame && !controller;
+	// The layout editor has to keep the overlay up regardless of game state — you
+	// reach it from the settings sheet, which is usually open over a menu.
+	BOOL showGame = (inGame && !controller) || [g_touch isEditingLayout];
 	if (g_touch.hidden != !showGame)
 	{
 		g_touch.hidden = !showGame;
@@ -813,18 +1317,40 @@ void VKQ_iOS_FramePoll (void)
 		}
 	}
 
-	// live-apply touch appearance (size / opacity / lefty) on change
+	// Quick save / load: only from the FIRST main menu of a live single-player
+	// game (the engine owns that test — see patch 0013), stacked under the gear.
+	// Quick load additionally needs a quicksave to exist, or it is a dead button.
+	{
+		extern int	 VKQ_iOS_QuickSaveAvailable (void);
+		extern int	 VKQ_iOS_QuickSaveExists (void);
+		static BOOL	 lastSave = NO, lastLoad = NO;
+		BOOL		 avail = VKQ_iOS_QuickSaveAvailable () != 0;
+		BOOL		 showLoad = avail && VKQ_iOS_QuickSaveExists () != 0;
+		if (avail != lastSave || showLoad != lastLoad)
+		{
+			lastSave = avail;
+			lastLoad = showLoad;
+			g_qsave.hidden = !avail;
+			g_qload.hidden = !showLoad;
+			if (avail)
+			{
+				UIWindow *win = g_qsave.superview;
+				CGFloat	  x = win.safeAreaInsets.left + 12 + g_qsave.bounds.size.width * 0.5f;
+				g_qsave.center = CGPointMake (x, win.safeAreaInsets.top + 140);
+				g_qload.center = CGPointMake (x, win.safeAreaInsets.top + 188);
+			}
+		}
+	}
+
+	// live-apply touch appearance (size / opacity) on change
 	static float ap_size = -1, ap_op = -1;
-	static int	 ap_lefty = -1;
 	float		 tsz = vkq_setting_f ("touchSize", 1.0f);
 	float		 top = vkq_setting_f ("touchOpacity", 0.8f);
-	int			 lefty = vkq_setting_f ("lefty", 0.0f) > 0.5f;
-	if (tsz != ap_size || top != ap_op || lefty != ap_lefty)
+	if (tsz != ap_size || top != ap_op)
 	{
 		ap_size = tsz;
 		ap_op = top;
-		ap_lefty = lefty;
-		[g_touch applyAppearance:tsz opacity:top lefty:lefty];
+		[g_touch applyAppearance:tsz opacity:top];
 	}
 
 	// gyro aim (device rotation -> look) while playing, no controller
@@ -882,25 +1408,47 @@ void VKQ_iOS_FramePoll (void)
 	{
 		UIWindow *win = g_touch.superview;
 		fps = [[UILabel alloc] init];
-		fps.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightBold];
+#ifdef VKQ_VISIONOS
+		const CGFloat fpsFont = 15, fpsW = 42, fpsH = 22;
+#else
+		const CGFloat fpsFont = 12, fpsW = 34, fpsH = 18;
+#endif
+		fps.font = [UIFont monospacedDigitSystemFontOfSize:fpsFont weight:UIFontWeightBold];
 		fps.textColor = [UIColor colorWithWhite:1 alpha:0.85];
 		fps.backgroundColor = [UIColor colorWithWhite:0 alpha:0.3];
 		fps.textAlignment = NSTextAlignmentCenter;
 		fps.layer.cornerRadius = 4;
 		fps.layer.masksToBounds = YES;
-		// Auto Layout, pinned to the top-RIGHT safe-area corner. The old absolute
-		// frame was computed ONCE from win.bounds at creation and went stale when
-		// the window resized (the visionOS free-resizing window / a landscape
-		// relayout), stranding the label at the old x — the "top-centre-left"
-		// bug. Constraints re-anchor on every layout for free.
+		// Auto Layout. The old absolute frame was computed ONCE from win.bounds at
+		// creation and went stale when the window resized (the visionOS
+		// free-resizing window / a landscape relayout), stranding the label at the
+		// old x — the "top-centre-left" bug. Constraints re-anchor for free.
 		fps.translatesAutoresizingMaskIntoConstraints = NO;
 		[win addSubview:fps];
-		UILayoutGuide *safe = win.safeAreaLayoutGuide;
+#ifdef VKQ_VISIONOS
+		// Vision Pro: safe-area corner, as tuned in 1.0.3. No sensor housing to
+		// dodge and no display corner radius eating the window's own corner.
+		UILayoutGuide *anchorGuide = win.safeAreaLayoutGuide;
+		const CGFloat  fpsRight = -8, fpsTop = 4;
+#else
+		// iPhone: deliberately NOT the safe-area guide. In landscape UIKit insets
+		// it by the sensor-housing width on BOTH edges (~60 pt on a Dynamic Island
+		// phone), which parked the counter a long way in from the corner. The
+		// housing is a pill in the vertical MIDDLE of that edge, so the top corner
+		// itself is free. These insets clear the display's own corner radius,
+		// which the simulator does NOT render and so cannot verify: for a 55–62 pt
+		// radius the rounded edge cuts in 8–12 pt at 26 pt down, so 16 pt keeps the
+		// whole box on glass either way.
+		UILayoutGuide *anchorGuide = nil;
+		const CGFloat  fpsRight = -16, fpsTop = 26;
+#endif
+		NSLayoutXAxisAnchor *trailing = anchorGuide ? anchorGuide.trailingAnchor : win.trailingAnchor;
+		NSLayoutYAxisAnchor *top = anchorGuide ? anchorGuide.topAnchor : win.topAnchor;
 		[NSLayoutConstraint activateConstraints:@[
-			[fps.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-8],
-			[fps.topAnchor constraintEqualToAnchor:safe.topAnchor constant:4],
-			[fps.widthAnchor constraintEqualToConstant:42],
-			[fps.heightAnchor constraintEqualToConstant:22],
+			[fps.trailingAnchor constraintEqualToAnchor:trailing constant:fpsRight],
+			[fps.topAnchor constraintEqualToAnchor:top constant:fpsTop],
+			[fps.widthAnchor constraintEqualToConstant:fpsW],
+			[fps.heightAnchor constraintEqualToConstant:fpsH],
 		]];
 	}
 	else if (!wantFps && fps)

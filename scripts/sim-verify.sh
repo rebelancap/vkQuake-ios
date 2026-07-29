@@ -61,7 +61,14 @@ echo "== launch (bridge enabled)"
 # argument buffers (default on) silently break every descriptor read — all
 # texture samples return zero, giving an entirely black screen (2D included)
 # with zero mvk-errors. Diagnosed empirically 2026-07-11; devices are fine.
+# SDL_JOYSTICK_MFI=0: the simulator forwards any game controller paired to the
+# MAC into the guest, SDL opens it, and the shell correctly hides the whole touch
+# overlay whenever the engine holds a gamepad. That is why NO sim screenshot in
+# this project's history has ever shown the touch controls (diagnosed 2026-07-28:
+# inGame=1 ctrl=1 hidden=1). Disabling SDL's MFi backend keeps the sim on the
+# touch path so the on-screen controls are actually verifiable here.
 SIMCTL_CHILD_VKQ_CONSOLE_BRIDGE=1 SIMCTL_CHILD_MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0 \
+SIMCTL_CHILD_SDL_JOYSTICK_MFI=0 \
 	xcrun simctl launch "$UDID" $BUNDLE
 
 echo "== waiting for console bridge on :$PORT"

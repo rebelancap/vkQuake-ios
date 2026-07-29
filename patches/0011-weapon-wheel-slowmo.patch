@@ -1,0 +1,79 @@
+vkquake-ios overlay 0011: weapon-wheel slow motion (rerelease-style).
+
+Holding the weapon wheel open dilates time in single player: the world
+runs at vkq_wheel_timescale (default 0.25) while the renderer keeps its
+full frame rate, eased in and out over ~120 ms. Scaled in BOTH places the
+engine derives a simulation dt -- Host_FilterTime for the client and the
+server-tick block in _Host_Frame, which recomputes its own dt from
+accumtime and would otherwise keep monsters and physics at full speed.
+Gated to a local single-player server so multiplayer and demos are
+untouched.
+
+--- a/Quake/host.c
++++ b/Quake/host.c
+@@ -68,6 +68,16 @@
+ cvar_t host_phys_max_ticrate = {"host_phys_max_ticrate", "0", CVAR_NONE}; // vso = [0 = disabled; MAX_PHYSICS_FREQ]
+ 
+ cvar_t host_timescale = {"host_timescale", "0", CVAR_NONE}; // johnfitz
++
++#ifdef VKQ_IOS
++// vkquake-ios: rerelease-style weapon-wheel time dilation. While the wheel is
++// held open in single player the world runs at this fraction of real time. Only
++// the SIMULATED frame time is scaled, never the frame rate, so it reads as slow
++// motion rather than a stutter. 0 or >=1 disables.
++cvar_t		 vkq_wheel_timescale = {"vkq_wheel_timescale", "0.25", CVAR_ARCHIVE};
++float		 vkq_wheel_scale = 1.0f; // eased current value; 1 = normal speed
++#define VKQ_WHEEL_RAMP 0.12f		 // seconds to ease all the way in or out
++#endif
+ cvar_t max_edicts = {"max_edicts", "32000", CVAR_NONE};		// vso -- changed from 8192 to 32000 = MAX_EDICTS, because there is no performance impact to do so
+ cvar_t cl_nocsqc = {"cl_nocsqc", "0", CVAR_NONE};			// spike -- blocks the loading of any csqc modules
+ 
+@@ -363,6 +373,9 @@
+ 	Cvar_RegisterVariable (&host_phys_max_ticrate); // vso
+ 	Cvar_SetCallback (&host_phys_max_ticrate, Phys_Ticrate_f);
+ 	Cvar_RegisterVariable (&host_timescale); // johnfitz
++#ifdef VKQ_IOS
++	Cvar_RegisterVariable (&vkq_wheel_timescale);
++#endif
+ 
+ 	Cvar_RegisterVariable (&cl_nocsqc);	 // spike
+ 	Cvar_RegisterVariable (&max_edicts); // johnfitz
+@@ -740,6 +753,25 @@
+ 		host_frametime = host_framerate.value;
+ 	else if (host_maxfps.value)								  // don't allow really long or short frames
+ 		host_frametime = CLAMP (0.0001, host_frametime, 0.1); // johnfitz -- use CLAMP
++
++#ifdef VKQ_IOS
++	// Weapon-wheel slow motion, eased with the REAL delta so the ramp is
++	// frame-rate independent. Single player only: on a remote server the world
++	// keeps running at full speed and scaling only our prediction would desync.
++	{
++		extern qboolean SCR_WeaponWheel_Active (void);
++		float			target = 1.0f, step;
++		if (vkq_wheel_timescale.value > 0.0f && vkq_wheel_timescale.value < 1.0f && sv.active && svs.maxclients == 1 && !cls.demoplayback &&
++			SCR_WeaponWheel_Active ())
++			target = q_max (0.05f, vkq_wheel_timescale.value);
++		step = (float)delta_since_last_frame / VKQ_WHEEL_RAMP;
++		if (vkq_wheel_scale < target)
++			vkq_wheel_scale = q_min (target, vkq_wheel_scale + step);
++		else if (vkq_wheel_scale > target)
++			vkq_wheel_scale = q_max (target, vkq_wheel_scale - step);
++		host_frametime *= vkq_wheel_scale;
++	}
++#endif
+ 
+ 	return true;
+ }
+@@ -1036,6 +1068,12 @@
+ 				host_frametime *= host_timescale.value;
+ 			else if (host_framerate.value)
+ 				host_frametime = host_framerate.value;
++#ifdef VKQ_IOS
++			// The server tick recomputes its own dt from accumtime, so the scale
++			// applied in Host_FilterTime does not reach it. Without this the view
++			// slows but monsters, doors and physics do not.
++			host_frametime *= vkq_wheel_scale;
++#endif
+ 		}
+ 
+ 		CL_SendCmd ();

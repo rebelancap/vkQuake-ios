@@ -149,6 +149,11 @@ echo "== xcodebuild (Release, $SDKNAME, unsigned)"
 xcodebuild -project "$IOSDIR/vkQuake.xcodeproj" -target "$XCTARGET" -configuration Release \
 	-sdk $SDKNAME ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
 	CODE_SIGNING_ALLOWED=NO \
+	`# VKQ_DEV_BUILD gates debugging-only features (the Remote Console switch, which` \
+	`# opens an unauthenticated engine command port). Always on for the simulator —` \
+	`# this lane is verification-only and never shipped. Release builds derive it` \
+	`# from the version number and ship without it.` \
+	GCC_PREPROCESSOR_DEFINITIONS='$(inherited) VKQ_DEV_BUILD=1' \
 	SYMROOT="$ROOT/build/$PLAT-sim/xcode" \
 	LIBRARY_SEARCH_PATHS="$ROOT/build/$PLAT-sim $DEPS/sdl-prefix/lib $DEPS/codec-prefix/lib $MVK_SLICE" \
 	OTHER_LDFLAGS="-ObjC -force_load $LIB -lSDL3 -lMoltenVK -lc++ -lz -liconv -lvorbisfile -lvorbis -logg" \

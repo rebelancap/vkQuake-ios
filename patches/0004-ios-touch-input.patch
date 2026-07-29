@@ -1,6 +1,6 @@
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -161,15 +161,53 @@
+@@ -161,15 +161,59 @@
  #endif
  }
  
@@ -11,6 +11,7 @@
 +// the shell when a text field / console is active; the shell shows/hides its own
 +// keyboard and feeds characters back via VKQ_TouchChar / VKQ_TouchKey.
 +extern void VKQ_iOS_SetTextActive (int active);
++static void IN_TouchLook_f (void); // defined with the touch bridge below
 +// Shell still uses this to position SDL's view-shift when the native keyboard shows.
 +void VKQ_iOS_SetTextInputRect (int x, int y, int w, int h)
 +{
@@ -50,6 +51,11 @@
 +	// tap stuck on the first item. Turn the synthesis OFF so its stale-position mouse
 +	// buttons don't also fire spurious menu clicks.
 +	SDL_SetHint (SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
++	// Console seam for the touch look bridge. Without it the touch aim path is
++	// unreachable from the console — on a simulator synthetic events bypass
++	// UIKit entirely, so a touch-look regression could never be caught without
++	// hands on glass. Feeds the same accumulator a finger drag does.
++	Cmd_AddCommand ("vkq_touchlook", IN_TouchLook_f);
 +#endif
  	if (safemode || COM_CheckParm ("-nomouse"))
  	{
@@ -80,7 +86,7 @@
  	moveDeadzone = IN_ApplyDeadzone (moveRaw, joy_deadzone_move.value, joy_outer_threshold_move.value);
  	lookDeadzone = IN_ApplyDeadzone (lookRaw, joy_deadzone_look.value, joy_outer_threshold_look.value);
  
-@@ -593,8 +650,58 @@
+@@ -593,8 +650,75 @@
  		else
  			cmd->forwardmove_accumulator -= m_forward.value * dmy;
  	}
@@ -108,6 +114,16 @@
 +	vkq_look_yaw += dyaw_deg;
 +	vkq_look_pitch += dpitch_deg;
 +}
++// `vkq_touchlook <dyaw> <dpitch>` (degrees; +dpitch looks DOWN, as in viewangles)
++static void IN_TouchLook_f (void)
++{
++	if (Cmd_Argc () != 3)
++	{
++		Con_Printf ("vkq_touchlook <dyaw> <dpitch> : inject a touch-look delta, in degrees\n");
++		return;
++	}
++	VKQ_TouchLook ((float)atof (Cmd_Argv (1)), (float)atof (Cmd_Argv (2)));
++}
 +void VKQ_TouchKey (int key, int down) { Key_Event (key, down ? true : false); }
 +void VKQ_TouchChar (int c) { Char_Event (c); } // native iOS keyboard -> engine text input
 +void VKQ_TouchCommand (const char *text) { Cbuf_AddText (text); }
@@ -125,6 +141,13 @@
 +	float run = (vkq_touch_run && cl_movespeedkey.value > 0) ? cl_movespeedkey.value : 1.0f;
 +	cmd->forwardmove += cl_forwardspeed.value * run * vkq_move_fwd;
 +	cmd->sidemove += cl_sidespeed.value * run * vkq_move_side;
++
++	// Touch and gyro look must stop pitch drift, exactly as the mouse and stick
++	// paths do (IN_MouseMove / IN_JoyMove). Without this, cl.nodrift is never
++	// set on a touch-only device, so V_DriftPitch springs the view back to
++	// level within a second of every aim — you cannot hold a look up or down.
++	if (vkq_look_yaw != 0.0f || vkq_look_pitch != 0.0f)
++		V_StopPitchDrift ();
 +
 +	cl.viewangles[YAW] -= vkq_look_yaw;
 +	cl.viewangles[PITCH] += vkq_look_pitch;

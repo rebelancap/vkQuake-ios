@@ -154,9 +154,24 @@ void VKQ_iOS_EarlyLog (void)
 
 void VKQ_iOS_ConsoleBridgeStart (void)
 {
-	const char *env = getenv ("VKQ_CONSOLE_BRIDGE");
-	if (!env || env[0] != '1')
+	// Two ways in. The env var is the desktop path (devicectl sets it at launch),
+	// but devicectl needs USB / local-network device services, which do NOT
+	// traverse a tailnet — so an OTA-installed app tapped from the home screen
+	// could never open the bridge, and the phone was unreachable no matter that
+	// tailscale could ping it. The iOS setting fixes exactly that case.
+	extern float vkq_setting_f (const char *key, float def);
+	static BOOL	 started;
+	const char	*env = getenv ("VKQ_CONSOLE_BRIDGE");
+	BOOL		 want = (env && env[0] == '1');
+#ifdef VKQ_DEV_BUILD
+	// Settings switch: DEV BUILDS ONLY. A public release must never ship a way to
+	// open an unauthenticated command port from the UI. See VKQ_DEV_BUILD in
+	// publish-ota.sh — it is derived from the version scheme, not set by hand.
+	want = want || vkq_setting_f ("remoteConsole", 0.0f) > 0.5f;
+#endif
+	if (!want || started)
 		return;
+	started = YES;
 
 	const char *docs = VKQ_iOS_DocumentsPath ();
 	log_path = [NSString stringWithFormat:@"%s/console.log", docs ? docs : "/tmp"];
