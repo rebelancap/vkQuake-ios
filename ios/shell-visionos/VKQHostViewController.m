@@ -175,7 +175,7 @@ void VKQ_iOS_Sync3DAspect (void)
 // Runs on the main thread after SwiftUI's dismissImmersiveSpace completes (the
 // Exit button / vkq3d 0 path) — and from the scene-activate fallback. With
 // MIXED immersion the 2D window never deactivates, so the original
-// activate-only trigger never fired and the window stayed frozen (the maintainer's
+// activate-only trigger never fired and the window stayed frozen (the
 // exit-freeze report): the engine was still in offscreen 3D mode.
 void VKQ_Exit3DFinalize (void)
 {

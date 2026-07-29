@@ -98,7 +98,7 @@ extern void VKQ_GetWindowSize (int *w, int *h); // engine (points; drawable is 2
 // of the default separation.
 static NSString *vkq_vp3d_value_text (NSString *key, float v)
 {
-	BOOL ft = vkq_setting_f ("vp3dUnits", 1.0f) > 0.5f; // ft default (quake3e)
+	BOOL ft = vkq_setting_f ("vp3dUnits", 1.0f) > 0.5f; // ft default (matches quake3e)
 	if ([key isEqualToString:@"vp3dHeight"]) // relative to eye level — show the sign
 		return ft ? [NSString stringWithFormat:@"%+.1f ft", v * 3.28084f] : [NSString stringWithFormat:@"%+.2f m", v];
 	if ([key isEqualToString:@"vp3dDist"])
@@ -402,7 +402,7 @@ static const char *ctl_key (UIControl *ctl)
 	return s == 0 ? 72.0 : UITableViewAutomaticDimension;
 }
 
-// "Vision Pro 3D" header carries the Reset control (the maintainer's layout).
+// "Vision Pro 3D" header carries the Reset control.
 - (UIView *)tableView:(UITableView *)t viewForHeaderInSection:(NSInteger)s
 {
 	if (s != 0)
@@ -506,7 +506,7 @@ UIViewController *VKQ_iOS_MakeSettingsNav (void)
 {
 	// BARE table for the SwiftUI sheet: the sheet supplies its own header with a
 	// Done button (the UIKit nav bar's Done did not survive presentation from
-	// the small parked window — testing got stuck with only the window-close X,
+	// the small parked window — that left only the window-close X,
 	// which kills the scene and the audio session with it).
 	return [[VKQSettingsVC alloc] initWithStyle:UITableViewStyleInsetGrouped];
 }

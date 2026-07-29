@@ -1,4 +1,7 @@
 #!/bin/bash
+# Device identifiers come from an untracked local file (see
+# scripts/device.local.sh.example) or the environment — never hardcoded here.
+[ -f "$(dirname "$0")/device.local.sh" ] && . "$(dirname "$0")/device.local.sh"
 # Interactive remote console for vkQuake on the iPhone (charter's "most
 # valuable debugging tool").
 #
@@ -9,13 +12,13 @@
 # Every engine console line streams to your terminal (tee'd from stdout);
 # anything you type runs as an engine command (bind · impulse 2 · map e1m1 ·
 # host_maxfps 120 · developer 1 ...). Ctrl-C detaches; the app keeps running.
-# Reattaching only needs nc:  nc my-iphone.local 27999
+# Reattaching only needs nc:  nc "$DEVICE_HOST" 27999
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEVICE="00000000-0000-0000-0000-000000000000"
+DEVICE="${DEVICE_UDID:?set DEVICE_UDID (see scripts/device.local.sh.example)}"
 BUNDLE=com.rebelancap.vkquake
-HOST="my-iphone.local"
+HOST="${DEVICE_HOST:-my-iphone.local}"
 PORT=27999
 APP="$ROOT/build/ios/xcode/Release-iphoneos/vkQuake.app"
 DO_INSTALL=0

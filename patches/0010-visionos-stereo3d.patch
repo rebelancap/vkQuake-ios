@@ -36,7 +36,7 @@ diff -ruN a/Quake/gl_screen.c b/Quake/gl_screen.c
  		char st[16];
  		int	 x, y;
 +#ifdef VKQ_VISIONOS
-+		// overlay 0010: on the 3D panel show just the number (a request),
++		// overlay 0010: on the 3D panel show just the number (by request),
 +		// pinned TOP-RIGHT to match the 2D HUD FPS — the vanilla bottom-right
 +		// lands off the user's gaze on the wide world-locked panel.
 +		q_snprintf (st, sizeof (st), "%4.0f", lastfps);

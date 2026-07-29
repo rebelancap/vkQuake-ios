@@ -41,3 +41,6 @@ RELEASING.md
 
 # Personal publishing infra (tailnet host + signing key IDs)
 scripts/publish-ota.sh
+
+# local device identifiers — personal data, never committed
+scripts/device.local.sh

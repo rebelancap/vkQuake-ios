@@ -148,7 +148,7 @@ static simd_float4x4 vkq_make_screen_anchor (simd_float4x4 originFromDevice)
 // Persistent per-eye copies of the engine's present image (which alternates eyes).
 static id<MTLTexture> vkq_eyeCopy[2];
 
-// One-shot fidelity report (on-device: "be exact on maximizing Vision Pro fidelity").
+// One-shot fidelity report (goal: be exact on maximizing Vision Pro fidelity).
 // Measures the ACTUAL supersample ratio instead of estimating it: per-eye drawable
 // render pixels (compositor viewport) + FOV (view tangents) give the panel's real
 // screen-space footprint; game-texture ÷ footprint = supersample. Written to

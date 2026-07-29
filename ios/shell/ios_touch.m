@@ -1114,7 +1114,7 @@ static void vkq_build_ui (void)
 	b.upCmd = @"-attack\n";
 	b.haptic = YES;
 	set_symbol (b, @"scope"); // crosshairs
-	// Positions below marked "the maintainer's layout" were arranged on the device and
+	// Positions below were arranged on the device and
 	// read back over the console bridge (touchedit print, 2026-07-28), then
 	// promoted to defaults. Crouch sits hard right and off the bottom edge, which
 	// clears the Quake status bar entirely.

@@ -140,7 +140,7 @@ struct VKQRootView: View {
                         Image(systemName: "gearshape.fill")
                     }
                 }
-                .font(.title3) // larger, readable (matching q2repro's button size)
+                .font(.title3) // larger, readable (matches q2repro's button size)
                 .buttonStyle(.borderless)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
