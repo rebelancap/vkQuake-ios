@@ -317,21 +317,36 @@ static const char *ctl_key (UIControl *ctl)
 		// Slider + live value readout. The readout is the point of the row — a
 		// bare knob tells you nothing about what you are sliding to. visionOS
 		// gets the wider treatment (m/ft honoring the units toggle).
+		//
+		// LAID OUT WITH CONSTRAINTS, not a fixed-size accessoryView. The old
+		// accessoryView was a rigid 452pt box on visionOS, which fits the 900pt
+		// SwiftUI sheet but not the much narrower UIKit form sheet the in-menu
+		// gear button opens — there the box ate the whole cell and cropped every
+		// title down to its first letter ("Screen Distance" -> "S"). Now the
+		// slider gives up width first (down to slMin) and the title only shrinks
+		// after that, so no sheet width can hide what a slider controls.
 #ifdef VKQ_VISIONOS
-		const CGFloat labelW = 84, sliderW = 360, gap = 8, valFont = 16;
+		const CGFloat valW = 84, slMin = 170, slMax = 360, gap = 10, valFont = 16;
 #else
-		const CGFloat labelW = 58, sliderW = 180, gap = 8, valFont = 14;
+		const CGFloat valW = 58, slMin = 120, slMax = 220, gap = 8, valFont = 14;
 #endif
-		UIView	 *box = [[UIView alloc] initWithFrame:CGRectMake (0, 0, sliderW + gap + labelW, 34)];
-		UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake (0, 2, sliderW, 30)];
-		UILabel	 *val = [[UILabel alloc] initWithFrame:CGRectMake (sliderW + gap, 2, labelW, 30)];
+		UIView	*cv = c.contentView;
+		UILabel *title = [UILabel new];
+		title.text = r.title;
+		title.font = c.textLabel.font;
+		title.textColor = c.textLabel.textColor;
+		title.adjustsFontSizeToFitWidth = YES; // shrink before truncating
+		title.minimumScaleFactor = 0.7;
+		title.lineBreakMode = NSLineBreakByTruncatingTail;
+		c.textLabel.text = nil; // the constrained title replaces the stock one
+
+		UISlider *sl = [UISlider new];
+		UILabel	 *val = [UILabel new];
 		val.textColor = [UIColor colorWithWhite:0.85 alpha:1];
 		val.font = [UIFont monospacedDigitSystemFontOfSize:valFont weight:UIFontWeightMedium];
 		val.textAlignment = NSTextAlignmentRight;
 		val.text = vkq_row_value_text (r.key, v);
 		objc_setAssociatedObject (sl, "vkq_val_label", val, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		[box addSubview:sl];
-		[box addSubview:val];
 		sl.minimumValue = r.mn;
 		sl.maximumValue = r.mx;
 		sl.value = v;
@@ -339,7 +354,38 @@ static const char *ctl_key (UIControl *ctl)
 		tag_ctl (sl, r);
 		[sl addTarget:self action:@selector (sliderChanged:) forControlEvents:UIControlEventValueChanged];
 		[sl addTarget:self action:@selector (sliderReleased:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
-		c.accessoryView = box;
+
+		for (UIView *sub in @[ title, sl, val ])
+		{
+			sub.translatesAutoresizingMaskIntoConstraints = NO;
+			[cv addSubview:sub];
+		}
+		// The title holds its natural width (hugging 751) but yields it under
+		// pressure (compression resistance 250) — the slider's slMin floor wins
+		// the argument, and slack lands in the gap between title and slider.
+		[title setContentHuggingPriority:UILayoutPriorityDefaultHigh + 1 forAxis:UILayoutConstraintAxisHorizontal];
+		[title setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+		NSLayoutConstraint *slWide = [sl.widthAnchor constraintEqualToConstant:slMax];
+		slWide.priority = UILayoutPriorityDefaultHigh; // 750: honored when there is room
+		NSLayoutConstraint *slBottom = [sl.bottomAnchor constraintEqualToAnchor:cv.bottomAnchor constant:-6];
+		slBottom.priority = UILayoutPriorityRequired - 1; // avoid fighting UIKit's sizing pass
+		[NSLayoutConstraint activateConstraints:@[
+			[title.leadingAnchor constraintEqualToAnchor:cv.layoutMarginsGuide.leadingAnchor],
+			[sl.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:gap + 4],
+			[sl.trailingAnchor constraintEqualToAnchor:val.leadingAnchor constant:-gap],
+			[sl.widthAnchor constraintGreaterThanOrEqualToConstant:slMin],
+			[sl.widthAnchor constraintLessThanOrEqualToConstant:slMax],
+			slWide,
+			[val.trailingAnchor constraintEqualToAnchor:cv.layoutMarginsGuide.trailingAnchor],
+			[val.widthAnchor constraintEqualToConstant:valW],
+			[sl.topAnchor constraintEqualToAnchor:cv.topAnchor constant:6],
+			slBottom,
+			[sl.heightAnchor constraintGreaterThanOrEqualToConstant:30],
+			[title.centerYAnchor constraintEqualToAnchor:sl.centerYAnchor],
+			[val.centerYAnchor constraintEqualToAnchor:sl.centerYAnchor],
+			[title.topAnchor constraintGreaterThanOrEqualToAnchor:cv.topAnchor constant:4],
+			[title.bottomAnchor constraintLessThanOrEqualToAnchor:cv.bottomAnchor constant:-4],
+		]];
 	}
 	return c;
 }
@@ -397,9 +443,12 @@ static const char *ctl_key (UIControl *ctl)
 #ifdef VKQ_VISIONOS
 // Custom header views get a COMPRESSED height without an explicit delegate —
 // which shoved "Vision Pro 3D"/Reset up under the sheet's Settings bar.
+// ... and a header that is TALLER than its content, not shorter: the button is
+// ~44pt of glass, and a 72pt slot with the label pinned 6pt off the bottom left
+// it hanging 6pt past the header, painted over the first slider row.
 - (CGFloat)tableView:(UITableView *)t heightForHeaderInSection:(NSInteger)s
 {
-	return s == 0 ? 72.0 : UITableViewAutomaticDimension;
+	return s == 0 ? 92.0 : UITableViewAutomaticDimension;
 }
 
 // "Vision Pro 3D" header carries the Reset control.
@@ -409,7 +458,7 @@ static const char *ctl_key (UIControl *ctl)
 		return nil;
 	// Tall header with a REAL bordered Reset button — the bare-text version sat
 	// tight under the sheet's Settings bar and was nearly impossible to gaze-pinch.
-	UIView	*hv = [[UIView alloc] initWithFrame:CGRectMake (0, 0, t.bounds.size.width, 64)];
+	UIView	*hv = [[UIView alloc] initWithFrame:CGRectMake (0, 0, t.bounds.size.width, 92)];
 	UILabel *l = [UILabel new];
 	l.text = @"Vision Pro 3D";
 	l.font = [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold];
@@ -424,11 +473,16 @@ static const char *ctl_key (UIControl *ctl)
 	[reset addTarget:self action:@selector (resetVision3D) forControlEvents:UIControlEventTouchUpInside];
 	[hv addSubview:l];
 	[hv addSubview:reset];
+	// Anchor the BUTTON (the tallest thing here) with real clearance above the
+	// first row, and hang the label off its centre — pinning the label instead
+	// let the button overflow by however much taller than the text it was.
 	[NSLayoutConstraint activateConstraints:@[
 		[l.leadingAnchor constraintEqualToAnchor:hv.leadingAnchor constant:20],
-		[l.bottomAnchor constraintEqualToAnchor:hv.bottomAnchor constant:-6],
 		[reset.trailingAnchor constraintEqualToAnchor:hv.trailingAnchor constant:-20],
-		[reset.centerYAnchor constraintEqualToAnchor:l.centerYAnchor],
+		[reset.bottomAnchor constraintEqualToAnchor:hv.bottomAnchor constant:-16],
+		[reset.topAnchor constraintGreaterThanOrEqualToAnchor:hv.topAnchor constant:8],
+		[l.centerYAnchor constraintEqualToAnchor:reset.centerYAnchor],
+		[l.trailingAnchor constraintLessThanOrEqualToAnchor:reset.leadingAnchor constant:-12],
 	]];
 	return hv;
 }
@@ -523,6 +577,12 @@ void VKQ_iOS_PresentSettings (void)
 		UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
 		nav.modalPresentationStyle = UIModalPresentationFormSheet;
 		nav.navigationBar.titleTextAttributes = @{NSForegroundColorAttributeName : UIColor.greenColor};
+#ifdef VKQ_VISIONOS
+		// Match the SwiftUI sheet's 900pt: the stock form-sheet width left the
+		// panel sliders no room to be precise with, and this is the sheet the
+		// in-menu gear opens (the ornament's gear opens the SwiftUI one).
+		nav.preferredContentSize = CGSizeMake (900, 760);
+#endif
 		[root presentViewController:nav animated:YES completion:nil];
 	});
 }

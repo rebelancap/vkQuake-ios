@@ -560,16 +560,21 @@
  		SCR_DrawClock (cbx);	// johnfitz
 --- a/Quake/common.c
 +++ b/Quake/common.c
-@@ -2692,10 +2692,12 @@
+@@ -2692,10 +2692,17 @@
  		Sky_ClearAll ();
  		if (!isDedicated)
  		{
-+			void SCR_WeaponWheel_NewGame (void); // gl_screen.c: drop the wheel's stale texture cache
  			TexMgr_NewGame ();
  			Draw_NewGame ();
  			R_NewGame ();
  			M_NewGame ();
++#ifdef VKQ_IOS
++			// gl_screen.c: drop the wheel's stale texture cache. The wheel itself
++			// lives inside #ifdef VKQ_IOS, so the CALL has to be gated too — left
++			// bare, it links fine on iOS and breaks the macOS oracle's link.
++			void SCR_WeaponWheel_NewGame (void);
 +			SCR_WeaponWheel_NewGame ();
++#endif
  		}
  		ExtraMaps_NewGame ();
  		Host_Resetdemos ();
