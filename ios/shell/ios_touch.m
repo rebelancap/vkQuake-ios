@@ -1048,10 +1048,17 @@ void VKQ_iOS_FakeTouch (float nx, float ny, int phase)
 	}
 }
 
-// place a centered SF Symbol on an icon button
+// Place a centered SF Symbol on an in-game touch button.
+//
+// 0.375 of the button diameter, Medium weight — the glyphs were 0.5 and
+// Semibold, which read as heavy stamps sitting inside their circles rather than
+// as quiet markers on them. This is the IN-GAME layer only: the menu chrome
+// (back, gear, quick save/load, keyboard dismiss, layout-editor reset/done)
+// builds its images inline and is deliberately left at its old size and weight,
+// because those are read once and tapped, not glanced past while playing.
 static void set_symbol (VKQButton *b, NSString *name)
 {
-	CGFloat	 s = b.baseSize * 0.5;
+	CGFloat	 s = b.baseSize * 0.375;
 	UIImage *base = [UIImage systemImageNamed:name];
 	if (!base)
 	{
@@ -1061,7 +1068,7 @@ static void set_symbol (VKQButton *b, NSString *name)
 		return;
 	}
 	UIImage *img = [base imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:s
-																							   weight:UIImageSymbolWeightSemibold]];
+																							   weight:UIImageSymbolWeightMedium]];
 	UIImageView *iv = [[UIImageView alloc] initWithImage:img];
 	iv.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
 	iv.contentMode = UIViewContentModeCenter;
