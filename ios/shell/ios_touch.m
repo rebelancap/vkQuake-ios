@@ -40,6 +40,13 @@ extern void VKQ_iOS_OnboardingDismiss (void);            // hide the onboarding 
 #define STICK_RADIUS 62.0f     // move stick: thumb travel for full deflection
 #define LOOK_DEG_PER_PT 0.22f  // drag-to-look base sensitivity
 
+// In-game touch glyphs: a fraction of the button's live diameter, at a weight
+// that reads as a marker ON the button rather than a stamp inside it. Menu
+// chrome (back, gear, quick save/load, keyboard dismiss, editor reset/done)
+// deliberately does NOT use these — it builds its images inline at fixed sizes.
+#define VKQ_GLYPH_RATIO 0.375f
+#define VKQ_GLYPH_WEIGHT UIImageSymbolWeightMedium
+
 static float look_accel (float d)
 {
 	// gentle velocity boost so deliberate flicks turn faster than slow tracking
@@ -74,8 +81,29 @@ static float look_accel (float d)
 @property (nonatomic) CGPoint defaultUnit;     // shipped placement, for Reset
 @property (nonatomic) CGFloat baseSize;
 @property (nonatomic, weak) UITouch *touch;
+@property (nonatomic, copy) NSString *symbolName; // SF Symbol drawn on the button (nil = text label)
+@property (nonatomic, weak) UIImageView *glyph;   // view symbolName renders into
+@property (nonatomic) CGFloat glyphScale;         // scale the glyph was last rendered at
+- (void)renderSymbolAtScale:(CGFloat)scale;
 @end
-@implementation VKQButton @end
+@implementation VKQButton
+// The glyph tracks the BUTTON's live size, so the layout editor's size slider
+// scales what is drawn on a button along with the button itself. Re-rendering
+// the SF Symbol at the new point size — rather than stretching the old bitmap —
+// keeps it vector-crisp at every scale; the images are cheap and this only runs
+// when the scale actually changes.
+- (void)renderSymbolAtScale:(CGFloat)scale
+{
+	if (!self.symbolName || !self.glyph || scale == self.glyphScale)
+		return;
+	UIImage *base = [UIImage systemImageNamed:self.symbolName];
+	if (!base)
+		return;
+	self.glyphScale = scale;
+	self.glyph.image = [base imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:self.baseSize * scale * VKQ_GLYPH_RATIO
+																									weight:VKQ_GLYPH_WEIGHT]];
+}
+@end
 
 // Saved position keys: vkq.btn.<ident>.x / .y, alongside vkq.layoutSet which
 // records whether the user has customised anything at all.
@@ -641,6 +669,9 @@ static NSString *vkq_btn_key (NSString *ident, const char *axis) { return [NSStr
 		CGFloat sz = b.baseSize * scale;
 		b.bounds = CGRectMake (0, 0, sz, sz);
 		b.layer.cornerRadius = sz / 2;
+		// Glyph follows the button. -renderSymbolAtScale: no-ops when the scale
+		// is unchanged, so the opacity-only path costs nothing.
+		[b renderSymbolAtScale:scale];
 	}
 	[self setNeedsLayout];
 }
@@ -1048,33 +1079,29 @@ void VKQ_iOS_FakeTouch (float nx, float ny, int phase)
 	}
 }
 
-// Place a centered SF Symbol on an in-game touch button.
-//
-// 0.375 of the button diameter, Medium weight — the glyphs were 0.5 and
-// Semibold, which read as heavy stamps sitting inside their circles rather than
-// as quiet markers on them. This is the IN-GAME layer only: the menu chrome
-// (back, gear, quick save/load, keyboard dismiss, layout-editor reset/done)
-// builds its images inline and is deliberately left at its old size and weight,
-// because those are read once and tapped, not glanced past while playing.
+// Attach an SF Symbol to an in-game touch button. The image itself is produced
+// by -renderSymbolAtScale:, which applyAppearance: re-runs whenever the layout
+// editor's size slider moves — so the glyph grows and shrinks with its button.
 static void set_symbol (VKQButton *b, NSString *name)
 {
-	CGFloat	 s = b.baseSize * 0.375;
-	UIImage *base = [UIImage systemImageNamed:name];
-	if (!base)
+	if (![UIImage systemImageNamed:name])
 	{
 		// Unknown symbol name on this OS: leave the button's text label alone
 		// rather than clearing it below and shipping a blank circle.
 		NSLog (@"[vkquake] SF Symbol '%@' unavailable — keeping text label", name);
 		return;
 	}
-	UIImage *img = [base imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:s
-																							   weight:UIImageSymbolWeightMedium]];
-	UIImageView *iv = [[UIImageView alloc] initWithImage:img];
+	UIImageView *iv = [[UIImageView alloc] initWithFrame:b.bounds];
 	iv.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
 	iv.contentMode = UIViewContentModeCenter;
-	iv.frame = b.bounds;
 	iv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	[b addSubview:iv];
+	b.glyph = iv;
+	b.symbolName = name;
+	// Render at the SAVED scale, not 1.0: applyAppearance: does not run until the
+	// first frame poll, and starting at the wrong size is a visible pop on launch
+	// for anyone whose touch size is not the default.
+	[b renderSymbolAtScale:vkq_setting_f ("touchSize", 1.0f)];
 	for (UIView *sv in b.subviews)
 		if ([sv isKindOfClass:UILabel.class])
 			((UILabel *)sv).text = @"";
