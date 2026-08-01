@@ -1,0 +1,100 @@
+vkquake-ios overlay 0014: iOS audio session policy + a shell-owned master gain.
+
+The iOS Settings panel gains an Audio section that decides what happens to
+Quake's sound when another app (Music, a podcast, ...) is already playing:
+stop the other app, play both, lower the other app, lower Quake, or mute
+Quake. Four of the five are pure AVAudioSession category/option choices and
+live entirely in the shell (ios/shell/ios_audio.m); the two "lower/mute
+Quake" modes and the Game Volume slider need the engine to attenuate its own
+mix, which is what this patch adds.
+
+VKQ_SetSoundGain() sets a 0..1 multiplier applied to BOTH the sfx mix
+(snd_mix.c snd_vol) and the decoded music stream (bgmusic.c S_RawSamples).
+It is deliberately not a cvar and is deliberately not folded into
+volume/bgmvolume: both of those are CVAR_ARCHIVE, so a ducked value would be
+written to config.cfg and ratchet the user's real volume down on every
+launch, and it would fight the engine's own Sound Volume menu slider.
+
+main_sdl.c calls VKQ_iOS_AudioBoot() before Host_Init so the chosen session
+category is in place before SDL opens the audio device — SDL's first session
+activation is what interrupts other apps' audio, so "Stop Other Audio" has to
+be decided before it happens.
+
+--- a/Quake/main_sdl.c
++++ b/Quake/main_sdl.c
+@@ -120,6 +120,15 @@
+ 		extern void VKQ_iOS_EnsureGameData (void);
+ 		VKQ_iOS_EnsureGameData ();
+ 	}
++	// overlay 0014: choose the AVAudioSession policy (iOS Settings -> Audio)
++	// BEFORE Host_Init opens SDL's audio device. SDL sets the category itself at
++	// device-open time and only re-sets it when its own idea of the category
++	// differs, so the "Stop Other Audio" mode has to be in place before that
++	// first activation — that activation is what interrupts Music/podcasts.
++	{
++		extern void VKQ_iOS_AudioBoot (void);
++		VKQ_iOS_AudioBoot ();
++	}
+ 	// overlay 0002: iOS gives no meaningful argv; point basedir at the app's
+ 	// Documents dir (Files-visible, where game data is imported/pushed).
+ 	{
+--- a/Quake/snd_dma.c
++++ b/Quake/snd_dma.c
+@@ -77,6 +77,18 @@
+ 
+ cvar_t bgmvolume = {"bgmvolume", "1", CVAR_ARCHIVE};
+ cvar_t sfxvolume = {"volume", "0.7", CVAR_ARCHIVE};
++
++#ifdef VKQ_IOS
++// vkquake-ios overlay 0014: a shell-owned master gain, multiplied into the mix
++// on top of volume/bgmvolume. It carries the iOS "Game Volume" slider and the
++// automatic ducking/muting the Audio settings ask for when another app is
++// playing. Deliberately NOT a cvar and NOT folded into volume/bgmvolume: those
++// are CVAR_ARCHIVE, so writing a ducked value into them would persist it to
++// config.cfg and ratchet the user's real volume down a little on every launch,
++// and it would fight the engine's own Sound Volume menu slider.
++float vkq_snd_gain = 1.0f;
++void  VKQ_SetSoundGain (float g) { vkq_snd_gain = (g < 0.0f) ? 0.0f : (g > 1.0f ? 1.0f : g); }
++#endif
+ 
+ cvar_t precache = {"precache", "1", CVAR_NONE};
+ cvar_t loadas8bit = {"loadas8bit", "0", CVAR_NONE};
+--- a/Quake/snd_mix.c
++++ b/Quake/snd_mix.c
+@@ -406,7 +406,16 @@
+ 	sfxcache_t *sc;
+ 	qboolean	pause_loops = snd_pauselooping.value && (cl.paused || (sv.active && svs.maxclients == 1 && key_dest != key_game));
+ 
++#ifdef VKQ_IOS
++	// overlay 0014: iOS master gain (Game Volume slider + auto duck/mute while
++	// another app is playing). Applied here rather than to the volume cvar so the
++	// engine's own Sound Volume slider keeps working and nothing ducked ever
++	// reaches config.cfg. The raw/music stream is scaled in bgmusic.c.
++	extern float vkq_snd_gain;
++	snd_vol = sfxvolume.value * vkq_snd_gain * 256;
++#else
+ 	snd_vol = sfxvolume.value * 256;
++#endif
+ 
+ 	while (paintedtime < endtime)
+ 	{
+--- a/Quake/bgmusic.c
++++ b/Quake/bgmusic.c
+@@ -417,7 +417,17 @@
+ 
+ 		if (res > 0) /* data: add to raw buffer */
+ 		{
++#ifdef VKQ_IOS
++			// overlay 0014: same iOS master gain the sfx mix uses (snd_mix.c), so
++			// the Game Volume slider and the auto duck/mute cover music too. Note
++			// this scales the DECODED stream, so the track keeps advancing at gain
++			// 0 — muting for a podcast does not desync the music from the map.
++			extern float vkq_snd_gain;
++			S_RawSamples (fileSamples, bgmstream->info.rate, bgmstream->info.width, bgmstream->info.channels, raw,
++						  bgmvolume.value * vkq_snd_gain);
++#else
+ 			S_RawSamples (fileSamples, bgmstream->info.rate, bgmstream->info.width, bgmstream->info.channels, raw, bgmvolume.value);
++#endif
+ 			did_rewind = false;
+ 		}
+ 		else if (res == 0) /* EOF */

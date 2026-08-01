@@ -4,6 +4,7 @@
  * settings (menu size, always-run) are pushed through the Cbuf bridge.
  */
 #import "ios_settings.h"
+#import "ios_audio.h"
 #import <objc/runtime.h>
 
 extern void VKQ_TouchCommand (const char *text);
@@ -57,6 +58,7 @@ void VKQ_iOS_ApplySettingsToEngine (void)
 	snprintf (gammacmd, sizeof (gammacmd), "gamma %.3f\n", 1.0f - 0.5f * b);
 	VKQ_TouchCommand (gammacmd);
 	VKQ_iOS_SetRefresh ();
+	VKQ_iOS_AudioApply (); // session category/options + master gain (Audio section)
 #ifdef VKQ_VISIONOS
 	VKQ_iOS_Apply3DSettings (); // includes Surroundings Dimming + panel FPS on entry
 	// Engine-drawn FPS belongs to the 3D PANEL only (the UIKit "FPS Counter"
@@ -72,8 +74,9 @@ typedef enum
 	ROW_SLIDER,
 	ROW_SWITCH,
 	ROW_BUTTON,
-	ROW_INFO, // read-only feedback (panel width / aspect / height)
-	ROW_SEG	  // segmented m|ft (units)
+	ROW_INFO,  // read-only feedback (panel width / aspect / height)
+	ROW_SEG,   // segmented m|ft (units)
+	ROW_CHOICE // one-of-N; taps through to a list with an explanation per option
 } VKQRowType;
 
 // Live readout for a slider row, so you can see what you are sliding TO rather
@@ -83,7 +86,7 @@ static NSString *vkq_value_text (NSString *key, float v)
 {
 	if ([key isEqualToString:@"fov"])
 		return [NSString stringWithFormat:@"%.0f°", v];
-	if ([key isEqualToString:@"touchOpacity"] || [key isEqualToString:@"brightness"])
+	if ([key isEqualToString:@"touchOpacity"] || [key isEqualToString:@"brightness"] || [key isEqualToString:@"gameVolume"])
 		return [NSString stringWithFormat:@"%.0f%%", v * 100.0f];
 	if ([key isEqualToString:@"gyro"]) // 0 disables gyro aim entirely — say so
 		return v < 0.05f ? @"Off" : [NSString stringWithFormat:@"%.2f×", v];
@@ -156,6 +159,55 @@ static const char *ctl_key (UIControl *ctl)
 	return k.UTF8String;
 }
 
+// ---------------------------------------------------------------------------
+// One-of-N picker for a ROW_CHOICE. Each option carries a sentence saying what
+// it actually does — the whole point of the Audio section is that "duck" and
+// "mix" mean nothing to a player, and a bare four-word label would not help.
+@interface VKQChoiceVC : UITableViewController
+@property (nonatomic, copy) NSArray<NSString *> *titles, *details;
+@property (nonatomic, copy) NSString			*key;
+@property (nonatomic) float					 def; // the row's default, so a never-set key checkmarks the right option
+@property (nonatomic, copy) void (^onPick) (void);
+@end
+
+@implementation VKQChoiceVC
+- (void)viewDidLoad
+{
+	[super viewDidLoad];
+	self.tableView.backgroundColor = UIColor.blackColor;
+}
+- (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s { return self.titles.count; }
+- (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip
+{
+	UITableViewCell *c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+	c.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
+	c.textLabel.text = self.titles[ip.row];
+	c.textLabel.textColor = [UIColor colorWithRed:0.35 green:1 blue:0.35 alpha:1];
+	c.detailTextLabel.text = self.details[ip.row];
+	c.detailTextLabel.textColor = [UIColor colorWithWhite:0.68 alpha:1];
+	c.detailTextLabel.numberOfLines = 0; // let the explanation wrap rather than truncate
+	int cur = (int)lroundf (vkq_setting_f (self.key.UTF8String, self.def));
+	c.accessoryType = (ip.row == cur) ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+	c.tintColor = [UIColor colorWithRed:0.35 green:1 blue:0.35 alpha:1];
+	return c;
+}
+- (void)tableView:(UITableView *)t didSelectRowAtIndexPath:(NSIndexPath *)ip
+{
+	[t deselectRowAtIndexPath:ip animated:YES];
+	vkq_setting_set_f (self.key.UTF8String, (float)ip.row);
+	[t reloadData];
+	if (self.onPick)
+		self.onPick ();
+	// Let the checkmark land before backing out, so the choice is visibly taken.
+	dispatch_after (dispatch_time (DISPATCH_TIME_NOW, (int64_t) (0.25 * NSEC_PER_SEC)), dispatch_get_main_queue (), ^{
+		if (self.navigationController.viewControllers.firstObject == self)
+			[self dismissViewControllerAnimated:YES completion:nil];
+		else
+			[self.navigationController popViewControllerAnimated:YES];
+	});
+}
+@end
+
 @interface VKQSettingsVC : UITableViewController
 @end
 
@@ -176,7 +228,7 @@ static const char *ctl_key (UIControl *ctl)
 #ifdef VKQ_VISIONOS
 		@"Vision Pro 3D",
 #endif
-		@"Aim", @"Display", @"Touch Controls", @"Gameplay"
+		@"Aim", @"Display", @"Audio", @"Touch Controls", @"Gameplay"
 	];
 	_rows = @[
 #ifdef VKQ_VISIONOS
@@ -203,6 +255,9 @@ static const char *ctl_key (UIControl *ctl)
 			mkrow (@"Look Sensitivity (V)", @"sensV", ROW_SLIDER, 0.3, 3.0, 1.0),
 			mkrow (@"Invert Look", @"invert", ROW_SWITCH, 0, 1, 0),
 			mkrow (@"Gyro Aim", @"gyro", ROW_SLIDER, 0.0, 3.0, 0.0),
+			// Separate from "Invert Look" on purpose — tilt-to-aim has two equally
+			// common conventions and they are not the same preference as a thumb drag.
+			mkrow (@"Invert Gyro (Vertical)", @"gyroInvert", ROW_SWITCH, 0, 1, 0),
 		],
 		@[
 			mkrow (@"Field of View", @"fov", ROW_SLIDER, 90, 120, 90),
@@ -211,6 +266,12 @@ static const char *ctl_key (UIControl *ctl)
 			mkrow (@"Brightness", @"brightness", ROW_SLIDER, 0.0, 1.0, 0.2),
 			mkrow (@"Menu / HUD Size", @"menuSize", ROW_SLIDER, 0.6, 2.5, 1.3),
 			mkrow (@"120 Hz (ProMotion)", @"refresh120", ROW_SWITCH, 0, 1, 1),
+		],
+		@[
+			// Master gain on top of the engine's own Sound/Music Volume sliders, so
+			// this never overwrites what the in-game Options menu is set to.
+			mkrow (@"Game Volume", @"gameVolume", ROW_SLIDER, 0.0, 1.0, 1.0),
+			mkrow (@"Other App Audio", @"audioMode", ROW_CHOICE, 0, VKQ_AUDIO_MODE_COUNT - 1, VKQ_AUDIO_DUCK_OTHERS),
 		],
 		@[
 			// Button size lives in the layout editor now, as a live slider you can
@@ -245,6 +306,13 @@ static const char *ctl_key (UIControl *ctl)
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return _sections.count; }
 - (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)s { return _sections[s]; }
+- (NSString *)tableView:(UITableView *)t titleForFooterInSection:(NSInteger)s
+{
+	if ([_sections[s] isEqualToString:@"Audio"])
+		return @"“Other App Audio” only matters while something else — music, a podcast — is already playing. "
+			   @"Game Volume rides on top of the in-game Options → Sound/Music Volume sliders, so it never overwrites them.";
+	return nil;
+}
 - (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s { return _rows[s].count; }
 
 - (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip
@@ -256,6 +324,21 @@ static const char *ctl_key (UIControl *ctl)
 	c.textLabel.textColor = [UIColor colorWithRed:0.35 green:1 blue:0.35 alpha:1];
 	c.selectionStyle = UITableViewCellSelectionStyleNone;
 	float v = vkq_setting_f (r.key.UTF8String, r.def);
+	if (r.type == ROW_CHOICE)
+	{
+		// Value1 style: title on the left, the CURRENT option on the right, so the
+		// section reads as an answer without having to open the picker.
+		UITableViewCell *cc = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+		cc.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
+		cc.textLabel.text = r.title;
+		cc.textLabel.textColor = [UIColor colorWithRed:0.35 green:1 blue:0.35 alpha:1];
+		NSArray<NSString *> *opts = VKQ_iOS_AudioModeTitles ();
+		int					 idx = (int)lroundf (v);
+		cc.detailTextLabel.text = (idx >= 0 && idx < (int)opts.count) ? opts[idx] : @"-";
+		cc.detailTextLabel.textColor = [UIColor colorWithWhite:0.85 alpha:1];
+		cc.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+		return cc;
+	}
 	if (r.type == ROW_BUTTON)
 	{
 		c.textLabel.textColor = [UIColor colorWithRed:0.4 green:0.8 blue:1.0 alpha:1];
@@ -422,6 +505,31 @@ static const char *ctl_key (UIControl *ctl)
 {
 	VKQRow *r = _rows[ip.section][ip.row];
 	[t deselectRowAtIndexPath:ip animated:YES];
+	if (r.type == ROW_CHOICE)
+	{
+		VKQChoiceVC *pick = [[VKQChoiceVC alloc] initWithStyle:UITableViewStyleInsetGrouped];
+		pick.title = r.title;
+		pick.titles = VKQ_iOS_AudioModeTitles ();
+		pick.details = VKQ_iOS_AudioModeDetails ();
+		pick.key = r.key;
+		pick.def = r.def;
+		__weak VKQSettingsVC *weakSelf = self;
+		pick.onPick = ^{
+			VKQ_iOS_AudioApply ();
+			[weakSelf.tableView reloadData]; // refresh the summary on the parent row
+		};
+		// Vision Pro opens this table bare inside a SwiftUI sheet — there is no
+		// navigation controller to push onto there, so wrap and present instead.
+		if (self.navigationController)
+			[self.navigationController pushViewController:pick animated:YES];
+		else
+		{
+			UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:pick];
+			nav.navigationBar.titleTextAttributes = @{NSForegroundColorAttributeName : UIColor.greenColor};
+			[self presentViewController:nav animated:YES completion:nil];
+		}
+		return;
+	}
 	if (r.type != ROW_BUTTON)
 		return;
 	if ([r.key isEqualToString:@"layoutEdit"])

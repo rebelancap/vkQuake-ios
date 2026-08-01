@@ -14,6 +14,7 @@
 #import <GameController/GameController.h>
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
+#import "ios_audio.h"
 #import "ios_settings.h"
 
 // --- engine bridge (in_sdl.c, overlay patch 0004) ---
@@ -1277,6 +1278,10 @@ void VKQ_iOS_FramePoll (void)
 			VKQ_Set3DEye ((vkq3d_eye_flip ^= 1) ? 1 : 2);
 	}
 #endif
+	// Master gain / other-app-audio ducking. Ahead of the g_touch guard on
+	// purpose: the mix gain has to keep tracking even before the overlay exists
+	// (the onboarding screen and the attract demo both make sound).
+	VKQ_iOS_AudioTick ();
 	if (!g_touch)
 		return;
 	// hide touch only when the ENGINE has an open gamepad — not merely when GCController
@@ -1371,15 +1376,66 @@ void VKQ_iOS_FramePoll (void)
 		glast = gnow;
 		if (dm && gdt > 0 && gdt < 0.1)
 		{
-#ifdef VKQ_VISIONOS
-			float flip = 1.f; // no interface orientation on visionOS (gyro n/a anyway)
-#else
-			UIInterfaceOrientation o = g_touch.window.windowScene.interfaceOrientation;
-			float				   flip = (o == UIInterfaceOrientationLandscapeLeft) ? -1.f : 1.f;
-#endif
+			// Gyro axes, done in the WORLD frame rather than the device frame.
+			//
+			// CMDeviceMotion.rotationRate is in DEVICE (portrait-referenced) axes:
+			// +x out the right edge, +y out the top edge, +z out of the screen. Held
+			// in landscape the device is rolled 90°, so the top edge is horizontal
+			// and the right edge is vertical — the old code read .y as yaw and .x as
+			// pitch, which is exactly backwards, and is why tilting the phone face-up
+			// turned the view sideways while turning the phone sideways pitched it.
+			//
+			// Swapping the two would fix the upright case only. Nobody holds a phone
+			// exactly upright, and at a 45° hold a device-axis mapping bleeds each
+			// rotation into the wrong angle. So resolve the axes against gravity
+			// instead, which is roll-independent and needs no orientation enum:
+			//   u = world up in device coords (= -gravity)
+			//   yaw   = component of the rotation about u        (turning the phone)
+			//   pitch = component about the horizontal axis in the screen plane,
+			//           h = normalize(-u.y, u.x, 0), which is perpendicular to both
+			//           u and the screen normal                  (tilting the phone)
+			// Signs: VKQ_TouchLook is +yaw = look RIGHT, +pitch = look DOWN, and a
+			// right-handed rotation about world up is a turn to the LEFT — hence the
+			// negation on both. Result: turn the phone left, look left; tilt the
+			// phone face-up, look up.
+			float ux = -(float)dm.gravity.x, uy = -(float)dm.gravity.y, uz = -(float)dm.gravity.z;
+			float un = sqrtf (ux * ux + uy * uy + uz * uz);
+			float wx = (float)dm.rotationRate.x, wy = (float)dm.rotationRate.y, wz = (float)dm.rotationRate.z;
 			float k = 57.2958f * gyro * (float)gdt;
-			// landscape best-guess axis mapping (may need per-device calibration)
-			VKQ_TouchLook (flip * (float)dm.rotationRate.y * k, -(float)dm.rotationRate.x * k);
+			if (un > 0.1f)
+			{
+				ux /= un;
+				uy /= un;
+				uz /= un;
+				float yaw_left = wx * ux + wy * uy + wz * uz;
+				// Screen-plane horizontal axis. Degenerate only when the screen faces
+				// straight up/down (|hn| -> 0), a pose you cannot aim from anyway;
+				// fall back to the landscape long edge so it never divides by ~0.
+				float hx = -uy, hy = ux;
+				float hn = sqrtf (hx * hx + hy * hy);
+				float pitch_up;
+				if (hn > 0.2f)
+					pitch_up = (wx * hx + wy * hy) / hn;
+				else
+				{
+#ifdef VKQ_VISIONOS
+					float s = 1.f; // no interface orientation on visionOS (gyro n/a there)
+#else
+					UIInterfaceOrientation o = g_touch.window.windowScene.interfaceOrientation;
+					// LandscapeLeft == UIDeviceOrientationLandscapeRight: the portrait
+					// top edge points to the user's RIGHT, flipping both axes.
+					float s = (o == UIInterfaceOrientationLandscapeLeft) ? -1.f : 1.f;
+#endif
+					pitch_up = s * wy;
+				}
+				// Invert Gyro (Vertical) is its own switch, not the touch "Invert Look":
+				// tilt-to-aim has two equally defensible conventions (tilt up = look up,
+				// or the camera-lens one where it looks down) and the choice is unrelated
+				// to how you want a thumb drag to behave.
+				if (vkq_setting_f ("gyroInvert", 0.0f) > 0.5f)
+					pitch_up = -pitch_up;
+				VKQ_TouchLook (-yaw_left * k, -pitch_up * k);
+			}
 		}
 	}
 	else if (motion)
