@@ -1,0 +1,89 @@
+vkquake-ios overlay 0015: survive the 2026 rerelease's mismatched .md5anim
+files (upstream Novum/vkQuake#980, Ironwail#550).
+
+The 30th-anniversary update (2026-08-06) added Dawn of the Machine as the
+`mg3` game dir. It ships progs/ogre_rocket.md5anim with a joint count that
+disagrees with its sibling .md5mesh (39 vs 55), and the rocket ogre is
+precached by nearly every map's entity list -- so `-game mg3 +map map1`
+dies at load with "QUAKE ERROR: progs/ogre_rocket.md5anim has incorrect
+joint count". The Sys_Error fires inside Mod_LoadMD5MeshModel, i.e. before
+mod->extradata[PV_MD5] is assigned, and it fires regardless of
+r_enhancedmodels because the MD5 is loaded and inspected either way.
+
+Turn the fatal into a Con_Warning and unwind: MD5Anim_Load now returns a
+qboolean, and the caller frees its allocations and returns with
+extradata[PV_MD5] still NULL. Mod_Extradata_CheckSkin then sees exactly
+one valid variant and returns the classic .mdl (which mg3 also ships for
+this model), i.e. the same result as Models: classic -- but only for this
+one model. Everything else in the episode keeps its enhanced mesh.
+
+Measured over all 20 mg3 maps on the macOS oracle: every map spawns, and
+progs/ogre_rocket is the ONLY model that warns.
+
+UPSTREAM SUPERSESSION: this is a workaround for an upstream bug, not a
+port feature. Novum/vkQuake#980 is open and assigned. DELETE this patch when a pin bump
+brings upstream's own fix — see the checklist at the bottom of upstream.pin
+for why "the build is still green" is not sufficient evidence to keep it.
+
+--- a/Quake/gl_model.c
++++ b/Quake/gl_model.c
+@@ -4583,7 +4583,7 @@
+ MD5Anim_Load
+ ================
+ */
+-static void MD5Anim_Load (md5animctx_t *ctx, jointinfo_t *joints, size_t numjoints)
++static qboolean MD5Anim_Load (md5animctx_t *ctx, jointinfo_t *joints, size_t numjoints)
+ {
+ 	const char *fname = ctx->fname;
+ 	struct
+@@ -4599,14 +4599,23 @@
+ 	if (!buffer)
+ 	{
+ 		Mem_Free (ctx->animfile);
+-		return;
++		return true;
+ 	}
+ 
+ 	MD5EXPECT ("numAnimatedComponents");
+ 	rawcount = MD5UINT ();
+ 
+ 	if (ctx->numjoints != numjoints)
+-		Sys_Error ("%s has incorrect joint count", fname);
++	{
++		// vkquake-ios: mg3 ships progs/ogre_rocket.md5anim with 39 joints against
++		// its .md5mesh's 55 (the only mismatch in the episode's 20 maps, measured).
++		// Upstream Sys_Errors out, which makes the whole mg3 episode unloadable
++		// (Novum/vkQuake#980). Decline the enhanced model and let the caller fall
++		// back to the classic .mdl, which every one of these also ships.
++		Con_Warning ("MD5 load error - %s has incorrect joint count (mesh has %u, anim has %u)\n", fname, (unsigned)numjoints, (unsigned)ctx->numjoints);
++		Mem_Free (ctx->animfile);
++		return false;
++	}
+ 
+ 	raw = Mem_Alloc (sizeof (*raw) * (rawcount + 6));
+ 	ab = Mem_Alloc (sizeof (*ab) * ctx->numjoints);
+@@ -4708,6 +4717,7 @@
+ 	Mem_Free (raw);
+ 	Mem_Free (ab);
+ 	Mem_Free (ctx->animfile);
++	return true;
+ }
+ 
+ /*
+@@ -5019,7 +5029,15 @@
+ 
+ 	if (strcmp (com_token, "}"))
+ 		Sys_Error ("Mod_LoadMD5MeshModel(%s): Expected \"%s\"", fname, "}");
+-	MD5Anim_Load (&anim, joint_infos, numjoints);
++	if (!MD5Anim_Load (&anim, joint_infos, numjoints))
++	{
++		// vkquake-ios: bail out with extradata[PV_MD5] still NULL so the renderer
++		// uses the classic .mdl for this one model (Novum/vkQuake#980).
++		Mem_Free (outhdr);
++		TEMP_FREE (joint_poses);
++		TEMP_FREE (joint_infos);
++		return;
++	}
+ 	buffer = COM_Parse (buffer);
+ 
+ 	// 2. Compute inverted joints:

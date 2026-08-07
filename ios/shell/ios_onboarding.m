@@ -205,11 +205,20 @@ static volatile BOOL g_onboard_done;
 
 - (void)showKpfNote
 {
+	// Copy note: as of the 2026 30th-anniversary update the kpf no longer carries
+	// the localized text — its loc_*.txt are placeholders and the strings live in
+	// id1/pak0.pak. So the kpf is fonts-only for 2026+ data, and text-plus-fonts
+	// for pre-2026 data. Word it so it is true of both, and point at the folder
+	// rather than at the one file, because a partial copy is the failure mode that
+	// actually bites (stale paks + new kpf = no strings anywhere; the engine warns
+	// "localized text is UNAVAILABLE" on the console when it sees that).
 	UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Rerelease data imported"
-															   message:@"For the full rerelease experience (localized text and the "
-																	   @"enhanced fonts), also include QuakeEX.kpf from your rerelease "
-																	   @"folder next time. Continuing without it is fine — the game plays "
-																	   @"normally."
+															   message:@"QuakeEX.kpf wasn't included. It supplies the enhanced KEX "
+																	   @"fonts (and, with pre-2026 game data, the localized text). "
+																	   @"Continuing without it is fine — the game plays normally.\n\n"
+																	   @"Tip: import the whole rerelease folder rather than picking "
+																	   @"files. A mix of old and new rerelease data is the one "
+																	   @"combination that loses all localized text."
 														preferredStyle:UIAlertControllerStyleAlert];
 	[a addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
 		[self showLoading];

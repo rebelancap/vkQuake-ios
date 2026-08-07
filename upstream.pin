@@ -7,3 +7,30 @@ branch=master
 commit=8fed52d06154ebb868d3045b71af5ec0d34e7015
 date=2026-07-08
 note=HEAD of master at Phase 0 start ("Fix render_scale bitfield width"). No git submodules. Meson build system.
+
+# ---------------------------------------------------------------------------
+# BEFORE YOU BUMP: two patches here are workarounds for UPSTREAM BUGS, not port
+# features. Upstream intends to fix both — they are open, assigned issues:
+#
+#   patches/0015-mg3-md5-joint-count-mismatch.patch  -> Novum/vkQuake#980
+#   patches/0016-mg3-localization-from-paks.patch    -> Novum/vkQuake#977
+#
+# When the new pin contains upstream's own fix, DELETE our patch rather than
+# carry both. Check the issues' state, not just whether the build is green.
+#
+# Why this is worth a written note: a patch that no longer applies is the SAFE
+# outcome — sync-overlay.sh runs `patch --fuzz=0` and fails the build loudly.
+# The hazard is a patch that still applies and then fights the real fix:
+#   - 0015 is a narrow qboolean-return change. If upstream instead converts ALL
+#     MD5 errors to warnings (as Ironwail did in 98f3b7c6, a much larger change
+#     over the same functions), a stale signature is a compile error (loud) but
+#     a duplicated cleanup path is a double free (quiet).
+#   - 0016 is the quieter risk. If upstream adds its own pak lookup somewhere
+#     else in LOC_LoadFile, our `goto loaded` can either skip theirs or run
+#     after it — leaking the first buffer. Nothing crashes and the string count
+#     still looks right, so nothing tells you.
+#
+# Verify after any bump: `-game mg3 +map map1` boots (0015) and reports
+# "Loaded 1669 strings from 'localization/loc_english.txt'" (0016). Both
+# numbers are in DECISIONS.md under the 2026-08-07 mg3 entry.
+# ---------------------------------------------------------------------------
