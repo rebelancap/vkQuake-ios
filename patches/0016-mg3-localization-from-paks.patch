@@ -1,0 +1,89 @@
+vkquake-ios overlay 0016: read rerelease localization strings from the
+game paks, and diagnose the one mixed-vintage combination that cannot
+work (upstream Novum/vkQuake#977, Ironwail 54757f3).
+
+The 2026 30th-anniversary update moved the KEX localization strings out
+of QuakeEX.kpf and into the game paks -- specifically into id1/pak0.pak
+(which grew 180,815,252 -> 221,523,533 bytes), at
+localization/loc_<lang>.txt. The shipped kpf still contains those paths,
+but each is now the 27-byte stub `placeholder = "placeholder"`.
+
+Try COM_LoadFile first -- that searches the mounted content roots
+including paks -- and only fall back to the loose-file and kpf paths when
+it misses. That single ordering makes BOTH data vintages work with no
+setting and no user decision, which is the point:
+
+  paks 2026+            any kpf, or none   -> pak wins        (1669 strings)
+  paks pre-2026         kpf pre-2026       -> kpf fallback     (~1500 strings)
+  paks pre-2026         kpf 2026+          -> NOTHING to load  (see below)
+  paks pre-2026         no kpf             -> "Couldn't load"
+
+Row 3 is a user who updated their store copy but re-copied only part of
+it (the new episode folder and the kpf, over stale paks). No source has
+strings, so the engine cannot fix it -- but it must not stay quiet about
+it. Left alone, LOC_LoadFile reports "Loaded 1 strings", LOC_GetString
+returns each key verbatim, and the player sees $qc_item_health on screen
+with nothing in the log to explain why. Emit a Con_Warning naming the
+cause and the fix.
+
+The <= 2 threshold is deliberately tight against the known 1-entry stub
+rather than a large floor, so a legitimately small strings file (the
+update also invites mods to ship localization/loc_<lang>_mod.txt) is
+never mistaken for a placeholder.
+
+UPSTREAM SUPERSESSION: this is a workaround for an upstream bug, not a
+port feature. Novum/vkQuake#977 is open and assigned. DELETE this patch when a pin bump
+brings upstream's own fix — see the checklist at the bottom of upstream.pin
+for why "the build is still green" is not sufficient evidence to keep it.
+
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -3294,6 +3294,18 @@
+ 		return;
+ 
+ 	Con_Printf ("\nLanguage initialization\n");
++
++	// vkquake-ios: the 2026 30th-anniversary rerelease update moved the
++	// localization strings OUT of QuakeEX.kpf (whose loc_*.txt are now 27-byte
++	// `placeholder = "placeholder"` stubs) and INTO the game paks. Search the
++	// mounted content roots -- paks included -- before falling back to the loose
++	// file and then the kpf. Same fix as Ironwail 54757f3 (Novum/vkQuake#977).
++	// This ordering is what makes BOTH data vintages work without the user
++	// choosing anything: 2026+ paks answer here, pre-2026 paks miss and fall
++	// through to their own kpf, which still carries real strings.
++	localization.text = (char *)COM_LoadFile (file, NULL);
++	if (localization.text)
++		goto loaded;
+ 
+ 	memset (&archive, 0, sizeof (archive));
+ 	q_snprintf (path, sizeof (path), "%s/%s", com_basedir, file);
+@@ -3389,6 +3401,7 @@
+ #endif
+ 	}
+ 
++loaded:
+ 	cursor = localization.text;
+ 
+ 	// skip BOM
+@@ -3557,6 +3570,21 @@
+ 	}
+ 
+ 	Con_Printf ("Loaded %d strings from '%s'\n", localization.numentries, file);
++
++	// vkquake-ios: diagnose the one game-data combination that otherwise fails
++	// SILENTLY -- pre-2026 paks (no localization/ entry) next to a 2026-or-later
++	// QuakeEX.kpf, whose loc_*.txt are 27-byte `placeholder = "placeholder"` stubs.
++	// LOC_LoadFile "succeeds" with a single entry, LOC_GetString then returns every
++	// key verbatim, and the player sees $qc_item_health on screen with nothing in
++	// the log to explain it. The two CLEAN vintages are already handled by the
++	// search order above, so this is purely a report: in this mixed case there are
++	// no strings anywhere to recover.
++	if (localization.numentries <= 2)
++		Con_Warning (
++			"localized text is UNAVAILABLE: '%s' resolved to a placeholder.\n"
++			"Your game paks predate the 2026 update but QuakeEX.kpf is from it or later.\n"
++			"Re-copy the WHOLE rerelease folder (id1/pak0.pak carries the strings now).\n",
++			file);
+ }
+ 
+ /*
