@@ -208,6 +208,25 @@ void VKQ_iOS_ApplySettingsToEngine (void)
 	VKQ_TouchCommand (gammacmd);
 	VKQ_iOS_SetRefresh ();
 	VKQ_iOS_AudioApply (); // session category/options + master gain (Audio section)
+	/*
+	 * MP-DL1 (overlay 0028): 0 never / 1 ask / 2 always, mirrored into the engine's
+	 * cl_mapdownload.
+	 *
+	 * Pushed ONLY once the player has actually used the row. Every other setting
+	 * here is unconditionally authoritative, and it can be, because nothing else
+	 * writes menuSize or fov. cl_mapdownload is different: it is a real archived
+	 * cvar that a config.cfg, an autoexec.cfg or a console line can set, and this
+	 * function runs AFTER quake.rc (VKQ_iOS_SetupUI is called at the end of
+	 * Host_Init) — so an unconditional push would silently undo a value the player
+	 * had just set by hand, every launch. Absent key means "nobody has expressed a
+	 * preference in the UI", and the engine's own default (1 = ask) then stands.
+	 */
+	if ([NSUserDefaults.standardUserDefaults objectForKey:KEYPREFIX @"mapDownload"] != nil)
+	{
+		char mdcmd[40];
+		snprintf (mdcmd, sizeof (mdcmd), "cl_mapdownload %d\n", (int)lroundf (vkq_setting_f ("mapDownload", 1.0f)));
+		VKQ_TouchCommand (mdcmd);
+	}
 #ifdef VKQ_VISIONOS
 	VKQ_iOS_Apply3DSettings (); // includes Surroundings Dimming + panel FPS on entry
 	// Engine-drawn FPS belongs to the 3D PANEL only (the UIKit "FPS Counter"
@@ -359,6 +378,37 @@ static const char *ctl_key (UIControl *ctl)
 {
 	NSString *k = objc_getAssociatedObject (ctl, &kRowKeyTag);
 	return k.UTF8String;
+}
+
+// ---------------------------------------------------------------------------
+// MP-DL1 (overlay 0028) — the option list for a ROW_CHOICE, keyed by the row.
+//
+// ROW_CHOICE used to be hard-wired to the audio mode: both the summary on the
+// parent row and the picker itself called VKQ_iOS_AudioModeTitles directly, so a
+// second choice row would silently have rendered the audio options. These two
+// functions are the whole of the generalisation, and an unknown key returns an
+// empty list rather than the audio one — a row that shows nothing is a bug you
+// can see, a row that shows the wrong menu's options is one you cannot.
+static NSArray<NSString *> *vkq_choice_titles (NSString *key)
+{
+	if ([key isEqualToString:@"audioMode"])
+		return VKQ_iOS_AudioModeTitles ();
+	if ([key isEqualToString:@"mapDownload"])
+		return @[ @"Never", @"Ask First", @"Always" ];
+	return @[];
+}
+
+static NSArray<NSString *> *vkq_choice_details (NSString *key)
+{
+	if ([key isEqualToString:@"audioMode"])
+		return VKQ_iOS_AudioModeDetails ();
+	if ([key isEqualToString:@"mapDownload"])
+		return @[
+			@"Joining a server running a map you do not have simply fails, with a message.",
+			@"Offer to fetch the map from the community archives, showing its size first. Recommended.",
+			@"Fetch it and rejoin without asking. Uses cellular data if that is all you have.",
+		];
+	return @[];
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +682,11 @@ int VKQ_iOS_SettingsSheetOpen (void) { return vkq_settings_depth > 0 ? 1 : 0; }
 		NSMutableArray<VKQRow *> *gameplay = [NSMutableArray arrayWithArray:@[
 			mkrow (@"Always Run", @"alwaysRun", ROW_SWITCH, 0, 1, 1),
 			mkrow (@"FPS Counter", @"fps", ROW_SWITCH, 0, 1, 0),
+			// MP-DL1 (overlay 0028): mirrors the cl_mapdownload cvar (0/1/2). The
+			// cvar is the engine's truth and is archived in config.cfg; this row is
+			// the way a phone player reaches it, and ApplySettingsToEngine pushes it
+			// down at boot and on every change.
+			mkrow (@"Download Missing Maps", @"mapDownload", ROW_CHOICE, 0, 2, 1),
 		]];
 #ifdef VKQ_DEV_BUILD
 		// DEV BUILDS ONLY — compiled out of anything with a public version number.
@@ -739,7 +794,7 @@ const char *VKQ_iOS_SettingsDumpText (void)
 		cc.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
 		cc.textLabel.text = r.title;
 		cc.textLabel.textColor = [UIColor colorWithRed:0.35 green:1 blue:0.35 alpha:1];
-		NSArray<NSString *> *opts = VKQ_iOS_AudioModeTitles ();
+		NSArray<NSString *> *opts = vkq_choice_titles (r.key);
 		int					 idx = (int)lroundf (v);
 		cc.detailTextLabel.text = (idx >= 0 && idx < (int)opts.count) ? opts[idx] : @"-";
 		cc.detailTextLabel.textColor = [UIColor colorWithWhite:0.85 alpha:1];
@@ -989,13 +1044,16 @@ const char *VKQ_iOS_SettingsDumpText (void)
 	{
 		VKQChoiceVC *pick = [[VKQChoiceVC alloc] initWithStyle:UITableViewStyleInsetGrouped];
 		pick.title = r.title;
-		pick.titles = VKQ_iOS_AudioModeTitles ();
-		pick.details = VKQ_iOS_AudioModeDetails ();
+		pick.titles = vkq_choice_titles (r.key);
+		pick.details = vkq_choice_details (r.key);
 		pick.key = r.key;
 		pick.def = r.def;
 		__weak VKQSettingsVC *weakSelf = self;
 		pick.onPick = ^{
+			// Both choice rows push their answer straight into the engine:
+			// audioMode reconfigures the session, mapDownload writes the cvar.
 			VKQ_iOS_AudioApply ();
+			VKQ_iOS_ApplySettingsToEngine ();
 			[weakSelf.tableView reloadData]; // refresh the summary on the parent row
 		};
 		// Vision Pro opens this table bare inside a SwiftUI sheet — there is no
