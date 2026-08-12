@@ -20,6 +20,10 @@ ios)      UDID=E9D5BD7B-D5EB-4841-A894-300D41AE2236; APP="$ROOT/build/ios-sim/xc
 visionos) UDID=5ACC8FB7-17D2-450B-8A88-F8FD5FC5792F; APP="$ROOT/build/visionos-sim/xcode/Release-xrsimulator/vkQuake.app" ;;
 *) echo "usage: $0 <ios|visionos>" >&2; exit 2 ;;
 esac
+# MP-DL1: the two devices above are this project's own, on older runtimes. A round
+# working in a ~/dev lane (iPhone 17 Pro Max / Apple Vision Pro on 27.0) overrides
+# the device without forking the script — and without ever creating one.
+UDID=${VKQ_SIM_UDID:-$UDID}
 PLAT="$1"
 ARTS="$ROOT/artifacts/sim"
 STAMPD=$(date '+%Y-%m-%d')

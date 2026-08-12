@@ -658,7 +658,7 @@
  
 --- /dev/null
 +++ b/Quake/cl_mapdl.c
-@@ -0,0 +1,940 @@
+@@ -0,0 +1,1016 @@
 +/*
 +Copyright (C) 1996-2001 Id Software, Inc.
 +Copyright (C) 2010-2014 QuakeSpasm developers
@@ -810,7 +810,13 @@
 +	char		url[512];		// artifact URL
 +	char		sha256[80];		// expected package hash (source B)
 +	char		extract[256];	// install.extract hint (source B)
-+	char		tmpfile[512];	// where the artifact is being written
++	// tmpfile is ONLY ever a partial artifact: the .part being written right now.
++	// It is deleted on every failure and on cancel, no questions asked, which is
++	// why the cached archive index gets its own field — deleting a good 18 MB
++	// index because the player pressed Escape during the resolve would make the
++	// next attempt refetch it.
++	char		tmpfile[512];
++	char		indexpath[512]; // the cached Quaddicted dump (kept)
 +	char		reason[128];	// failure text, shown on the menu
 +	long long	total, got;		// byte counters for the progress line
 +	int			job;			// live shell job, or 0
@@ -897,6 +903,30 @@
 +		q_snprintf (out, len, "%s%s", base, tail);
 +	else
 +		q_snprintf (out, len, "%s/%s", base, tail);
++}
++
++/*
++ * The host the artifact is actually coming from, for the consent prompt and the
++ * log. DERIVED from the URL rather than named by the branch that chose it: the
++ * source cvars are overridable (the simulator harness points them at a local
++ * fixture), and a prompt that says "2.4 MB from maps.quakeworld.nu" while
++ * fetching from somewhere else is exactly the kind of consent that is not
++ * consent. Naming the branch instead of the URL also made the harness assertion
++ * meaningless, which is how this was caught.
++ */
++static void mdl_host_of (const char *url, char *out, size_t len)
++{
++	const char *p = strstr (url, "://");
++	const char *e;
++	size_t		n;
++
++	p = p ? p + 3 : url;
++	e = strchr (p, '/');
++	n = e ? (size_t)(e - p) : strlen (p);
++	if (n >= len)
++		n = len - 1;
++	memcpy (out, p, n);
++	out[n] = 0;
 +}
 +
 +// A map name is used to build a URL and a file path, so it is validated hard:
@@ -1022,10 +1052,20 @@
 +		while (*s && *s != '/' && (size_t)(w - dir) < sizeof (dir) - 1)
 +			*w++ = *s++;
 +		*w = 0;
-+		// A single plain directory name or nothing. "..", an empty component, a
-+		// name with a separator in it: all rejected, all fall back to the gamedir.
-+		if (!dir[0] || strstr (dir, "..") || strchr (dir, '\\') || strchr (dir, ':'))
-+			dir[0] = 0;
++		// A single plain gamedir NAME, or nothing. Whitelisted rather than
++		// blacklisted: this string comes out of a public archive record, and the
++		// set of things a Quake game directory is called is small and boring
++		// (id1, hipnotic, rogue, ad, copper, alkaline). Anything else — a
++		// traversal, a separator, a dotfile, punctuation — falls back to the
++		// gamedir we are actually running, which is always a safe answer.
++		{
++			const char *c;
++			for (c = dir; *c; c++)
++				if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '-'))
++					break;
++			if (!dir[0] || *c || strlen (dir) > 31)
++				dir[0] = 0;
++		}
 +	}
 +	if (dir[0])
 +		q_snprintf (root, sizeof (root), "%s/%s", host_parms->userdir, dir);
@@ -1104,7 +1144,7 @@
 +		return;
 +	}
 +	q_snprintf (path, sizeof (path), "%s/quaddicted-index.json", caches);
-+	q_strlcpy (mdl.tmpfile, path, sizeof (mdl.tmpfile));
++	q_strlcpy (mdl.indexpath, path, sizeof (mdl.indexpath));
 +
 +	// Fresh enough? The dump is ~18 MB and the archive gains a handful of
 +	// releases a month, so a weekly refresh is generous and a per-join fetch
@@ -1133,6 +1173,10 @@
 +		mdl_fail ("archive index URL is not https");
 +		return;
 +	}
++	// Written straight to the cache path and tracked as a PARTIAL until the
++	// transfer completes, so a cancelled or failed fetch cannot leave a truncated
++	// dump behind that the freshness check above would then trust.
++	q_strlcpy (mdl.tmpfile, path, sizeof (mdl.tmpfile));
 +	mdl.job = VKQ_DL_StartGet (url, path);
 +	if (!mdl.job)
 +	{
@@ -1225,6 +1269,26 @@
 +		return;
 +	}
 +
++	if (mdl.state == MDL_RECONNECT)
++	{
++		/*
++		 * The connect is already queued in the Cbuf; this state existed only so the
++		 * frame that issued it could say "Rejoining...". Returning to idle HERE is
++		 * load-bearing rather than tidy: a mid-game changelevel to a SECOND missing
++		 * map re-enters CL_MapDownload_Begin with no menu in between, and a stale
++		 * RECONNECT made it answer "a download is already in progress" and drop
++		 * through to overlay 0026's failure — the feature worked exactly once per
++		 * session. The changelevel leg of sim-verify-mpdl.sh is the only place two
++		 * downloads happen back to back, and it is what caught this.
++		 *
++		 * mdl_tried[] is deliberately NOT cleared: it is separate state, and the
++		 * once-per-map retry limit has to outlive every reset in this file.
++		 */
++		memset (&mdl, 0, sizeof (mdl));
++		mdl.state = MDL_IDLE;
++		return;
++	}
++
 +	switch (mdl.state)
 +	{
 +	case MDL_IDLE:
@@ -1258,7 +1322,7 @@
 +		{
 +			mdl.source = 1;
 +			mdl.total = total;
-+			q_strlcpy (mdl.srcname, "maps.quakeworld.nu", sizeof (mdl.srcname));
++			mdl_host_of (mdl.url, mdl.srcname, sizeof (mdl.srcname));
 +			q_snprintf (mdl.title, sizeof (mdl.title), "%s.bsp", mdl.map);
 +			if ((double)total > cl_mapdownload_maxbsp.value * 1024.0 * 1024.0)
 +			{
@@ -1275,7 +1339,7 @@
 +		mdl_job_release ();
 +		Con_Printf ("mapdl: %s.bsp is not on the bare-map mirror (http %d) — trying the package archive\n", mdl.map, status);
 +		mdl.source = 2;
-+		q_strlcpy (mdl.srcname, "quaddicted.com", sizeof (mdl.srcname));
++		mdl_host_of (cl_mapdownload_pkgurl.string, mdl.srcname, sizeof (mdl.srcname));
 +		q_snprintf (mdl.title, sizeof (mdl.title), "%s.bsp", mdl.map);
 +		mdl.total = 0;
 +		mdl.state = MDL_PROMPT;
@@ -1301,8 +1365,9 @@
 +			return;
 +		}
 +		mdl_job_release ();
++		mdl.tmpfile[0] = 0; // complete: no longer a partial, do not delete it
 +		Con_Printf ("mapdl: archive index cached; searching for %s.bsp\n", mdl.map);
-+		mdl.job = VKQ_DL_StartResolve (mdl.tmpfile, mdl.map);
++		mdl.job = VKQ_DL_StartResolve (mdl.indexpath, mdl.map);
 +		if (!mdl.job)
 +		{
 +			mdl_fail ("could not read the archive index");
@@ -1314,6 +1379,13 @@
 +	case MDL_RESOLVE:
 +		if (r != DLP_DONE)
 +		{
++			// The player-facing sentence stays the same for every reason the search
++			// can end without an answer — "not in the archives" is what it means to
++			// them. The resolver's own reason goes to the console, because "no
++			// package contains that map" and "the index would not parse" are the
++			// same screen and very different bugs. Swallowing it cost this round a
++			// simulator run.
++			Con_Printf ("mapdl: archive search ended: %s\n", VKQ_DL_Error (mdl.job));
 +			mdl_fail ("not found in community archives");
 +			return;
 +		}
@@ -1333,7 +1405,11 @@
 +			mdl_fail ("package is %.0f MB (limit %.0f MB)", (double)mdl.total / 1048576.0, cl_mapdownload_maxpkg.value);
 +			return;
 +		}
-+		Con_Printf ("mapdl: found \"%s\" in the archive (%lld bytes)\n", mdl.title, mdl.total);
++		// The package may live on a different host from the API that indexed it,
++		// so the source name is re-derived from the artifact URL now that we have
++		// one — the screen names where the bytes come from, not who told us.
++		mdl_host_of (mdl.url, mdl.srcname, sizeof (mdl.srcname));
++		Con_Printf ("mapdl: found \"%s\" in the archive (%lld bytes) on %s\n", mdl.title, mdl.total, mdl.srcname);
 +		mdl_begin_get_pkg ();
 +		return;
 +
@@ -1515,7 +1591,7 @@
 +	if (mdl.state == MDL_IDLE)
 +		return;
 +	mdl_job_release ();
-+	if (mdl.tmpfile[0] && mdl.state != MDL_GET_INDEX) // a cached index is not garbage
++	if (mdl.tmpfile[0]) // partial artifacts only — never the cached index
 +		remove (mdl.tmpfile);
 +	Con_Printf ("mapdl: cancelled\n");
 +	memset (&mdl, 0, sizeof (mdl));

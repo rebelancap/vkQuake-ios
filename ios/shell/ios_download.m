@@ -258,22 +258,40 @@ static BOOL vkq_dl_basename_matches (NSString *path, NSString *wantLower)
 	return [base isEqualToString:wantLower];
 }
 
+/*
+ * Pick the download URL out of a record's mirror list: https on quaddicted.com
+ * first, then any https, then anything left.
+ *
+ * SCHEME POLICY IS NOT DECIDED HERE, and that is deliberate. This used to drop
+ * every non-https entry, which quietly made the whole record unmatchable — the
+ * engine then reported "not found in community archives" for a package that was
+ * sitting right there in the index, and the local http fixture the simulator run
+ * is built on could never resolve at all. Whether a scheme is acceptable is
+ * cl_mapdl_url_ok's judgement (it reads cl_mapdownload_allowhttp), and it is
+ * applied to whatever comes back from here — one place, one rule, one message.
+ * Preferring https here only decides WHICH mirror is offered, never whether it
+ * is allowed.
+ */
 static NSString *vkq_dl_pick_url (NSArray *urls)
 {
-	NSString *first = nil;
+	NSString *firstHttps = nil, *firstAny = nil;
 	for (id o in urls)
 	{
 		if (![o isKindOfClass:NSString.class])
 			continue;
 		NSString *s = (NSString *)o;
-		if (![s.lowercaseString hasPrefix:@"https://"])
-			continue;
-		if (!first)
-			first = s;
-		if ([s.lowercaseString containsString:@"quaddicted.com"])
+		NSString *low = s.lowercaseString;
+		BOOL	  https = [low hasPrefix:@"https://"];
+		if (!https && ![low hasPrefix:@"http://"])
+			continue; // not a web download at all (ftp, magnet, a bare note)
+		if (https && [low containsString:@"quaddicted.com"])
 			return s;
+		if (https && !firstHttps)
+			firstHttps = s;
+		if (!firstAny)
+			firstAny = s;
 	}
-	return first;
+	return firstHttps ?: firstAny;
 }
 
 int VKQ_DL_StartResolve (const char *indexpath, const char *mapname)
