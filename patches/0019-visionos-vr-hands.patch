@@ -1,0 +1,1228 @@
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -5932,6 +5932,41 @@
+ 	float tan_l, tan_r, tan_u, tan_d;
+ } vkq_vr_eye_t;
+ 
++// ---------------------------------------------------------------------------
++// overlay 0019 (R2) — ONE per-hand state, published with the head (charter A6).
++//
++// This is the foundation R3's holsters and grip state machine are built on, so
++// it is deliberately one struct rather than a scatter of parallel arrays:
++// pose, velocity, buttons (digital AND analog) and the tracking flags all
++// arrive together, sampled in the SAME compositor frame as the head anchor. A
++// zone test or a gesture in R3 is then plain geometry on this, with no second
++// derivation of the transform chain to keep in sync.
++//
++// The pose is already in the QUAKE PLAYER FRAME (units, right-up-back, origin
++// at the body's eye point) — the shell runs the hand anchor through the SAME
++// alignment and world-scale chain it runs the eyes through (VKQVR.m
++// vkq_vr_player_from_tracking), so there is exactly one place where metres
++// become units and exactly one recenter to honour.
++typedef struct
++{
++	int		 tracked; // a live pose arrived this frame
++	int		 held;	  // ARKit says it is in a hand (not on a table)
++	float	 pos[3];  // player frame, Quake units
++	float	 right[3], up[3], back[3]; // player-frame orthonormal basis
++	float	 vel[3];				   // player frame, units/sec
++	unsigned buttons;				   // currently down (VKQ_VRB_*)
++	unsigned pressed, released;		   // edges since the engine last consumed
++	float	 trigger, grip;			   // analog 0..1
++	float	 stick[2];				   // x right, y up
++} vkq_vr_hand_t;
++
++#define VKQ_VRB_TRIGGER (1u << 0)
++#define VKQ_VRB_GRIP	(1u << 1)
++#define VKQ_VRB_A		(1u << 2)
++#define VKQ_VRB_B		(1u << 3)
++#define VKQ_VRB_STICK	(1u << 4)
++#define VKQ_VRB_MENU	(1u << 5)
++
+ static pthread_mutex_t	  vkq_vr_mtx = PTHREAD_MUTEX_INITIALIZER;
+ static pthread_cond_t	  vkq_vr_cv = PTHREAD_COND_INITIALIZER;
+ static unsigned long long vkq_vr_pub_id = 0;	  // last pose published by the shell
+@@ -5939,10 +5974,76 @@
+ static unsigned long long vkq_vr_frame_id = 0;	  // id of the frame being rendered
+ static vkq_vr_eye_t		  vkq_vr_pub[2];		  // guarded by vkq_vr_mtx
+ static vkq_vr_eye_t		  vkq_vr_cur[2];		  // engine's private copy (render thread)
++static vkq_vr_hand_t	  vkq_vr_hand_pub[2];	  // guarded by vkq_vr_mtx (shell writes)
++static vkq_vr_hand_t	  vkq_vr_hand_cur[2];	  // latched with the rendered pose
+ static int				  vkq_vr_timeouts_engine = 0, vkq_vr_timeouts_shell = 0;
+ static int				  vkq_vr_rendezvous = 0; // frames where both sides met in time
+ static int				  vkq_vr_yaw_init = 0;	 // adopt the player's facing on the first VR frame
+ 
++// R2 tunables. Deliberately NOT archived: VR settings persist through the
++// shell's settings store, which is crash-safe and cannot poison a 2D config
++// (charter §7 — the archived-cvar trap that R1 already paid for once).
++cvar_t vkqvr_aimhand = {"vkqvr_aimhand", "1", CVAR_NONE};	  // 0 = left, 1 = right
++cvar_t vkqvr_movedir = {"vkqvr_movedir", "0", CVAR_NONE};	  // 0 head, 1 aim hand, 2 off hand
++cvar_t vkqvr_snapturn = {"vkqvr_snapturn", "45", CVAR_NONE};  // 0 = smooth, else degrees
++cvar_t vkqvr_turnspeed = {"vkqvr_turnspeed", "140", CVAR_NONE};
++cvar_t vkqvr_deadzone = {"vkqvr_deadzone", "0.15", CVAR_NONE};
++cvar_t vkqvr_laser = {"vkqvr_laser", "1", CVAR_NONE};		 // 0 off, 1 beam+dot, 2 dot only
++cvar_t vkqvr_gunpitch = {"vkqvr_gunpitch", "-20", CVAR_NONE}; // QuakeQuest's vr_weaponpitchadjust
++cvar_t vkqvr_gunyaw = {"vkqvr_gunyaw", "0", CVAR_NONE};
++cvar_t vkqvr_gunroll = {"vkqvr_gunroll", "0", CVAR_NONE};
++cvar_t vkqvr_gunfwd = {"vkqvr_gunfwd", "0", CVAR_NONE}; // global grip offset, Quake units
++cvar_t vkqvr_gunright = {"vkqvr_gunright", "0", CVAR_NONE};
++cvar_t vkqvr_gunup = {"vkqvr_gunup", "0", CVAR_NONE};
++cvar_t vkqvr_gunscale = {"vkqvr_gunscale", "1", CVAR_NONE};
++cvar_t vkqvr_flashscale = {"vkqvr_flashscale", "0.5", CVAR_NONE};
++cvar_t vkqvr_weapon = {"vkqvr_weapon", "1", CVAR_NONE}; // draw the viewmodel at the hand
++
++void VKQ_VR_RegisterCvars (void)
++{
++	Cvar_RegisterVariable (&vkqvr_aimhand);
++	Cvar_RegisterVariable (&vkqvr_movedir);
++	Cvar_RegisterVariable (&vkqvr_snapturn);
++	Cvar_RegisterVariable (&vkqvr_turnspeed);
++	Cvar_RegisterVariable (&vkqvr_deadzone);
++	Cvar_RegisterVariable (&vkqvr_laser);
++	Cvar_RegisterVariable (&vkqvr_gunpitch);
++	Cvar_RegisterVariable (&vkqvr_gunyaw);
++	Cvar_RegisterVariable (&vkqvr_gunroll);
++	Cvar_RegisterVariable (&vkqvr_gunfwd);
++	Cvar_RegisterVariable (&vkqvr_gunright);
++	Cvar_RegisterVariable (&vkqvr_gunup);
++	Cvar_RegisterVariable (&vkqvr_gunscale);
++	Cvar_RegisterVariable (&vkqvr_flashscale);
++	Cvar_RegisterVariable (&vkqvr_weapon);
++}
++
++// cl_input.c's button state and impulse latch: globals with no header, because
++// the console +cmd/-cmd path is normally the only writer. Driving them directly
++// is what makes a Sense trigger indistinguishable from a bound gamepad button
++// to CL_KeyState and CL_FinishMove.
++extern kbutton_t in_jump, in_attack;
++extern int		 in_impulse;
++extern cvar_t	 cl_forwardspeed, cl_movespeedkey, cl_alwaysrun;
++
++// R2 entry points, declared up here because the aim path is reached from
++// VKQ_VR_ApplyHeadAim, which R1 defines further up this file.
++int		 VKQ_VR_AimHandTracked (void);
++void	 VKQ_VR_AimAngles (float out[3]);
++float	 VKQ_VR_WeaponMuzzle (void);
++qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
++void	 VKQ_VR_Haptic (int hand, float strength, float duration);
++
++// How far the wish vector was rotated this frame (charter A6's movement
++// direction). Published for the diagnostics line the simulator asserts on —
++// "the movement rotated" is otherwise invisible in a screenshot.
++float vkq_vr_movedir_delta = 0.0f;
++
++// Whether the Sense path is currently driving the shared attack/jump buttons.
++// Latched so that losing the controllers releases them exactly ONCE instead of
++// fighting the gamepad for them every frame.
++static int vkq_vr_owned_buttons = 0;
++
+ static void vkq_vr_deadline (struct timespec *ts, int ms)
+ {
+ 	struct timespec now;
+@@ -6019,6 +6120,12 @@
+ 		vkq_vr_pub_id = vkq_vr_rendered_id = vkq_vr_frame_id = 0;
+ 		vkq_vr_rendezvous = vkq_vr_timeouts_engine = vkq_vr_timeouts_shell = 0;
+ 	}
++	// R2: hands never survive a session boundary. Leaving a stale pose behind
++	// would draw the weapon at wherever the controller was when VR closed, and
++	// leaving a stale button down would leave +attack held (the donors' ledger
++	// rule: tracking loss releases everything).
++	memset (vkq_vr_hand_pub, 0, sizeof (vkq_vr_hand_pub));
++	memset (vkq_vr_hand_cur, 0, sizeof (vkq_vr_hand_cur));
+ 	pthread_cond_broadcast (&vkq_vr_cv); // never leave either side blocked on exit
+ 	pthread_mutex_unlock (&vkq_vr_mtx);
+ }
+@@ -6080,6 +6187,12 @@
+ 	if (vkq_vr_have)
+ 	{
+ 		memcpy (vkq_vr_cur, vkq_vr_pub, sizeof (vkq_vr_cur));
++		// R2: the HANDS ride the same latch as the eyes. The weapon, the laser and
++		// the muzzle flash are then drawn at exactly the hand pose the compositor
++		// is about to reproject this frame's eyes against — the A4 rendezvous rule
++		// applied to the second thing in the world that moves with you. (Input is
++		// deliberately NOT read from this copy: see VKQ_VR_ApplyHandInput.)
++		memcpy (vkq_vr_hand_cur, vkq_vr_hand_pub, sizeof (vkq_vr_hand_cur));
+ 		vkq_vr_frame_id = vkq_vr_pub_id;
+ 	}
+ 	pthread_mutex_unlock (&vkq_vr_mtx);
+@@ -6155,9 +6268,657 @@
+ 	while (delta < -180.0f)
+ 		delta += 360.0f;
+ 	vkq_vr_body_yaw = anglemod (vkq_vr_body_yaw + delta);
+-	cl.viewangles[PITCH] = vkq_vr_head_pitch;
+-	cl.viewangles[YAW] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
+-	cl.viewangles[ROLL] = 0.0f;
++	// R2 (charter A6): with a tracked aim hand the SENT angles come from the
++	// HAND, not the head — the server copies them to v_angle and stock progs aim
++	// along them, which is the whole trick that makes hand aim work with
++	// unmodified QuakeC. Rendering is untouched either way: the eyes use the
++	// published head pose (A3), so aim and view are genuinely independent.
++	// Without a hand this is exactly R1: head aim, no regression.
++	if (VKQ_VR_AimHandTracked ())
++	{
++		float ang[3];
++		VKQ_VR_AimAngles (ang);
++		cl.viewangles[PITCH] = ang[PITCH];
++		cl.viewangles[YAW] = anglemod (ang[YAW]);
++		cl.viewangles[ROLL] = 0.0f;
++	}
++	else
++	{
++		cl.viewangles[PITCH] = vkq_vr_head_pitch;
++		cl.viewangles[YAW] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
++		cl.viewangles[ROLL] = 0.0f;
++	}
+ 	last_sent = cl.viewangles[YAW];
+ }
++
++// ============================================================================
++// vkquake-ios overlay 0019 — R2: Sense controllers, hand aim, weapon at the hand
++// (docs/VR-CHARTER.md A6/A8/A10, docs/VR-R2-NOTES.md).
++//
++// Everything below consumes ONE published per-hand state and derives everything
++// else from it. There is no second transform chain: the shell puts each hand in
++// the Quake PLAYER frame using the same alignment and world scale the eyes go
++// through, and this file turns the player frame into Quake world with the body
++// yaw the render base already uses. A recenter, a world-scale change or a snap
++// turn therefore moves the eyes, the aim, the weapon and the laser together by
++// construction rather than by three matching edits.
++// ============================================================================
++
++// Which hand aims. `vkqvr_aimhand` is 1 for right-handed (the default).
++static int vkq_vr_aim_hand (void) { return vkqvr_aimhand.value < 0.5f ? 0 : 1; }
++static int vkq_vr_off_hand (void) { return vkq_vr_aim_hand () ^ 1; }
++
++// --- shell side: publish one hand --------------------------------------------
++// xform12 is the hand's player-frame pose as right[3], up[3], back[3], pos[3]
++// (position in QUAKE UNITS). Button EDGES are accumulated here, under the lock,
++// rather than sampled by the engine: the shell publishes at the compositor's
++// rate and the engine consumes at its own, so a fast tap between two engine
++// frames would otherwise be lost entirely.
++void VKQ_VR_PublishHand (
++	int hand, int tracked, int held, const float *xform12, const float *vel3, unsigned buttons, float trigger, float grip, float stick_x, float stick_y)
++{
++	vkq_vr_hand_t *h;
++	unsigned	   prev;
++	if (hand < 0 || hand > 1)
++		return;
++	pthread_mutex_lock (&vkq_vr_mtx);
++	h = &vkq_vr_hand_pub[hand];
++	prev = h->buttons;
++	if (!tracked)
++	{
++		// Tracking loss releases everything (donor rule, charter A7's
++		// release-on-doff applied one phase early): a battery dying mid-fire must
++		// not leave +attack latched, and a frozen pose is worse than none.
++		h->released |= prev;
++		h->buttons = 0;
++		h->tracked = 0;
++		h->held = 0;
++		h->trigger = h->grip = 0.0f;
++		h->stick[0] = h->stick[1] = 0.0f;
++		pthread_mutex_unlock (&vkq_vr_mtx);
++		return;
++	}
++	h->tracked = 1;
++	h->held = held ? 1 : 0;
++	memcpy (h->right, xform12 + 0, 3 * sizeof (float));
++	memcpy (h->up, xform12 + 3, 3 * sizeof (float));
++	memcpy (h->back, xform12 + 6, 3 * sizeof (float));
++	memcpy (h->pos, xform12 + 9, 3 * sizeof (float));
++	if (vel3)
++		memcpy (h->vel, vel3, 3 * sizeof (float));
++	h->pressed |= (buttons & ~prev);
++	h->released |= (prev & ~buttons);
++	h->buttons = buttons;
++	h->trigger = trigger;
++	h->grip = grip;
++	h->stick[0] = stick_x;
++	h->stick[1] = stick_y;
++	pthread_mutex_unlock (&vkq_vr_mtx);
++}
++
++// Are any hands live at all? Drives the settings status row and the "did the
++// declaration work" question the device round has to answer from the file.
++int VKQ_VR_HandsTracked (void)
++{
++	int n;
++	pthread_mutex_lock (&vkq_vr_mtx);
++	n = (vkq_vr_hand_pub[0].tracked ? 1 : 0) + (vkq_vr_hand_pub[1].tracked ? 1 : 0);
++	pthread_mutex_unlock (&vkq_vr_mtx);
++	return n;
++}
++
++int VKQ_VR_AimHandTracked (void) { return vkq_vr_active && vkq_vr_have && vkq_vr_hand_cur[vkq_vr_aim_hand ()].tracked; }
++
++// --- player frame -> Quake world ---------------------------------------------
++// The player frame is right-up-back with -Z forward, yawed by the body yaw the
++// render base (VKQ_VR_ComposeView) already rotates by. One conversion, used by
++// aim, the weapon, the laser, the muzzle flash and the beam.
++static void vkq_vr_player_to_world_dir (const float *v, vec3_t out)
++{
++	const float b = VKQ_VR_DEG2RAD (vkq_vr_body_yaw);
++	const float cb = cosf (b), sb = sinf (b);
++	out[0] = v[0] * sb - v[2] * cb;
++	out[1] = -v[0] * cb - v[2] * sb;
++	out[2] = v[1];
++}
++
++// The player frame's origin in Quake world: the body's eye point, i.e. exactly
++// what VKQ_VR_ComposeView translates by.
++static void vkq_vr_player_origin (vec3_t out)
++{
++	out[0] = r_refdef.vieworg[0];
++	out[1] = r_refdef.vieworg[1];
++	out[2] = r_refdef.vieworg[2] + vkq_vr_height_ofs;
++}
++
++// One hand, in Quake world space, with its own basis. `grip` applies the
++// tunable grip rotation (vkqvr_gunpitch/yaw/roll) — the ARKit held-controller
++// frame and a Quake .mdl's frame are two different conventions and nothing
++// guarantees they agree, so that correction is a live setting rather than a
++// constant discovered over several headset rounds.
++static qboolean vkq_vr_hand_world (int hand, qboolean grip, vec3_t org, vec3_t fwd, vec3_t right, vec3_t up)
++{
++	const vkq_vr_hand_t *h;
++	vec3_t				 f, r, u, o;
++	if (hand < 0 || hand > 1 || !vkq_vr_active || !vkq_vr_have)
++		return false;
++	h = &vkq_vr_hand_cur[hand];
++	if (!h->tracked)
++		return false;
++
++	{
++		float back[3] = {-h->back[0], -h->back[1], -h->back[2]}; // -Z is forward
++		vkq_vr_player_to_world_dir (back, f);
++		vkq_vr_player_to_world_dir (h->right, r);
++		vkq_vr_player_to_world_dir (h->up, u);
++	}
++	vkq_vr_player_origin (o);
++	{
++		vec3_t wp;
++		vkq_vr_player_to_world_dir (h->pos, wp); // the same rotation the axes use
++		VectorAdd (o, wp, org);
++	}
++
++	if (grip)
++	{
++		// Rotate the hand basis about its own axes: pitch about right, yaw about
++		// up, roll about forward. Order pitch -> yaw -> roll, so the pitch knob
++		// (the one that matters, and the one QuakeQuest ships at -20) behaves
++		// predictably however the others are set.
++		const float sp = sinf (VKQ_VR_DEG2RAD (vkqvr_gunpitch.value)), cp = cosf (VKQ_VR_DEG2RAD (vkqvr_gunpitch.value));
++		const float sy = sinf (VKQ_VR_DEG2RAD (vkqvr_gunyaw.value)), cy = cosf (VKQ_VR_DEG2RAD (vkqvr_gunyaw.value));
++		const float sr = sinf (VKQ_VR_DEG2RAD (vkqvr_gunroll.value)), cr = cosf (VKQ_VR_DEG2RAD (vkqvr_gunroll.value));
++		vec3_t		nf, nu, nr;
++		int			i;
++		// pitch: forward/up rotate about right (+pitch = nose DOWN, Quake sign)
++		for (i = 0; i < 3; i++)
++		{
++			nf[i] = f[i] * cp - u[i] * sp;
++			nu[i] = f[i] * sp + u[i] * cp;
++		}
++		VectorCopy (nf, f);
++		VectorCopy (nu, u);
++		// yaw: forward/right rotate about up (+yaw = LEFT, Quake sign)
++		for (i = 0; i < 3; i++)
++		{
++			nf[i] = f[i] * cy - r[i] * sy;
++			nr[i] = f[i] * sy + r[i] * cy;
++		}
++		VectorCopy (nf, f);
++		VectorCopy (nr, r);
++		// roll: right/up rotate about forward
++		for (i = 0; i < 3; i++)
++		{
++			nr[i] = r[i] * cr + u[i] * sr;
++			nu[i] = -r[i] * sr + u[i] * cr;
++		}
++		VectorCopy (nr, r);
++		VectorCopy (nu, u);
++		// Global grip offset, in the (already corrected) hand frame.
++		VectorMA (org, vkqvr_gunfwd.value, f, org);
++		VectorMA (org, vkqvr_gunright.value, r, org);
++		VectorMA (org, vkqvr_gunup.value, u, org);
++	}
++	VectorCopy (f, fwd);
++	VectorCopy (r, right);
++	VectorCopy (u, up);
++	return true;
++}
++
++// Quake (pitch, yaw, roll) from an orthonormal basis — the exact inverse of
++// AngleVectors, so a round trip through it is the identity and no sign is
++// guessed. `right` here is AngleVectors' right (which points to the player's
++// right, i.e. -Y at yaw 0).
++static void vkq_vr_angles_from_basis (const vec3_t fwd, const vec3_t right, const vec3_t up, float out[3])
++{
++	float f2 = fwd[2];
++	if (f2 > 1.0f)
++		f2 = 1.0f;
++	if (f2 < -1.0f)
++		f2 = -1.0f;
++	out[YAW] = (float)(atan2 (fwd[1], fwd[0]) * 180.0 / M_PI);
++	out[PITCH] = (float)(-asin (f2) * 180.0 / M_PI);
++	out[ROLL] = (float)(atan2 (-right[2], up[2]) * 180.0 / M_PI);
++}
++
++// The SENT view angles when a hand is aiming. Uses the RAW hand frame, not the
++// gripped one: the grip rotation exists to make the MODEL sit right in the fist
++// and must never move where the shot goes (that is how a "tuning" slider turns
++// into an aiming bug).
++void VKQ_VR_AimAngles (float out[3])
++{
++	vec3_t org, f, r, u;
++	out[0] = vkq_vr_head_pitch;
++	out[1] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
++	out[2] = 0.0f;
++	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), false, org, f, r, u))
++		return;
++	vkq_vr_angles_from_basis (f, r, u, out);
++	out[ROLL] = 0.0f;
++}
++
++// Where the shot LOOKS like it comes from: the gripped hand frame plus the
++// active weapon's muzzle offset. Used by the laser, the muzzle-flash dlight and
++// the lightning beam so all three agree with the model the player can see.
++qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd)
++{
++	vec3_t r, u;
++	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), true, org, fwd, r, u))
++		return false;
++	VectorMA (org, VKQ_VR_WeaponMuzzle (), fwd, org);
++	return true;
++}
++
++// --- input (charter A10's fixed layout) --------------------------------------
++static float vkq_vr_stick_axis (float v)
++{
++	const float dz = (vkqvr_deadzone.value > 0.0f && vkqvr_deadzone.value < 0.9f) ? vkqvr_deadzone.value : 0.15f;
++	float		a = fabsf (v);
++	if (a <= dz)
++		return 0.0f;
++	a = (a - dz) / (1.0f - dz);
++	a = a * a; // QuakeQuest's quadratic scaler: small movements stay small
++	return (v < 0.0f) ? -a : a;
++}
++
++// A press that the engine has not seen yet. Consuming clears it, so one physical
++// press fires exactly one impulse however the two loop rates line up.
++static unsigned vkq_vr_take_edges (int hand, unsigned *released)
++{
++	unsigned p;
++	pthread_mutex_lock (&vkq_vr_mtx);
++	p = vkq_vr_hand_pub[hand].pressed;
++	if (released)
++		*released = vkq_vr_hand_pub[hand].released;
++	vkq_vr_hand_pub[hand].pressed = 0;
++	vkq_vr_hand_pub[hand].released = 0;
++	pthread_mutex_unlock (&vkq_vr_mtx);
++	return p;
++}
++
++static unsigned vkq_vr_buttons_now (int hand)
++{
++	unsigned b;
++	pthread_mutex_lock (&vkq_vr_mtx);
++	b = vkq_vr_hand_pub[hand].tracked ? vkq_vr_hand_pub[hand].buttons : 0u;
++	pthread_mutex_unlock (&vkq_vr_mtx);
++	return b;
++}
++
++static void vkq_vr_stick_now (int hand, float out[2])
++{
++	pthread_mutex_lock (&vkq_vr_mtx);
++	out[0] = vkq_vr_hand_pub[hand].tracked ? vkq_vr_hand_pub[hand].stick[0] : 0.0f;
++	out[1] = vkq_vr_hand_pub[hand].tracked ? vkq_vr_hand_pub[hand].stick[1] : 0.0f;
++	pthread_mutex_unlock (&vkq_vr_mtx);
++}
++
++// Hold a kbutton_t down/up from a native source. Mirrors what the +cmd/-cmd
++// console commands do to the state bits, which is what makes these buttons
++// behave exactly like a gamepad's for CL_KeyState and CL_FinishMove.
++static void vkq_vr_hold (kbutton_t *b, qboolean down)
++{
++	if (down)
++	{
++		if (!(b->state & 1))
++			b->state |= 1 + 2; // down, and "pressed this frame"
++	}
++	else
++	{
++		if (b->state & 1)
++			b->state = 4; // up, and "released this frame"
++	}
++}
++
++/*
++==================
++VKQ_VR_ApplyHandInput -- overlay 0019
++
++Runs from CL_AccumulateCmd, right after IN_Move, so the Sense pair contributes
++to the SAME pending command a gamepad does and nothing about the gamepad path
++changes (charter A10's trap-ledger rule: the working path is never replaced by
++its replacement).
++
++Deliberately reads the LATEST published state rather than the frame-latched copy
++the renderer uses: input wants to be as fresh as possible, geometry wants to be
++coherent with the eyes, and those are different requirements.
++==================
++*/
++void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
++{
++	extern cvar_t sv_maxspeed;
++	static double lastTime = 0.0;
++	static int	  snapArmed = 1, cycleArmed = 1;
++	const int	  aim = vkq_vr_aim_hand (), off = vkq_vr_off_hand ();
++	unsigned	  pAim, pOff, rAim, rOff, bAim, bOff;
++	float		  ls[2], rs[2], speed, mx, my, rx, ry;
++	double		  now = Sys_DoubleTime ();
++	float		  dt = (lastTime > 0.0) ? (float)(now - lastTime) : 0.0f;
++	lastTime = now;
++	if (dt > 0.25f)
++		dt = 0.25f;
++
++	if (!vkq_vr_active || !vkq_vr_have)
++		return;
++	// NOTHING BELOW MAY RUN WITH NO HAND TRACKED. It drives in_attack and
++	// in_jump directly, and those are shared with the gamepad, the touch layer
++	// and every bind — so an unconditional "release" here would silently cancel
++	// a gamepad player's trigger every frame. Gamepad-only VR must behave
++	// exactly as it did in R1, and this line is what guarantees it.
++	{
++		int live;
++		pthread_mutex_lock (&vkq_vr_mtx);
++		live = vkq_vr_hand_pub[0].tracked || vkq_vr_hand_pub[1].tracked;
++		pthread_mutex_unlock (&vkq_vr_mtx);
++		if (!live)
++		{
++			if (vkq_vr_owned_buttons)
++			{
++				// We were driving them a moment ago and the controllers have just
++				// gone: release once, then never touch them again (the donors'
++				// release-on-doff rule — a dead battery must not leave the player
++				// firing forever).
++				vkq_vr_owned_buttons = 0;
++				vkq_vr_hold (&in_attack, false);
++				vkq_vr_hold (&in_jump, false);
++			}
++			return;
++		}
++		vkq_vr_owned_buttons = 1;
++	}
++	pAim = vkq_vr_take_edges (aim, &rAim);
++	pOff = vkq_vr_take_edges (off, &rOff);
++	bAim = vkq_vr_buttons_now (aim);
++	bOff = vkq_vr_buttons_now (off);
++	vkq_vr_stick_now (off, ls);
++	vkq_vr_stick_now (aim, rs);
++
++	// The MENU button works everywhere, including in menus — it is the only way
++	// back out of the console without a keyboard.
++	if ((pAim | pOff) & VKQ_VRB_MENU)
++		Cbuf_AddText ("togglemenu\n");
++
++	if (key_dest != key_game)
++	{
++		// In a menu the sticks and the trigger drive the SAME keys the gamepad
++		// path emits, so the panel menus stay drivable with nothing else plumbed.
++		static double repeat = 0.0;
++		int			  k = 0;
++		float		  x = vkq_vr_stick_axis (ls[0]) + vkq_vr_stick_axis (rs[0]);
++		float		  y = vkq_vr_stick_axis (ls[1]) + vkq_vr_stick_axis (rs[1]);
++		if (y > 0.5f)
++			k = K_UPARROW;
++		else if (y < -0.5f)
++			k = K_DOWNARROW;
++		else if (x > 0.5f)
++			k = K_RIGHTARROW;
++		else if (x < -0.5f)
++			k = K_LEFTARROW;
++		if (!k)
++			repeat = 0.0;
++		else if (now >= repeat)
++		{
++			Key_Event (k, true);
++			Key_Event (k, false);
++			repeat = now + (repeat > 0.0 ? 0.15 : 0.4); // one step, then autorepeat
++		}
++		if ((pAim | pOff) & (VKQ_VRB_TRIGGER | VKQ_VRB_A))
++		{
++			Key_Event (K_ENTER, true);
++			Key_Event (K_ENTER, false);
++		}
++		if ((pAim | pOff) & VKQ_VRB_B)
++		{
++			Key_Event (K_ESCAPE, true);
++			Key_Event (K_ESCAPE, false);
++		}
++		// Nothing below this line may reach gameplay while a menu is up.
++		vkq_vr_hold (&in_attack, false);
++		vkq_vr_hold (&in_jump, false);
++		return;
++	}
++
++	// --- gameplay -------------------------------------------------------------
++	// Right trigger fires, left trigger and A jump. Fixed layout, deliberately
++	// not bindable (both donors' ledgers paid for that).
++	vkq_vr_hold (&in_attack, (bAim & VKQ_VRB_TRIGGER) != 0);
++	vkq_vr_hold (&in_jump, ((bOff & VKQ_VRB_TRIGGER) || (bAim & VKQ_VRB_A) || (bOff & VKQ_VRB_A)) != 0);
++	if (pAim & VKQ_VRB_TRIGGER)
++		VKQ_VR_Haptic (aim, 0.7f, 0.04f); // the shot you feel in the hand that fired it
++
++	// Right stick click = recenter (hold-free: nothing else is on that click).
++	if (pAim & VKQ_VRB_STICK)
++	{
++		extern void VKQ_VR_Recenter (void);
++		VKQ_VR_Recenter ();
++		VKQ_VR_Haptic (aim, 0.5f, 0.05f);
++	}
++
++	// MOVE — same units and speed rule as IN_JoyMove, so a Sense stick and a
++	// gamepad stick move the player identically.
++	mx = vkq_vr_stick_axis (ls[0]);
++	my = vkq_vr_stick_axis (ls[1]);
++	if ((in_speed.state & 1) ^ (cl_alwaysrun.value != 0.0 || cl_forwardspeed.value >= sv_maxspeed.value))
++		speed = sv_maxspeed.value;
++	else if (cl_forwardspeed.value >= sv_maxspeed.value)
++		speed = q_min (sv_maxspeed.value, cl_forwardspeed.value / cl_movespeedkey.value);
++	else
++		speed = cl_forwardspeed.value;
++	if (cmd && !cl.paused)
++	{
++		cmd->sidemove += speed * mx;
++		cmd->forwardmove += speed * my;
++	}
++
++	// TURN — written into cl.viewangles[YAW] exactly as the gamepad path does,
++	// because VKQ_VR_ApplyHeadAim absorbs that delta into the BODY yaw. One
++	// mechanism serves stick, gyro, touch and Sense, and snap and smooth differ
++	// only in the size of the step.
++	rx = vkq_vr_stick_axis (rs[0]);
++	ry = vkq_vr_stick_axis (rs[1]);
++	if (!CL_AngleLocked () && !cl.paused)
++	{
++		if (vkqvr_snapturn.value >= 1.0f)
++		{
++			// Hysteresis (QuakeQuest: fire at 0.4, re-arm below 0.3) — without it
++			// a stick held over is a turntable.
++			if (snapArmed && fabsf (rs[0]) > 0.6f)
++			{
++				cl.viewangles[YAW] -= (rs[0] > 0.0f ? 1.0f : -1.0f) * vkqvr_snapturn.value;
++				snapArmed = 0;
++				VKQ_VR_Haptic (aim, 0.4f, 0.03f);
++			}
++			if (fabsf (rs[0]) < 0.4f)
++				snapArmed = 1;
++		}
++		else
++			cl.viewangles[YAW] -= rx * vkqvr_turnspeed.value * dt;
++	}
++
++	// WEAPON CYCLE — a stick FLICK up/down is next/prev, edge-triggered on the
++	// same hysteresis so one flick is one impulse and a held stick is none.
++	if (cycleArmed && fabsf (rs[1]) > 0.6f && fabsf (rs[0]) < 0.5f && !cl.paused)
++	{
++		in_impulse = (rs[1] > 0.0f) ? 10 : 12;
++		cycleArmed = 0;
++		VKQ_VR_Haptic (aim, 0.3f, 0.02f);
++	}
++	if (fabsf (rs[1]) < 0.4f)
++		cycleArmed = 1;
++	(void)ry;
++	(void)rOff;
++	(void)pOff;
++}
++
++// --- movement direction (charter A6) -----------------------------------------
++// NetQuake movement is server-side along the SENT yaw, which hand aim has just
++// made the gun's. Rotating the wish vector client-side by (reference - sent) is
++// therefore the whole of "walk where I'm looking" — two lines of trig and no
++// protocol change (QuakeQuest cl_walkdirection, same identity).
++void VKQ_VR_ApplyMoveDir (usercmd_t *cmd)
++{
++	float  ref, d, s, c, f, side;
++	vec3_t org, fwd, right, up;
++	int	   mode = (int)vkqvr_movedir.value;
++	// Reported as zero whenever no rotation is applied, so the diagnostics line
++	// can never show a stale angle from a previous setting — a measurement that
++	// lies about which mode is live would be worse than no measurement.
++	vkq_vr_movedir_delta = 0.0f;
++	if (!cmd || !vkq_vr_active || !vkq_vr_have || !VKQ_VR_AimHandTracked ())
++		return;
++	if (mode == 1)
++		return; // aim-hand relative: the server already uses the aim yaw
++	if (mode == 2)
++	{
++		if (!vkq_vr_hand_world (vkq_vr_off_hand (), false, org, fwd, right, up))
++			return;
++		ref = (float)(atan2 (fwd[1], fwd[0]) * 180.0 / M_PI);
++	}
++	else
++		ref = vkq_vr_body_yaw + vkq_vr_head_yaw; // head relative (default)
++
++	d = ref - cl.viewangles[YAW];
++	while (d > 180.0f)
++		d -= 360.0f;
++	while (d < -180.0f)
++		d += 360.0f;
++	if (fabsf (d) < 0.05f)
++		return;
++	s = sinf (VKQ_VR_DEG2RAD (d));
++	c = cosf (VKQ_VR_DEG2RAD (d));
++	f = cmd->forwardmove;
++	side = cmd->sidemove;
++	cmd->forwardmove = f * c + side * s;
++	cmd->sidemove = -f * s + side * c;
++	vkq_vr_movedir_delta = d; // diagnostics: the sim asserts this, see VR-R2-NOTES
++}
++
++// --- weapon at the hand (charter A8) -----------------------------------------
++// Per-weapon offsets seeded from QuakeQuest's table (darkplaces/view.c:882-926 —
++// same stock .mdl files, so their units are ours), keyed the same way: on the
++// active weapon's item bit. fwd/right/up are in the GRIPPED hand frame; scale
++// multiplies the model.
++typedef struct
++{
++	int	  item;
++	float fwd, right, up, pitch, scale;
++} vkq_vr_gun_t;
++
++static const vkq_vr_gun_t vkq_vr_guns[] = {
++	{IT_SHOTGUN, -6.0f, 0.0f, 7.0f, -5.0f, 0.65f},		 {IT_SUPER_SHOTGUN, -7.0f, 0.0f, 8.0f, 0.0f, 0.90f},
++	{IT_NAILGUN, -12.0f, 0.0f, 14.0f, 0.0f, 0.50f},		 {IT_SUPER_NAILGUN, -16.0f, 0.0f, 16.0f, 0.0f, 0.40f},
++	{IT_GRENADE_LAUNCHER, -8.0f, 0.0f, 10.0f, 0.0f, 1.0f}, {IT_ROCKET_LAUNCHER, -16.0f, 0.0f, 11.0f, -5.0f, 0.45f},
++	{IT_LIGHTNING, -8.0f, 0.0f, 9.0f, 0.0f, 1.0f},		 {IT_AXE, -22.0f, 12.0f, 28.0f, 0.0f, 0.50f},
++};
++
++static const vkq_vr_gun_t *vkq_vr_gun_entry (void)
++{
++	static const vkq_vr_gun_t def = {0, -6.0f, 0.0f, 7.0f, 0.0f, 1.0f};
++	const int				  w = cl.stats[STAT_ACTIVEWEAPON];
++	size_t					  i;
++	for (i = 0; i < sizeof (vkq_vr_guns) / sizeof (vkq_vr_guns[0]); i++)
++		if (vkq_vr_guns[i].item == w)
++			return &vkq_vr_guns[i];
++	return &def;
++}
++
++// Distance from the grip point to the muzzle, for the laser / flash / beam.
++// Taken as the weapon's own forward offset so it tracks the same table.
++float VKQ_VR_WeaponMuzzle (void)
++{
++	const vkq_vr_gun_t *g = vkq_vr_gun_entry ();
++	return -g->fwd + 8.0f;
++}
++
++/*
++==================
++VKQ_VR_PlaceViewmodel -- overlay 0019
++
++Called at the end of V_CalcRefdef. Returns false when nothing is tracked, and
++V_CalcRefdef's own face-attached placement stands — which is R1's behaviour,
++unchanged, so a build with no controllers is not a build with a new bug.
++==================
++*/
++qboolean VKQ_VR_PlaceViewmodel (entity_t *view)
++{
++	const vkq_vr_gun_t *g;
++	vec3_t				org, fwd, right, up;
++	float				ang[3];
++	if (!vkq_vr_active || !vkq_vr_have || vkqvr_weapon.value < 0.5f)
++		return false;
++	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), true, org, fwd, right, up))
++		return false;
++
++	g = vkq_vr_gun_entry ();
++	// The per-weapon pitch tweak turns the model in the fist; it must not move
++	// the muzzle ray, so it is applied to the ANGLES only.
++	vkq_vr_angles_from_basis (fwd, right, up, ang);
++	VectorMA (org, g->fwd, fwd, org);
++	VectorMA (org, g->right, right, org);
++	VectorMA (org, g->up, up, org);
++
++	VectorCopy (org, view->origin);
++	// Entity pitch is stored backwards from view angles (V_CalcRefdef's own
++	// comment, and what CalcGunAngle does to this same entity).
++	view->angles[PITCH] = -(ang[PITCH] + g->pitch);
++	view->angles[YAW] = ang[YAW];
++	view->angles[ROLL] = ang[ROLL];
++	view->netstate.scale = (byte)ENTSCALE_ENCODE (g->scale * vkqvr_gunscale.value);
++	return true;
++}
++
++/*
++==================
++VKQ_VR_LaserSight -- overlay 0019 (charter A8)
++
++The laser REPLACES the crosshair in VR (the comfort stash already turns the
++crosshair off), and it is the only honest answer to the parallax the charter
++accepts: the shot leaves the player's body along the hand's direction, so a
++2D reticle would lie about near-field aim while the beam cannot.
++
++Client-side only — a trace against the client's own world, no server round trip,
++no progs. Returns false when there is nothing to draw.
++==================
++*/
++/*
++==================
++VKQ_VR_AimDebugString -- overlay 0019
++
++The one line that proves charter A6's decoupling actually happened, rather than
++looking like it did. A screenshot cannot show that the SENT angles came from the
++hand while the RENDER came from the head — they are the same picture either way
++until you turn your head, and by then there is nothing to compare. So the
++numbers go in the file, next to every other VR measurement, and the simulator
++harness asserts on them.
++==================
++*/
++void VKQ_VR_AimDebugString (char *out, int len)
++{
++	float ang[3] = {0, 0, 0};
++	int	  tracked = VKQ_VR_AimHandTracked ();
++	if (!out || len <= 0)
++		return;
++	if (tracked)
++		VKQ_VR_AimAngles (ang);
++	q_snprintf (
++		out, len, "sent=(p%+.1f y%.1f) head=(p%+.1f y%.1f) hand=(p%+.1f y%.1f) body=%.1f handaim=%d movedir=%d delta=%+.1f weapon=%d hands=%d",
++		cl.viewangles[PITCH], anglemod (cl.viewangles[YAW]), vkq_vr_head_pitch, anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw), tracked ? ang[PITCH] : 0.0f,
++		tracked ? anglemod (ang[YAW]) : 0.0f, vkq_vr_body_yaw, tracked, (int)vkqvr_movedir.value, vkq_vr_movedir_delta, cl.stats[STAT_ACTIVEWEAPON],
++		VKQ_VR_HandsTracked ());
++}
++
++qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal)
++{
++	vec3_t far_pt, fwd;
++	if (!vkq_vr_active || !vkq_vr_have || vkqvr_laser.value < 0.5f)
++		return false;
++	if (cl.intermission || cls.demoplayback || cl.stats[STAT_HEALTH] <= 0 || !cl.worldmodel)
++		return false;
++	if (!VKQ_VR_MuzzleWorld (start, fwd))
++		return false;
++	VectorMA (start, 8192.0f, fwd, far_pt);
++	CL_TraceLine (start, far_pt, end, normal, NULL);
++	return true;
++}
++
+ #endif
+--- a/Quake/cl_main.c
++++ b/Quake/cl_main.c
+@@ -757,6 +757,19 @@
+ 			AngleVectors (ent->angles, fv, rv, uv);
+ 
+ 			VectorMA (dl->origin, 18, fv, dl->origin);
++#ifdef VKQ_VISIONOS
++			// vkquake-ios overlay 0019 (VR, charter A8): your own muzzle flash
++			// belongs at the gun you can see, not at the body it is fired from.
++			// Only the local player's — every other entity still flashes at its
++			// own origin, which is where its gun is.
++			if (ent == &cl.entities[cl.viewentity])
++			{
++				extern qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
++				vec3_t			mo, mf;
++				if (VKQ_VR_MuzzleWorld (mo, mf))
++					VectorCopy (mo, dl->origin);
++			}
++#endif
+ 			dl->radius = 200 + (COM_Rand () & 31);
+ 			dl->minlight = 32;
+ 			dl->die = cl.time + 0.1;
+@@ -1049,7 +1062,12 @@
+ 	// then sees ordinary view angles and stock progs, mods and multiplayer all
+ 	// aim where the player is looking. No-op outside VR.
+ 	{
++		// overlay 0019 (R2): the Sense pair contributes to the SAME pending
++		// command a gamepad does, in the same place, so both can be connected and
++		// both work — the gamepad path above is not touched at all.
++		extern void VKQ_VR_ApplyHandInput (usercmd_t * cmd);
+ 		extern void VKQ_VR_ApplyHeadAim (void);
++		VKQ_VR_ApplyHandInput (&cl.pendingcmd);
+ 		VKQ_VR_ApplyHeadAim ();
+ 	}
+ #endif
+@@ -1079,6 +1097,18 @@
+ 	cmd.sequence = cl.movemessages;
+ 	cmd.servertime = cl.time;
+ 	cmd.seconds = cmd.servertime - cl.pendingcmd.servertime;
++
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0019 (VR, charter A6): with hand aim the server moves
++	// the player along the GUN's yaw, which is not where the player is looking.
++	// Rotating the finished wish vector here — after every device has added to
++	// it, before it is written — is the whole of "walk where I face". No-op
++	// outside VR and in aim-hand-relative mode.
++	{
++		extern void VKQ_VR_ApplyMoveDir (usercmd_t * c);
++		VKQ_VR_ApplyMoveDir (&cmd);
++	}
++#endif
+ 
+ 	CL_FinishMove (&cmd);
+ 
+@@ -1346,6 +1376,18 @@
+ 
+ 	CL_InitInput ();
+ 	CL_InitTEnts ();
++
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0019: the VR tunables (aim hand, snap turn, grip
++	// calibration, laser, damage flash). Registered here so they exist before
++	// any config runs; NOT archived — VR settings persist through the shell's
++	// crash-safe settings store instead, which is what keeps them out of a 2D
++	// player's config.cfg (charter §7).
++	{
++		extern void VKQ_VR_RegisterCvars (void);
++		VKQ_VR_RegisterCvars ();
++	}
++#endif
+ 
+ 	Cvar_RegisterVariable (&cl_name);
+ 	Cvar_RegisterVariable (&cl_topcolor);
+--- a/Quake/view.c
++++ b/Quake/view.c
+@@ -479,7 +479,21 @@
+ 		r = r * (1 - a2) + cl.cshifts[j].destcolor[0] * a2;
+ 		g = g * (1 - a2) + cl.cshifts[j].destcolor[1] * a2;
+ 		b = b * (1 - a2) + cl.cshifts[j].destcolor[2] * a2;
++	}
++
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0019 (VR, charter A11): the damage/pickup flash is
++	// feedback, not a face-full of red. A full-strength polyblend across both
++	// eyes at arm's length is genuinely unpleasant in a way it never is on a
++	// screen, so VR scales it (default 0.5). The flash still happens — a player
++	// who cannot tell they are being hit is a worse problem.
++	{
++		extern int	 vkq_vr_active;
++		extern cvar_t vkqvr_flashscale;
++		if (vkq_vr_active)
++			a *= CLAMP (0.0f, vkqvr_flashscale.value, 1.0f);
+ 	}
++#endif
+ 
+ 	v_blend[0] = CLAMP (0.0f, r, 255.0f);
+ 	v_blend[1] = CLAMP (0.0f, g, 255.0f);
+@@ -845,6 +859,19 @@
+ 	else
+ 		oldz = ent->origin[2];
+ 
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0019 (VR, charter A8): LAST, so it overrides every
++	// face-attached placement above (bob, the viewsize fudge, the stair-step
++	// smoothing) rather than fighting them — in VR the gun is an object in the
++	// room held in your hand, and none of those corrections apply to it.
++	// Returns false with no controller tracked, and everything above stands:
++	// that is exactly R1, so a gamepad player sees no change.
++	{
++		extern qboolean VKQ_VR_PlaceViewmodel (entity_t * v);
++		VKQ_VR_PlaceViewmodel (view);
++	}
++#endif
++
+ 	if (chase_active.value)
+ 		Chase_UpdateForDrawing (); // johnfitz
+ }
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -646,8 +646,20 @@
+ */
+ void R_DrawViewModel (cb_context_t *cbx)
+ {
++#ifdef VKQ_VISIONOS
++	// overlay 0019 (VR, charter A8): VR forces viewsize 130 to strip the flat HUD
++	// out of the eyes (A9), and viewsize 130 is also stock Quake's "hide the
++	// weapon" switch — so R1 had no viewmodel in VR at all. In VR the two
++	// meanings come apart: the HUD belongs on the panel, the weapon belongs in
++	// your hand.
++	extern int	  vkq_vr_use;
++	const qboolean vkq_vr_world = (vkq_vr_use != 0);
++	if (!r_drawviewmodel.value || !r_drawentities.value || chase_active.value || (scr_viewsize.value >= 130 && !vkq_vr_world))
++		return;
++#else
+ 	if (!r_drawviewmodel.value || !r_drawentities.value || chase_active.value || scr_viewsize.value >= 130)
+ 		return;
++#endif
+ 
+ 	if (cl.items & IT_INVISIBILITY || cl.stats[STAT_HEALTH] <= 0)
+ 		return;
+@@ -664,7 +676,19 @@
+ 	R_BeginDebugUtilsLabel (cbx, "View Model");
+ 
+ 	// hack the depth range to prevent view model from poking into walls
++#ifdef VKQ_VISIONOS
++	// overlay 0019 (VR): the depth-range squash is a 2D trick — it keeps a
++	// face-glued gun out of geometry by lying about how far away it is. In VR
++	// the gun is a real object an arm's length away, and that lie is visible
++	// twice over: it breaks stereo depth, and the compositor reprojects on the
++	// depth we hand it (charter A5), so a squashed gun would swim against the
++	// world on every head turn. Full range in VR; unchanged everywhere else.
++	GL_Viewport (
++		cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, vkq_vr_world ? 0.0f : 0.7f,
++		1.0f);
++#else
+ 	GL_Viewport (cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, 0.7f, 1.0f);
++#endif
+ 
+ 	int			aliaspolys = 0;
+ 	aliashdr_t *paliashdr = (aliashdr_t *)Mod_Extradata (currententity->model);
+@@ -1120,6 +1144,15 @@
+ 	R_SetupContext (cbx);
+ 	Fog_EnableGFog (cbx); // johnfitz
+ 	R_DrawParticles (cbx);
++#ifdef VKQ_VISIONOS
++	// overlay 0019 (VR, charter A8): the laser sight rides the particle pass —
++	// same pipeline, same texture, same transparency ordering, so it is a draw
++	// call rather than a rendering feature.
++	{
++		extern void R_DrawVRLaser (cb_context_t * c);
++		R_DrawVRLaser (cbx);
++	}
++#endif
+ 
+ 	if (R_UseMBOIT ())
+ 	{
+@@ -1128,6 +1161,12 @@
+ 		R_SetupContext (composite_cbx);
+ 		Fog_EnableGFog (composite_cbx);
+ 		R_DrawParticles (composite_cbx);
++#ifdef VKQ_VISIONOS
++		{
++			extern void R_DrawVRLaser (cb_context_t * c);
++			R_DrawVRLaser (composite_cbx);
++		}
++#endif
+ 	}
+ #ifdef PSET_SCRIPT
+ 	cb_context_t *fte_blend_cbx = NULL;
+--- a/Quake/cl_tent.c
++++ b/Quake/cl_tent.c
+@@ -368,6 +368,19 @@
+ 		if (b->entity == cl.viewentity && cl.entities)
+ 		{
+ 			VectorCopy (cl.entities[cl.viewentity].origin, b->start);
++#ifdef VKQ_VISIONOS
++			// vkquake-ios overlay 0019 (VR, charter A8): the thunderbolt has to
++			// leave the barrel you can see. Stock Quake starts it at the player's
++			// waist — a deliberate flat-screen hack to keep it out of the view —
++			// and in VR that reads as lightning erupting from your belly.
++			// QuakeQuest's CL_Beam_CalculatePositions makes the same correction.
++			{
++				extern qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
++				vec3_t			mo, mf;
++				if (VKQ_VR_MuzzleWorld (mo, mf))
++					VectorCopy (mo, b->start);
++			}
++#endif
+ 		}
+ 
+ 		// calculate pitch and yaw
+--- a/Quake/r_part.c
++++ b/Quake/r_part.c
+@@ -1040,8 +1040,137 @@
+ 	R_EndDebugUtilsLabel (cbx);
+ }
+ 
++#ifdef VKQ_VISIONOS
+ /*
++===============
++R_DrawVRLaser -- vkquake-ios overlay 0019 (VR, charter A8)
++
++The laser sight, drawn through the particle pipeline and the particle texture
++that are already bound, built and validated on this device — a laser is a
++coloured additive billboard, which is exactly what that pipeline draws, so it
++needs no new Vulkan object, no new shader and no `fillModeNonSolid` (Metal has
++no wide lines, so a line-mode beam would be one pixel and would alias badly at
++an eye's resolution).
++
++Two camera-facing quads: a thin ribbon from the muzzle to the impact, and a
++round dot lifted off the surface it hit. The beam's texcoords all sit at the
++texture's centre, which is solid white — so the ribbon is a clean constant
++colour while the dot keeps the texture's soft round falloff.
+ ===============
++*/
++static void R_DrawVRLaserGeometry (cb_context_t *cbx)
++{
++	extern qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal);
++	extern cvar_t	vkqvr_laser;
++	vec3_t			start, end, normal, dir, side, up2, a, b;
++	basicvertex_t  *v;
++	VkBuffer		vbuf;
++	VkDeviceSize	voff;
++	float			len, half;
++	int				n = 0, i;
++	const byte		beam_c[4] = {255, 40, 20, 255};
++	const byte		dot_c[4] = {255, 90, 40, 255};
++	const qboolean	want_beam = (vkqvr_laser.value < 1.5f);
++
++	if (!VKQ_VR_LaserSight (start, end, normal))
++		return;
++
++	VectorSubtract (end, start, dir);
++	len = VectorLength (dir);
++	if (len < 1.0f)
++		return;
++	VectorScale (dir, 1.0f / len, dir);
++
++	// Ribbon width: face the viewer by crossing the beam with the eye-to-beam
++	// vector, so it reads as a line from every angle instead of vanishing edge-on.
++	VectorSubtract (start, r_origin, side);
++	CrossProduct (dir, side, up2);
++	if (VectorLength (up2) < 0.001f)
++		VectorCopy (vup, up2);
++	VectorNormalize (up2);
++
++	v = (basicvertex_t *)R_VertexAllocate (12 * sizeof (basicvertex_t), &vbuf, &voff);
++
++#define VKQ_LASER_VERT(P, C)                                                                                                                                 \
++	do                                                                                                                                                       \
++	{                                                                                                                                                        \
++		v[n].position[0] = (P)[0], v[n].position[1] = (P)[1], v[n].position[2] = (P)[2];                                                                      \
++		v[n].texcoord[0] = 0.5f, v[n].texcoord[1] = 0.5f;                                                                                                     \
++		for (i = 0; i < 4; i++)                                                                                                                              \
++			v[n].color[i] = (C)[i];                                                                                                                          \
++		n++;                                                                                                                                                 \
++	} while (0)
++
++	if (want_beam)
++	{
++		// Thickness grows a little with distance so the far end never falls below
++		// a pixel — the same "keep it visible" hack the particles themselves use.
++		half = 0.35f + len * 0.0015f;
++		VectorMA (start, half, up2, a);
++		VectorMA (start, -half, up2, b);
++		VKQ_LASER_VERT (a, beam_c);
++		VKQ_LASER_VERT (b, beam_c);
++		VectorMA (end, -half, up2, a);
++		VKQ_LASER_VERT (a, beam_c);
++		VectorMA (start, half, up2, a);
++		VKQ_LASER_VERT (a, beam_c);
++		VectorMA (end, -half, up2, a);
++		VKQ_LASER_VERT (a, beam_c);
++		VectorMA (end, half, up2, a);
++		VKQ_LASER_VERT (a, beam_c);
++	}
++
++	// The impact dot, nudged off the surface so it does not z-fight the wall.
++	{
++		vec3_t c;
++		float  r = 1.6f + len * 0.004f;
++		VectorMA (end, 0.5f, normal, c);
++		for (i = 0; i < 6; i++)
++		{
++			static const float qx[6] = {-1, 1, 1, -1, 1, -1};
++			static const float qy[6] = {-1, -1, 1, -1, 1, 1};
++			vec3_t			   p;
++			VectorMA (c, qx[i] * r, vright, p);
++			VectorMA (p, qy[i] * r, vup, p);
++			v[n].position[0] = p[0], v[n].position[1] = p[1], v[n].position[2] = p[2];
++			v[n].texcoord[0] = (qx[i] + 1.0f) * 0.5f;
++			v[n].texcoord[1] = (qy[i] + 1.0f) * 0.5f;
++			{
++				int k;
++				for (k = 0; k < 4; k++)
++					v[n].color[k] = dot_c[k];
++			}
++			n++;
++		}
++	}
++#undef VKQ_LASER_VERT
++
++	if (n == 0)
++		return;
++	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &vbuf, &voff);
++	vulkan_globals.vk_cmd_draw (cbx->cb, n, 1, 0, 0);
++}
++
++void R_DrawVRLaser (cb_context_t *cbx)
++{
++	extern int vkq_vr_use;
++	if (!vkq_vr_use)
++		return;
++	R_BeginDebugUtilsLabel (cbx, "VR Laser");
++	R_BindPipeline (
++		cbx, VK_PIPELINE_BIND_POINT_GRAPHICS,
++		R_PipelineForRenderPass (
++			cbx->render_pass_index, vulkan_globals.particle_pipeline, vulkan_globals.particle_oit_pipeline, vulkan_globals.particle_mboit_moment_pipeline,
++			vulkan_globals.particle_mboit_composite_pipeline));
++	vulkan_globals.vk_cmd_bind_descriptor_sets (
++		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &particletexture->descriptor_set, 0, NULL);
++	R_DrawVRLaserGeometry (cbx);
++	R_EndDebugUtilsLabel (cbx);
++}
++#endif // VKQ_VISIONOS
++
++/*
++===============
+ R_DrawParticles_ShowTris -- johnfitz
+ ===============
+ */
+--- a/Quake/in_sdl3.c
++++ b/Quake/in_sdl3.c
+@@ -39,6 +39,44 @@
+ 
+ static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
+ SDL_Gamepad			 *joy_active_controller = NULL;
++
++#ifdef VKQ_VISIONOS
++/*
++================
++IN_VKQIgnoreSpatial -- vkquake-ios overlay 0019 (charter A10, trap ledger)
++
++visionOS 26 vends each PSVR2 Sense half as its own GCController once the app
++declares `SpatialGamepad`. SDL3's MFi backend adopts ANY GCController with a
++physical input profile (SDL_mfijoystick.m's generic branch), so without this the
++pair arrives as two half-gamepads, SDL opens the FIRST one it sees, and the
++player gets movement from one fist and nothing from the other.
++
++The filter asks the native backend — which is looking at the same GCController
++objects and can read `productCategory` — whether THIS SDL device is a spatial
++controller. Matched by SDL's own naming rule (vendorName, falling back to
++productCategory), because SDL exposes no handle back to the GCController and its
++generic MFi VID/PID is shared with every ordinary pad, so the blacklist hint
++cannot separate them.
++
++THE RULE THAT MATTERS (paid for in sm64coopdx 1.1.2.22): this removes NOTHING
++from the working path. Ordinary gamepads are not spatial, the predicate returns
++false for them, and SDL keeps driving them with the player's own binds. If the
++match ever fails, the failure mode is the status quo — SDL adopts a Sense half —
++not a dead gamepad, and the inventory line in the diagnostics file says so.
++================
++*/
++static qboolean IN_VKQIgnoreSpatial (SDL_JoystickID id)
++{
++	extern int	VKQ_Sense_ShouldIgnoreSDLGamepad (const char *name);
++	const char *name = SDL_GetGamepadNameForID (id);
++	if (!name)
++		name = SDL_GetJoystickNameForID (id);
++	if (!name || !VKQ_Sense_ShouldIgnoreSDLGamepad (name))
++		return false;
++	Con_Printf ("VR: leaving spatial controller '%s' to the native backend\n", name);
++	return true;
++}
++#endif
+ 
+ void IN_StartupJoystick (void)
+ {
+@@ -77,6 +115,10 @@
+ 		for (int i = 0; i < count; i++)
+ 		{
+ 			SDL_JoystickID id = joysticks[i];
++#ifdef VKQ_VISIONOS
++			if (IN_VKQIgnoreSpatial (id))
++				continue;
++#endif
+ 			if (SDL_IsGamepad (id))
+ 			{
+ 				const char *controllername = SDL_GetGamepadNameForID (id);
+@@ -234,6 +276,10 @@
+ #endif
+ 
+ 		case SDL_EVENT_GAMEPAD_ADDED:
++#ifdef VKQ_VISIONOS
++			if (IN_VKQIgnoreSpatial (event.gdevice.which))
++				break;
++#endif
+ 			if (joy_active_instaceid == 0)
+ 			{
+ 				joy_active_controller = SDL_OpenGamepad (event.gdevice.which);

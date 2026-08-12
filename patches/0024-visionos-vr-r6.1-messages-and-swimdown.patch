@@ -1,0 +1,716 @@
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -5985,7 +5985,14 @@
+ // (charter §7 — the archived-cvar trap that R1 already paid for once).
+ cvar_t vkqvr_aimhand = {"vkqvr_aimhand", "1", CVAR_NONE};	  // 0 = left, 1 = right
+ cvar_t vkqvr_movedir = {"vkqvr_movedir", "0", CVAR_NONE};	  // 0 head, 1 aim hand, 2 off hand
+-cvar_t vkqvr_snapturn = {"vkqvr_snapturn", "45", CVAR_NONE};  // 0 = smooth, else degrees
++// R6.1 item 3 — SMOOTH IS THE DEFAULT (the user: "smooth turning should be
++// default, not snap"). The charter's A11 comfort line proposed snap-on, which is
++// the conservative choice for a player who has never worn a headset; four device
++// rounds later the person who plays this wants smooth, and the setting is one tap
++// away for anyone who does not. 0 = smooth (vkqvr_turnspeed governs), else the
++// snap step in degrees. The settings row's default and the once-per-install
++// migration in ios_settings.m move with this number.
++cvar_t vkqvr_snapturn = {"vkqvr_snapturn", "0", CVAR_NONE};	  // 0 = smooth, else degrees
+ cvar_t vkqvr_turnspeed = {"vkqvr_turnspeed", "140", CVAR_NONE};
+ cvar_t vkqvr_deadzone = {"vkqvr_deadzone", "0.15", CVAR_NONE};
+ cvar_t vkqvr_laser = {"vkqvr_laser", "1", CVAR_NONE};		 // 0 off, 1 beam+dot, 2 dot only
+@@ -6210,7 +6217,10 @@
+ // the console +cmd/-cmd path is normally the only writer. Driving them directly
+ // is what makes a Sense trigger indistinguishable from a bound gamepad button
+ // to CL_KeyState and CL_FinishMove.
+-extern kbutton_t in_jump, in_attack;
++// R6.1 item 1: in_down joins them — swim down is on B now, and it has to be
++// RELEASED on exactly the same paths jump is (doff, menu open), or a controller
++// that dies underwater leaves the player sinking forever.
++extern kbutton_t in_jump, in_attack, in_down;
+ extern int		 in_impulse;
+ extern cvar_t	 cl_forwardspeed, cl_movespeedkey, cl_alwaysrun;
+ 
+@@ -6242,6 +6252,8 @@
+ // overlay 0023 (R6 part A) — the fire scheduler drives the same button latch the
+ // rest of the input path does, and is defined above it.
+ static void vkq_vr_hold (kbutton_t *b, qboolean down);
++int			  VKQ_VR_ClearHolsters (void); // R6.4 item 2 (defined with the holster state)
++static double vkq_vr_haptic_double = 0.0;  // R6.4: the clear-holsters confirm is TWO pulses
+ 
+ // The hand a shot leaves from THIS frame. Normally the aim hand; in Immersive
+ // dual wield it is whichever trigger is firing, so aim, muzzle, crosshair and
+@@ -6651,7 +6663,38 @@
+ 		vkqvr_dualclock.value < 0.5f ? "off (cvar)" : (VKQ_VR_ClockAvailable () ? "on" : "unavailable (this progs has no attack_finished)"),
+ 		cl.stats[STAT_SHELLS], cl.stats[STAT_NAILS], cl.stats[STAT_ROCKETS], cl.stats[STAT_CELLS]);
+ }
++
++/*
++==================
++VKQ_VR_InputDebugString -- overlay 0024 (VR R6.1)
++
++The fixed Sense layout, as a line — because three of this round's four items are
++input decisions and none of them is visible in a screenshot.
+ 
++  jump / down   the two kbuttons the layout drives. `down` is R6.1 item 1: swim
++                down, on B, on either hand. A press must move it to 1 and a
++                release back to 0, which is the whole assertion.
++  btnaim/btnoff the raw VKQ_VRB_ masks, so a failing binding assertion says
++                whether the BUTTON arrived or the BINDING dropped it — two very
++                different bugs with one symptom.
++  snapturn      item 3's default, read from the cvar the turn code actually uses
++                rather than from the settings store that fed it.
++  sheet         item 4: is a settings screen up right now, as the engine sees it.
++==================
++*/
++static unsigned vkq_vr_buttons_now (int hand); // defined with the input path below
++
++void VKQ_VR_InputDebugString (char *out, int len)
++{
++	extern int	VKQ_iOS_SettingsSheetOpen (void);
++	const int	aim = vkq_vr_aim_hand (), off = vkq_vr_off_hand ();
++	if (!out || len <= 0)
++		return;
++	q_snprintf (out, len, "jump=%d down=%d attack=%d btnaim=0x%02x btnoff=0x%02x snapturn=%.1f turnspeed=%.0f sheet=%d hands=%d",
++				(in_jump.state & 1) ? 1 : 0, (in_down.state & 1) ? 1 : 0, (in_attack.state & 1) ? 1 : 0, vkq_vr_buttons_now (aim),
++				vkq_vr_buttons_now (off), vkqvr_snapturn.value, vkqvr_turnspeed.value, VKQ_iOS_SettingsSheetOpen (), vkq_vr_have ? 1 : 0);
++}
++
+ // How far the wish vector was rotated this frame (charter A6's movement
+ // direction). Published for the diagnostics line the simulator asserts on —
+ // "the movement rotated" is otherwise invisible in a screenshot.
+@@ -7440,11 +7483,15 @@
+ void VKQ_VR_UIInputPump (void)
+ {
+ 	extern int	  VKQ_Sense_UISample (unsigned *btn, float *stick);
++	// R6.1 item 4 — the settings sheet is UIKit/SwiftUI, so it is invisible to
++	// key_dest and unreachable by Key_Event. The shell answers both questions.
++	extern int VKQ_iOS_SettingsSheetOpen (void);
+ 	static unsigned prev[2] = {0u, 0u};
+ 	static double	repeat = 0.0;
+ 	static int		wasActive = 0;
+ 	const int		modal = vkq_ios_modal_active;
+-	const int		active = modal || (key_dest != key_game);
++	const int		sheet = VKQ_iOS_SettingsSheetOpen ();
++	const int		active = modal || sheet || (key_dest != key_game);
+ 	unsigned		btn[2] = {0u, 0u}, pressed;
+ 	float			stick[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+ 	float			x, y;
+@@ -7478,6 +7525,31 @@
+ 	pressed = (btn[0] & ~prev[0]) | (btn[1] & ~prev[1]);
+ 	prev[0] = btn[0];
+ 	prev[1] = btn[1];
++
++	/*
++	 * R6.2 item 3 — THE SHEET-CLOSE GESTURE IS GONE, DELIBERATELY.
++	 *
++	 * R6.1 made B or MENU dismiss the ornament settings sheet. the user never asked
++	 * for that and does not want it: "you just pinch or trigger on DONE like in
++	 * any other app". The console half (`vkqsettings close`) is what the remote
++	 * rescue actually needed and it stays.
++	 *
++	 * It also could not be left in harmlessly, which is the deciding argument
++	 * rather than mere deference. Gameplay input is deliberately NOT blocked while
++	 * the sheet is up — half the VR rows are live sliders you find by turning, by
++	 * aiming, or by reaching for your hip, and freezing the player would take the
++	 * instrument away from the calibration. So B while a sheet is open is BOTH a
++	 * swim-down and a sheet dismissal: a player sinking in water with the sheet
++	 * open to tune Turn Speed would have it shut under them. A gesture that can
++	 * eat a press meant for a movement key is not a smaller affordance, it is a
++	 * second binding on a button that already has one.
++	 *
++	 * The sheet state itself is still published (MOVENOW's `sheet=`, and the
++	 * `vkqsettings close` report), because knowing whether a sheet is up is
++	 * exactly what made the remote rescue debuggable.
++	 */
++	if (sheet)
++		return; // suppress MENU keys only: arrows/enter/escape would drive a screen nobody can see
+ 
+ 	// Chirality-appropriate and hand-agnostic: trigger or A on EITHER controller
+ 	// is yes/select, B or menu on either is no/back. A player who put the pair
+@@ -7572,6 +7644,7 @@
+ 				vkq_vr_owned_buttons = 0;
+ 				vkq_vr_hold (&in_attack, false);
+ 				vkq_vr_hold (&in_jump, false);
++				vkq_vr_hold (&in_down, false); // R6.1: never leave a doffed player sinking
+ 				// R3 release-on-doff (charter A7): the controllers have gone, so
+ 				// every grip goes with them and Immersive hands the weapon back.
+ 				// Never leave a player axe-locked because a battery died.
+@@ -7600,6 +7673,7 @@
+ 		// Nothing below this line may reach gameplay while a menu is up.
+ 		vkq_vr_hold (&in_attack, false);
+ 		vkq_vr_hold (&in_jump, false);
++		vkq_vr_hold (&in_down, false); // R6.1: B is swim-down in gameplay, "back" in a menu
+ 		// A menu opening mid-hold must not leave a grip latched, or Immersive
+ 		// would stow on the release the player made to press a menu button.
+ 		vkq_vr_grip_release_all ("menu opened");
+@@ -7661,6 +7735,34 @@
+ 		VKQ_VR_Haptic (aim, 0.5f, 0.05f, "recenter");
+ 	}
+ 
++	/*
++	 * R6.4 item 2 — CLEAR BOTH HOLSTERS, on the OFF hand's stick click.
++	 *
++	 * the user asked for this on the RIGHT stick click and reported feeling a
++	 * vibration there; what he felt was RECENTER, which has been on that click
++	 * since R2 and is the gesture that fixes a drifted play space. That is worth
++	 * keeping, so the clear goes on the OFF hand's click, which was genuinely
++	 * unbound.
++	 *
++	 * It is his undo for "one of my weapons is stuck holstered". The weapons are
++	 * still OWNED — only the slots empty — so everything remains reachable
++	 * through the stick-flick cycle immediately afterwards. Instant, with no
++	 * hold-to-confirm: an accidental clear costs two grips to undo, and a guard
++	 * on a cheap action is a tax on the common case. His round decides whether it
++	 * needs one.
++	 */
++	if ((pOff & VKQ_VRB_STICK) && vkq_vr_immersive () && VKQ_VR_ClearHolsters ())
++	{
++		// Two pulses, so it cannot be mistaken for any single-pulse gesture.
++		VKQ_VR_Haptic (off, 0.8f, 0.05f, "holsters-cleared");
++		vkq_vr_haptic_double = now + 0.12;
++	}
++	if (vkq_vr_haptic_double > 0.0 && now >= vkq_vr_haptic_double)
++	{
++		vkq_vr_haptic_double = 0.0;
++		VKQ_VR_Haptic (off, 0.8f, 0.05f, "holsters-cleared-2");
++	}
++
+ 	// MOVE — same units and speed rule as IN_JoyMove, so a Sense stick and a
+ 	// gamepad stick move the player identically.
+ 	mx = vkq_vr_stick_axis (ls[0]);
+@@ -7742,9 +7844,35 @@
+ 			cycleArmed = 1;
+ 	}
+ 
++	// R6.1 item 1 — SWIM DOWN, on B, on either hand.
++	//
++	// the user: "is swim down bound to any button? couldn't figure it out. figured
++	// it should be bound to the button above jump." It was bound to nothing: R3
++	// left B "completely unbound — the weapon wheel wants it", and R4 kept the
++	// reservation. THAT RESERVATION IS RELEASED. A shipped-and-asked-for control
++	// outranks a deferred maybe-feature, and the weapon wheel — if it is ever
++	// built for VR — has the whole holster/cycle grammar to live in instead.
++	//
++	// B is the right button by elimination, not by geometry: each Sense
++	// controller has exactly TWO face buttons, jump is on A, so "the button above
++	// jump" can only be the other one. (Nothing in this program's ledger records
++	// which of the pair is physically higher — see docs/VR-R6-NOTES.md §R6.1 —
++	// and that question does not need answering to get this binding right.)
++	//
++	// Bound on EITHER hand, exactly as jump is, so a player who has the pair the
++	// other way round is not left without it. Held, not edge-triggered: swimming
++	// down is a sustained action, and in_down is the same kbutton the gamepad,
++	// the touch layer and a `+movedown` bind drive — one mechanism, four inputs.
++	//
++	// GLOBAL, not water-gated: +movedown out of water is harmless (upmove only
++	// does anything in a liquid or a ladder), and gating it on cl.inwater would
++	// mean a button that works in some rooms and not others, which is worse to
++	// learn than one that sometimes does nothing.
++	vkq_vr_hold (&in_down, ((bAim & VKQ_VRB_B) || (bOff & VKQ_VRB_B)) != 0);
++
+ 	// R3 (charter A7): the grips, LAST, after the fixed layout has had its say.
+ 	// Nothing above reads a grip, so the holster machine cannot collide with
+-	// fire, jump, turn or cycle — and B stays unbound for the weapon wheel.
++	// fire, jump, turn, cycle or swim-down.
+ 	VKQ_VR_UpdateHolsters (now);
+ 	(void)ry;
+ 	(void)rOff;
+@@ -8613,10 +8741,101 @@
+ 
+ static qboolean vkq_vr_owns (int itembit) { return itembit != 0 && (cl.items & itembit) != 0; }
+ 
+-// The one rule that IS the persistence policy. Runs every input frame.
++/*
++==================
++R6.4 item 1 — THE UNIQUENESS INVARIANT.
++
++the user, on 1.0.7.11, in a new game with only the axe and the shotgun: he stowed
++the shotgun he was holding onto his right hip, and ended up with the shotgun on
++the hip AND still in his hand. "you cannot have a duplicate holstered."
++
++Quake's inventory is a bitfield the SERVER owns, and the physical inventory is
++four references into it — two hands and two hips. Nothing in the engine stops two
++of those references naming the same bit, and there are five places that write
++one: TAKE, STOW, SWAP, the flick-select, and the seed that fills the aim hand
++from STAT_ACTIVEWEAPON. Every one of them was individually careful (the stow does
++clear the hand), and a duplicate was still reachable — because "careful at each
++site" is not the same property as "impossible", and the fifth writer runs on a
++timer nobody is looking at.
++
++So this is one function and not five fixes. Placing an item anywhere REMOVES it
++from everywhere else, by construction, so the invariant holds after every
++mutation whether or not the mutating code remembered it. New writers inherit it
++for free; that is the whole point of spending a helper on four integers.
++==================
++*/
++static void vkq_vr_v2_claim (int *slot, int item)
++{
++	int *all[4] = {&vkq_vr_held_item[0], &vkq_vr_held_item[1], &vkq_vr_holster_item[0], &vkq_vr_holster_item[1]};
++	int	 i;
++	if (!slot)
++		return;
++	*slot = item;
++	if (!item)
++		return;
++	for (i = 0; i < 4; i++)
++		if (all[i] != slot && *all[i] == item)
++			*all[i] = 0;
++}
++
++// How many item bits currently occupy more than one of the four places. This is
++// the standing assertion's number: the simulator reads it on EVERY dump for the
++// whole suite, so a duplicate introduced anywhere is caught by the next thing
++// the harness happens to ask, not only by a test aimed at it.
++static int vkq_vr_v2_dupes (void)
++{
++	const int v[4] = {vkq_vr_held_item[0], vkq_vr_held_item[1], vkq_vr_holster_item[0], vkq_vr_holster_item[1]};
++	int		  i, j, n = 0;
++	for (i = 0; i < 4; i++)
++		for (j = i + 1; j < 4; j++)
++			if (v[i] && v[i] == v[j])
++				n++;
++	return n;
++}
++
++/*
++==================
++vkq_vr_v2_validate -- the one rule that IS the persistence policy.
++
++R6.2 item 2 — WHY LEVEL TRANSITIONS ATE THE PHYSICAL INVENTORY.
++
++the user, on 1.0.7.10: "when you beat a map and advance to the next map, it doesn't
++remember your holsters, or what you had in your left hand at all. it only
++remembers your RIGHT hand weapon."
++
++The rule below is right and the timing was wrong. A slot is cleared when the
++player no longer OWNS what is in it (`cl.items`), which is exactly what makes a
++new game or a death empty the belt without a death hook. But `CL_ClearState`
++zeroes the whole client — `cl.items` included — at the start of every
++changelevel, and the new level's inventory only arrives with the first clientdata
++message after signon. For those frames the client does not know the player owns
++anything, so this ran and swept the belt and the off hand.
++
++The right hand looked immune for a reason that makes the diagnosis certain: it is
++the only one of the three that gets re-seeded afterwards, from
++`cl.stats[STAT_ACTIVEWEAPON]`, in UpdateImmersiveV2's seed block. Nothing
++re-seeds a holster or the off hand, so what this cleared stayed cleared.
++
++The fix is to notice that "the player owns nothing" and "we have not been told
++what the player owns" are different states, and only the first is a fact. The
++gate is STAT_ACTIVEWEAPON, deliberately: it is the same signal the seed block
++already trusts to mean "the server has told us what is in our hands this level",
++so persistence and seeding can never disagree about when the inventory became
++authoritative.
++
++Everything the policy did before, it still does — the possession check is
++unchanged and runs on the very next frame once the level is live. A new game or
++an episode reset that strips weapons therefore still empties the slots it should,
++which is the correct answer there.
++==================
++*/
+ static void vkq_vr_v2_validate (void)
+ {
+ 	int i;
++	// NOT YET AUTHORITATIVE: mid-changelevel, mid-signon, or no world. Freeze
++	// rather than clear — an empty cl.items here means "not told", not "nothing".
++	if (cls.state != ca_connected || cls.signon != SIGNONS || !cl.worldmodel || !cl.stats[STAT_ACTIVEWEAPON])
++		return;
+ 	for (i = 0; i < 2; i++)
+ 	{
+ 		if (vkq_vr_holster_item[i] && !vkq_vr_owns (vkq_vr_holster_item[i]))
+@@ -8624,9 +8843,37 @@
+ 		if (vkq_vr_held_item[i] && !vkq_vr_owns (vkq_vr_held_item[i]))
+ 			vkq_vr_held_item[i] = 0;
+ 	}
+-	// Never the same weapon twice.
+-	if (vkq_vr_held_item[0] && vkq_vr_held_item[0] == vkq_vr_held_item[1])
+-		vkq_vr_held_item[vkq_vr_off_hand ()] = 0;
++	// Never the same weapon twice — ANYWHERE, not just across the two hands.
++	// The old rule covered one of the six pairs; the hip/hand pairs are the ones
++	// the user actually hit.
++	{
++		int *all[4] = {&vkq_vr_held_item[0], &vkq_vr_held_item[1], &vkq_vr_holster_item[0], &vkq_vr_holster_item[1]};
++		int	 i, j;
++		for (i = 0; i < 4; i++)
++			for (j = i + 1; j < 4; j++)
++				if (*all[i] && *all[i] == *all[j])
++					*all[j] = 0; // the earlier place wins: hands before hips, aim before off
++	}
++}
++
++/*
++==================
++VKQ_VR_ClearHolsters -- R6.4 item 2.
++
++Empties both hip slots and nothing else. The weapons stay OWNED, so every one of
++them is immediately reachable again on the stick-flick cycle — this is an undo
++for "a weapon is stuck on my hip", not a discard.
++
++Returns whether anything was actually cleared, so the caller only spends a
++haptic when something happened.
++==================
++*/
++int VKQ_VR_ClearHolsters (void)
++{
++	const int had = (vkq_vr_holster_item[0] ? 1 : 0) + (vkq_vr_holster_item[1] ? 1 : 0);
++	vkq_vr_holster_item[0] = vkq_vr_holster_item[1] = 0;
++	vkq_vr_holster_note ("CLEARED both holsters (%d had a weapon) — still owned, still on the cycle", had);
++	return had > 0;
+ }
+ 
+ void VKQ_VR_ImmersiveReset (const char *why)
+@@ -8778,6 +9025,50 @@
+ 			const byte idx = p->data[y * w + x];
+ 			out[y * maxw + x] = (idx == 255) ? 0u : (d_8to24table[idx] | 0xFF000000u);
+ 		}
++	if (ow)
++		*ow = w;
++	if (oh)
++		*oh = h;
++	return 1;
++}
++
++/*
++==================
++VKQ_VR_Conchars -- overlay 0024 (VR R6.1 item 2)
++
++Quake's OWN font, handed to the shell as one RGBA atlas, for the same reason
++VKQ_VR_HudIcon hands over the sbar art: the head-locked panels are Metal
++textures the shell rasterises itself, and it cannot reach a gltexture_t.
++
++conchars is a 128x128 lump of 8x8 glyphs in a 16x16 grid — 256 of them, so the
++high-bit alternate charset comes along for free. The palette is
++`d_8to24table_conchars`, which is d_8to24table with index 0's alpha zeroed
++(gl_texmgr.c:599); using the ENGINE's own conchars palette rather than
++re-deriving the transparent index is what makes a mod's replacement conchars
++composite correctly instead of arriving on a black tile.
++
++Returns 0 and touches nothing when the lump is missing or malformed, so the
++caller can fall back rather than crash — the same contract as VKQ_VR_HudIcon.
++Called once per VR session (the atlas never changes within one), so the WAD read
++and the palette conversion are not on any frame's path.
++==================
++*/
++int VKQ_VR_Conchars (unsigned *out, int maxw, int maxh, int *ow, int *oh)
++{
++	lumpinfo_t *info = NULL;
++	byte	   *data;
++	int			x, y;
++	// The lump has no header: Draw_LoadPics reads it as a bare 128x128 block of
++	// indices (gl_draw.c). Anything smaller is a data set we do not understand.
++	const int	w = 128, h = 128;
++	if (!out || maxw < w || maxh < h)
++		return 0;
++	data = (byte *)W_GetLumpName ("conchars", &info);
++	if (!data || !info || (size_t)info->size < (size_t) (w * h))
++		return 0;
++	for (y = 0; y < h; y++)
++		for (x = 0; x < w; x++)
++			out[y * maxw + x] = d_8to24table_conchars[data[y * w + x]];
+ 	if (ow)
+ 		*ow = w;
+ 	if (oh)
+@@ -8881,7 +9172,7 @@
+ 			continue;
+ 		if (cand == vkq_vr_held_item_get (hand ^ 1) || cand == vkq_vr_holster_item[0] || cand == vkq_vr_holster_item[1])
+ 			continue;
+-		vkq_vr_held_item[hand] = cand;
++		vkq_vr_v2_claim (&vkq_vr_held_item[hand], cand);
+ 		in_impulse = vkq_vr_weapon_impulse (cand);
+ 		vkq_vr_fire_note_pending (cand);
+ 		vkq_vr_holster_note ("cycle -> imp%d (%s hand)", in_impulse, hand ? "right" : "left");
+@@ -9194,11 +9485,11 @@
+ 	if (!out || len <= 0)
+ 		return;
+ 	q_snprintf (
+-		out, len, "style=%s zones=%s L(grip=%d zone=%s hold=imp%d) R(grip=%d zone=%s hold=imp%d) rhip=imp%d lhip=imp%d fire=%s | %s",
++		out, len, "style=%s zones=%s L(grip=%d zone=%s hold=imp%d) R(grip=%d zone=%s hold=imp%d) rhip=imp%d lhip=imp%d dupes=%d fire=%s | %s",
+ 		vkqvr_style.value >= 0.5f ? "IMMERSIVE" : "convenience", vkqvr_zones.value >= 0.5f ? "on" : "off", vkq_vr_grip[0].down,
+ 		vkq_vr_grip[0].zoneNow < 0 ? "-" : vkq_vr_zone_names[vkq_vr_grip[0].zoneNow], vkq_vr_weapon_impulse (vkq_vr_held_item_get (0)), vkq_vr_grip[1].down,
+ 		vkq_vr_grip[1].zoneNow < 0 ? "-" : vkq_vr_zone_names[vkq_vr_grip[1].zoneNow], vkq_vr_weapon_impulse (vkq_vr_held_item_get (1)),
+-		vkq_vr_weapon_impulse (vkq_vr_holster_item[0]), vkq_vr_weapon_impulse (vkq_vr_holster_item[1]),
++		vkq_vr_weapon_impulse (vkq_vr_holster_item[0]), vkq_vr_weapon_impulse (vkq_vr_holster_item[1]), vkq_vr_v2_dupes (),
+ 		vkq_vr_shoot_hand < 0 ? "-" : (vkq_vr_shoot_hand ? "right" : "left"), vkq_vr_zone_log);
+ }
+ 
+@@ -9301,7 +9592,10 @@
+ 	// death or a new game, so it is a "per life" behaviour without a death hook.
+ 	if (!vkq_vr_v2_started && !vkq_vr_held_item[0] && !vkq_vr_held_item[1] && cl.stats[STAT_ACTIVEWEAPON] && vkq_vr_owns (cl.stats[STAT_ACTIVEWEAPON]))
+ 	{
+-		vkq_vr_held_item[vkq_vr_aim_hand ()] = cl.stats[STAT_ACTIVEWEAPON];
++		// THROUGH THE INVARIANT, deliberately: this is the writer that runs on a
++		// timer nobody is watching, and re-filling the aim hand with a weapon the
++		// player has just stowed is exactly the duplicate the user hit.
++		vkq_vr_v2_claim (&vkq_vr_held_item[vkq_vr_aim_hand ()], cl.stats[STAT_ACTIVEWEAPON]);
+ 		vkq_vr_v2_started = 1;
+ 	}
+ 	if (!cl.stats[STAT_ACTIVEWEAPON] || cl.stats[STAT_HEALTH] <= 0)
+@@ -9365,7 +9659,7 @@
+ 				}
+ 				else
+ 				{
+-					vkq_vr_held_item[hand] = *slot;
++					vkq_vr_v2_claim (&vkq_vr_held_item[hand], *slot);
+ 					*slot = 0;
+ 					VKQ_VR_Haptic (hand, 0.7f, 0.04f, "take");
+ 					vkq_vr_holster_note ("TAKE imp%d from %s -> %s hand", vkq_vr_weapon_impulse (vkq_vr_held_item[hand]), vkq_vr_zone_names[zone],
+@@ -9374,7 +9668,7 @@
+ 			}
+ 			else if (held && !*slot)
+ 			{
+-				*slot = held;
++				vkq_vr_v2_claim (slot, held);
+ 				vkq_vr_held_item[hand] = 0;
+ 				VKQ_VR_Haptic (hand, 0.5f, 0.04f, "stow");
+ 				vkq_vr_holster_note ("STOW imp%d into %s", vkq_vr_weapon_impulse (*slot), vkq_vr_zone_names[zone]);
+@@ -9390,8 +9684,8 @@
+ 				else
+ 				{
+ 					int t = *slot;
+-					*slot = held;
+-					vkq_vr_held_item[hand] = t;
++					vkq_vr_v2_claim (slot, held);
++					vkq_vr_v2_claim (&vkq_vr_held_item[hand], t);
+ 					VKQ_VR_Haptic (hand, 0.8f, 0.05f, "swap");
+ 					vkq_vr_holster_note ("SWAP %s: imp%d out, imp%d in", vkq_vr_zone_names[zone], vkq_vr_weapon_impulse (*slot),
+ 						vkq_vr_weapon_impulse (t));
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -269,7 +269,53 @@
+ 		return;
+ 
+ 	SCR_DrawCenterString (cbx);
++}
++
++#ifdef VKQ_VISIONOS
++/*
++==================
++VKQ_VR_CenterPrintText -- overlay 0024 (VR R6.1 item 2)
++
++The engine's live centerprint, handed to the shell so it can put it on a
++head-locked panel inside the VR space.
++
++the user, on 1.0.7.9: "when you get a message from the game (like if you try to
++open a door, and it'll say this is opened elsewhere) - hear the message sound,
++but can't read it." He is right and the cause is charter A9 working as designed:
++VR world frames suppress the ENTIRE engine 2D composite (SCR_DrawGUI's
++vkq_vr_suppress_2d early return), and SCR_CheckDrawCenterString lives inside it.
++The sound is a server event and survives; the text was drawn into a layer nobody
++was showing.
++
++The predicate below is SCR_CheckDrawCenterString's, term for term, minus the
++intermission clause: an intermission in VR is not a world frame at all
++(SCR_VRPresentMode -> REASON_INTERMISSION), so the whole flat composite —
++finale text included — is already on the world-locked panel and drawing it a
++second time on a head-locked one would double it. Keeping the predicate a copy
++of the drawer's rather than a fresh opinion is deliberate: the two must agree
++about what "there is a message right now" means, or VR and 2D will disagree
++about whether the player was told something.
++==================
++*/
++int VKQ_VR_CenterPrintText (char *out, int len)
++{
++	if (!out || len <= 0)
++		return 0;
++	out[0] = 0;
++	if (scr_centertime_off <= cl.time)
++		return 0;
++	if (cl.intermission)
++		return 0;
++	if (key_dest != key_game)
++		return 0;
++	if (cl.paused && (!cls.demoplayback || cls.demospeed > 0.f))
++		return 0;
++	if (!scr_centerstring[0])
++		return 0;
++	q_strlcpy (out, scr_centerstring, len);
++	return 1;
+ }
++#endif
+ 
+ //=============================================================================
+ 
+--- a/Quake/console.c
++++ b/Quake/console.c
+@@ -60,6 +60,14 @@
+ #define NUM_CON_TIMES 4
+ float con_times[NUM_CON_TIMES]; // realtime time the line was generated
+ 								// for transparent notify lines
++#ifdef VKQ_VISIONOS
++// overlay 0024 (VR R6.1 item 2). Nonzero while cl_parse.c is handling an
++// svc_print, i.e. while the text being printed is the GAME talking to the
++// player rather than the engine talking to its console. Recorded per notify
++// slot, and it is the only thing the VR message panel will show.
++int			con_vr_gameprint = 0;
++static byte con_notify_game[NUM_CON_TIMES];
++#endif
+ 
+ int con_vislines;
+ 
+@@ -430,7 +438,12 @@
+ 			Con_Linefeed ();
+ 			// mark time for transparent overlay
+ 			if (con_current >= 0)
++			{
+ 				con_times[con_current % NUM_CON_TIMES] = realtime;
++#ifdef VKQ_VISIONOS
++				con_notify_game[con_current % NUM_CON_TIMES] = con_vr_gameprint ? 1 : 0;
++#endif
++			}
+ 		}
+ 
+ 		switch (c)
+@@ -1138,7 +1151,91 @@
+ 	}
+ }
+ 
++#ifdef VKQ_VISIONOS
+ /*
++==================
++VKQ_VR_NotifyText -- overlay 0024 (VR R6.1 item 2)
++
++The console NOTIFY lines — the second class of in-game message, and the reason
++this round covers a class rather than one symptom.
++
++the user's example ("this door is opened elsewhere") is a centerprint, but the
++messages a Quake player reads most often are not: "You got the Rocket Launcher",
++"You got the Silver Key", a death message, "secret found" — every one of those
++is an sprint/bprint, i.e. an svc_print that lands here and is drawn by
++Con_DrawNotify. In VR those were invisible for exactly the same reason
++centerprints were, and fixing only the one the user named would have left the
++common case broken.
++
++DUPLICATION IS NOT A RISK, and it is worth writing down why rather than adding a
++filter for it: Con_LogCenterPrint echoes every centerprint into the console and
++then calls Con_ClearNotify(), so the echo is deliberately removed from the
++notify window by the same function that wrote it. The two feeds cannot show the
++same text at the same time.
++
++ONE TERM IS ADDED to Con_DrawNotify's walk, and it is the difference between a
++feature and a nuisance: only lines marked `con_notify_game` — printed while
++cl_parse.c was handling an svc_print, i.e. while the GAME was talking — are
++returned. Everything else the console says (resolutions, demo chatter, a dev
++build's bridge command echoes) stays in the console. The first simulator probe of
++this feature made the case better than any argument: it put a BODYNOW
++diagnostics dump and "vkqvrhandbtn: right buttons = 0x00" on a head-locked panel
++in three-inch letters. On a flat screen that overlay is a corner nobody minds;
++at 1.75 m across 34 degrees it is the whole view.
++
++Otherwise the walk is Con_DrawNotify's term for term, including the
++`con_notifytime / (viewsize >= 130 ? 4 : 1)` scaling — one predicate, so the VR
++panel and the flat overlay agree about what is still current. Trailing padding
++is trimmed (console lines are con_linewidth wide and space-filled) and the high
++bit is KEPT: it selects Quake's alternate charset, and the shell's glyph atlas
++is the full 256, so a coloured line reads in VR the way it reads flat.
++==================
++*/
++int VKQ_VR_NotifyText (char *out, int len)
++{
++	int i, n = 0;
++	if (!out || len <= 0)
++		return 0;
++	out[0] = 0;
++	if (!con_initialized || con_text == NULL)
++		return 0;
++	for (i = con_current - NUM_CON_TIMES + 1; i <= con_current; i++)
++	{
++		const char *text;
++		float		time;
++		int			last, x;
++		if (i < 0)
++			continue;
++		time = con_times[i % NUM_CON_TIMES];
++		if (time == 0)
++			continue;
++		if (!con_notify_game[i % NUM_CON_TIMES])
++			continue; // engine chatter stays in the console — see the note above
++		time = realtime - time;
++		if (time > con_notifytime.value / (scr_viewsize.value >= 130 ? 4 : 1))
++			continue;
++		text = con_text + (i % con_totallines) * con_linewidth;
++		for (last = con_linewidth - 1; last >= 0 && (text[last] & 0x7F) <= ' '; last--)
++			;
++		if (last < 0)
++			continue; // a blank line carries no message
++		for (x = 0; x <= last; x++)
++		{
++			if (n >= len - 2)
++				break;
++			out[n++] = text[x];
++		}
++		if (n < len - 1)
++			out[n++] = '\n';
++	}
++	if (n > 0 && out[n - 1] == '\n')
++		n--; // no trailing blank row on the panel
++	out[n] = 0;
++	return n > 0;
++}
++#endif
++
++/*
+ ================
+ Con_DrawInput -- johnfitz -- modified to allow insert editing
+ 
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -1815,7 +1815,28 @@
+ 		case svc_print:
+ 			str = MSG_ReadString ();
+ 			if (!cls.demoseeking)
++			{
++#ifdef VKQ_VISIONOS
++				// overlay 0024 (VR R6.1 item 2) — MARK THIS AS THE GAME TALKING.
++				//
++				// Every QuakeC sprint/bprint reaches the client here and nowhere
++				// else: "You got the Rocket Launcher", the key pickups, the
++				// obituaries, a mod's own messages. Con_Printf is also how the
++				// engine talks to its console about resolutions, demos, cvars and
++				// (in a dev build) every command a bridge sends — and on a flat
++				// screen the notify overlay showing both is vanilla behaviour
++				// nobody minds in a corner. On a head-locked VR panel it is not:
++				// the first probe run put "vkqvrhandbtn: right buttons = 0x00"
++				// and a whole BODYNOW dump in front of the player in 3-inch
++				// letters. So the VR feed takes the marked lines only.
++				extern int con_vr_gameprint;
++				con_vr_gameprint++;
++				Con_Printf ("%s", str);
++				con_vr_gameprint--;
++#else
+ 				Con_Printf ("%s", str);
++#endif
++			}
+ 			break;
+ 
+ 		case svc_centerprint:
+--- a/Quake/host_cmd.c
++++ b/Quake/host_cmd.c
+@@ -1054,6 +1054,30 @@
+ 		return;
+ 
+ 	cls.demonum = -1; // stop demo loop in case this fails
++
++#ifdef VKQ_VISIONOS
++	/*
++	 * R6.4 item 3 — A NEW GAME EMPTIES THE BELT.
++	 *
++	 * the user holstered his axe, started a NEW game, and the axe was still on his
++	 * hip. R6.2 taught the physical inventory to survive a level transition, and
++	 * this is where that has to stop: `map` is the engine's own boundary between
++	 * "the same player continuing" and "start over". Host_Changelevel_f keeps the
++	 * client connected and carries spawn parms; Host_Map_f disconnects and builds
++	 * a fresh server, which is precisely the distinction the belt should honour,
++	 * so the clear hangs off the engine's existing fork rather than off a guess
++	 * about intent.
++	 *
++	 * Death-respawn is deliberately NOT here and needs no hook: a respawned
++	 * player still owns the axe and the shotgun, so the ownership rule keeps
++	 * exactly those and strips the rest. A holstered axe surviving your own death
++	 * is coherent — it is still your axe.
++	 */
++	{
++		extern void VKQ_VR_ImmersiveReset (const char *why);
++		VKQ_VR_ImmersiveReset ("new game");
++	}
++#endif
+ 
+ 	CL_Disconnect ();
+ 	Host_ShutdownServer (false);

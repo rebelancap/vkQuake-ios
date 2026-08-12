@@ -1,0 +1,1435 @@
+vkquake-ios overlay 0020: R2.1 device-round fixes + R3 holsters.
+
+Four defects the user found on the M5 Vision Pro on 2026-08-10, root-caused
+rather than tuned around, plus charter A7's holster system.
+
+FIX 1 - standing eye height. Quake's camera sits 46 units above the floor
+(24 hull mins + 22 view_ofs) = 1.17 m at the default world scale, so in VR
+you stand in a pit. The rise is now DERIVED: the shell publishes the
+tracking alignment's height (the player's real eye height in metres) and
+the engine puts the camera exactly that high in game units. the user's
++22.0 in of manual trim falls out of the formula, and so does
+QuakeQuest's opposite framing (world scale 26.25, rise ~0). Clamped
+against low ceilings by a trace, because the raised camera is 12 units
+above the player hull's own head.
+
+FIX 2 - "the gun shoots low", two independent causes:
+  (a) V_DriftPitch. cl.nodrift is false out of CL_ClearState, so pitch
+      drift runs from the first frame of every map and drags the SENT
+      pitch toward level. Every other look device stops it (the mouse,
+      the touch layer, the gyro); the Sense path did not. the user's log
+      shows it plainly: hand=(p+52.0) sent=(p+24.8).
+  (b) TWO aim frames. The sent angles used the RAW controller frame while
+      the model, the laser and the muzzle used the frame after the global
+      grip rotation (-20 deg). The barrel and the beam pointed 20 deg
+      above the shot. There is now one named aim frame and everything
+      derives from it; the per-weapon cosmetic pitch is gone for the same
+      reason.
+
+FIX 3 - barrel-true projectiles (charter A8, revised by the user).
+QuakeQuest's engine-side origin shift around the QC think that fires,
+with the wall handling it does not have: the shifted muzzle is traced
+from the player's real muzzle and stopped short of solid, the shift is
+magnitude-limited, and the origin is restored before SV_LinkEdict so
+physics, collision and the network never see it. progs.dat untouched.
+
+FIX 4 - the axe. The donor's table is in the Quake ENTITY frame where +Y
+is LEFT; ours multiplies AngleVectors' right, which is -Y. Exactly one
+weapon in the table has a lateral offset, so exactly one weapon was
+wrong, mirrored and doubled: the axe, hanging off to the right of the
+body. Also fixes the laser's "cone": the beam's half-width scaled with
+the TOTAL trace length and sky is not solid to this trace, so aiming at
+sky drew a 25-unit-wide red wedge from the muzzle to the horizon with
+its impact dot 8192 units away.
+
+FIX 5 - the viewmodel fallback can no longer consume an untracked pose;
+with no hands it is placed from the HEAD, at the VR camera.
+
+R3 - body-anchored holster zones (2 hip, 2 shoulder, 1 chest) as plain
+geometry on R2's published hand state, in metres scaled by world scale.
+Convenience: grip tap in a zone fires that zone's impulse. Immersive: the
+aim grip IS the hand - press draws, release stows to the axe, press in
+empty space re-draws. Either style: a long grip hold in a zone reassigns
+it. Tracking loss or a menu releases everything and hands the weapon
+back, so nobody is ever left axe-locked.
+
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -5999,6 +5999,68 @@
+ cvar_t vkqvr_flashscale = {"vkqvr_flashscale", "0.5", CVAR_NONE};
+ cvar_t vkqvr_weapon = {"vkqvr_weapon", "1", CVAR_NONE}; // draw the viewmodel at the hand
+ 
++// ---------------------------------------------------------------------------
++// overlay 0020 (R2.1 + R3) tunables.
++// ---------------------------------------------------------------------------
++// R2.1 fix 1 — STANDING EYE HEIGHT. Quake's camera sits at the player entity's
++// origin + view_ofs = 24 + 22 = 46 units above the floor. At the charter's world
++// scale (1 unit ~ 1 inch, 39.37 units/m) that is 1.17 m: Quake's avatar is a
++// short person, and on a flat screen nobody can tell. In VR the player's body is
++// REAL, and a camera 1.17 m up while your eyes are at 1.73 m reads unmistakably
++// as standing in a pit. the user measured the correction on device as +22.0 in of
++// trim, which lands the camera at 68 units = 1.73 m — a standing adult's eye
++// height. So the constant is not "view_ofs twice"; it is "68 units above the
++// floor", expressed as the rise above Quake's own 46.
++//
++// The trim slider stays (people are not all 1.73 m) and now defaults to 0.
++cvar_t vkqvr_eyerise = {"vkqvr_eyerise", "22", CVAR_NONE};
++// A camera 22 units above Quake's eye is 12 units above the player hull's own
++// ceiling, so a 56-unit-tall corridor would put it inside the ceiling brush and
++// the world would render from inside solid. Trace and clamp, smoothed, rather
++// than ship a hall-of-mirrors in low rooms. 0 disables the clamp.
++cvar_t vkqvr_eyeclamp = {"vkqvr_eyeclamp", "1", CVAR_NONE};
++
++// R2.1 fix 3 — BARREL-TRUE PROJECTILES. Shift the player edict's origin to the
++// muzzle for the QC think that spawns attacks, then put it back. Engine-side, so
++// progs.dat is untouched and the mod guarantee holds (charter §11).
++cvar_t vkqvr_barrelfire = {"vkqvr_barrelfire", "1", CVAR_NONE};
++
++// R3 — holsters (charter A7). Zone geometry is in METRES from the eye, in the
++// yaw-only body frame under the head, and is scaled into Quake units by the live
++// world scale — so a world-scale drag moves the zones with the body rather than
++// leaving them behind. Shape and thresholds follow QuakeVR (vr.cpp:2254-2390);
++// the numbers are ours because our units and our world scale are.
++cvar_t vkqvr_zones = {"vkqvr_zones", "1", CVAR_NONE};	  // 0 = holsters off entirely
++cvar_t vkqvr_style = {"vkqvr_style", "0", CVAR_NONE};	  // 0 Convenience, 1 Immersive
++cvar_t vkqvr_hip_x = {"vkqvr_hip_x", "0.22", CVAR_NONE};  // metres out to the side
++cvar_t vkqvr_hip_y = {"vkqvr_hip_y", "-0.66", CVAR_NONE}; // metres below the eye
++cvar_t vkqvr_hip_z = {"vkqvr_hip_z", "0.06", CVAR_NONE};  // metres BEHIND (+Z is back)
++cvar_t vkqvr_sh_x = {"vkqvr_sh_x", "0.22", CVAR_NONE};
++cvar_t vkqvr_sh_y = {"vkqvr_sh_y", "-0.16", CVAR_NONE};
++cvar_t vkqvr_sh_z = {"vkqvr_sh_z", "0.14", CVAR_NONE};
++cvar_t vkqvr_chest_x = {"vkqvr_chest_x", "0", CVAR_NONE};
++cvar_t vkqvr_chest_y = {"vkqvr_chest_y", "-0.38", CVAR_NONE};
++cvar_t vkqvr_chest_z = {"vkqvr_chest_z", "-0.02", CVAR_NONE};
++cvar_t vkqvr_hip_r = {"vkqvr_hip_r", "0.20", CVAR_NONE}; // metres, entry radius
++cvar_t vkqvr_sh_r = {"vkqvr_sh_r", "0.19", CVAR_NONE};
++cvar_t vkqvr_chest_r = {"vkqvr_chest_r", "0.17", CVAR_NONE};
++// Zone -> impulse. Defaults spread the five zones over the weapons a player
++// reaches for without thinking, and leave the axe and the two nailguns to stick
++// cycling (charter A7: zones are selectors over the real inventory, not a
++// carry limit).
++cvar_t vkqvr_zone_rhip = {"vkqvr_zone_rhip", "2", CVAR_NONE}; // shotgun
++cvar_t vkqvr_zone_lhip = {"vkqvr_zone_lhip", "3", CVAR_NONE}; // super shotgun
++cvar_t vkqvr_zone_rsh = {"vkqvr_zone_rsh", "7", CVAR_NONE};	  // rocket launcher
++cvar_t vkqvr_zone_lsh = {"vkqvr_zone_lsh", "8", CVAR_NONE};	  // lightning gun
++cvar_t vkqvr_zone_chest = {"vkqvr_zone_chest", "6", CVAR_NONE}; // grenade launcher
++// Grip press/release hysteresis on the analog value R2 already publishes, and
++// the tap/hold split that separates "select" from "reassign".
++cvar_t vkqvr_grip_on = {"vkqvr_grip_on", "0.65", CVAR_NONE};
++cvar_t vkqvr_grip_off = {"vkqvr_grip_off", "0.35", CVAR_NONE};
++// A grip release inside a zone SELECTS; a grip held inside a zone for this long
++// ASSIGNS instead (and suppresses the select). One threshold, no dead band.
++cvar_t vkqvr_grip_hold = {"vkqvr_grip_hold", "1.0", CVAR_NONE}; // seconds in-zone: reassign
++
+ void VKQ_VR_RegisterCvars (void)
+ {
+ 	Cvar_RegisterVariable (&vkqvr_aimhand);
+@@ -6016,6 +6078,31 @@
+ 	Cvar_RegisterVariable (&vkqvr_gunscale);
+ 	Cvar_RegisterVariable (&vkqvr_flashscale);
+ 	Cvar_RegisterVariable (&vkqvr_weapon);
++	Cvar_RegisterVariable (&vkqvr_eyerise);
++	Cvar_RegisterVariable (&vkqvr_eyeclamp);
++	Cvar_RegisterVariable (&vkqvr_barrelfire);
++	Cvar_RegisterVariable (&vkqvr_zones);
++	Cvar_RegisterVariable (&vkqvr_style);
++	Cvar_RegisterVariable (&vkqvr_hip_x);
++	Cvar_RegisterVariable (&vkqvr_hip_y);
++	Cvar_RegisterVariable (&vkqvr_hip_z);
++	Cvar_RegisterVariable (&vkqvr_sh_x);
++	Cvar_RegisterVariable (&vkqvr_sh_y);
++	Cvar_RegisterVariable (&vkqvr_sh_z);
++	Cvar_RegisterVariable (&vkqvr_chest_x);
++	Cvar_RegisterVariable (&vkqvr_chest_y);
++	Cvar_RegisterVariable (&vkqvr_chest_z);
++	Cvar_RegisterVariable (&vkqvr_hip_r);
++	Cvar_RegisterVariable (&vkqvr_sh_r);
++	Cvar_RegisterVariable (&vkqvr_chest_r);
++	Cvar_RegisterVariable (&vkqvr_zone_rhip);
++	Cvar_RegisterVariable (&vkqvr_zone_lhip);
++	Cvar_RegisterVariable (&vkqvr_zone_rsh);
++	Cvar_RegisterVariable (&vkqvr_zone_lsh);
++	Cvar_RegisterVariable (&vkqvr_zone_chest);
++	Cvar_RegisterVariable (&vkqvr_grip_on);
++	Cvar_RegisterVariable (&vkqvr_grip_off);
++	Cvar_RegisterVariable (&vkqvr_grip_hold);
+ }
+ 
+ // cl_input.c's button state and impulse latch: globals with no header, because
+@@ -6032,12 +6119,39 @@
+ void	 VKQ_VR_AimAngles (float out[3]);
+ float	 VKQ_VR_WeaponMuzzle (void);
+ qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
++qboolean VKQ_VR_AimRay (vec3_t org, vec3_t dir);
+ void	 VKQ_VR_Haptic (int hand, float strength, float duration);
++// overlay 0020 — R3's grip machine, driven from VKQ_VR_ApplyHandInput below and
++// defined at the end of the file with the rest of the holster geometry.
++static void VKQ_VR_UpdateHolsters (double now);
++static void vkq_vr_grip_release_all (const char *why);
++static int	vkq_vr_weapon_impulse (int itembit);
+ 
+ // How far the wish vector was rotated this frame (charter A6's movement
+ // direction). Published for the diagnostics line the simulator asserts on —
+ // "the movement rotated" is otherwise invisible in a screenshot.
+ float vkq_vr_movedir_delta = 0.0f;
++
++// overlay 0020 — the world scale the shell is using (units per metre). The
++// engine needs it because R3's holster zones are body-anchored in METRES and the
++// hand poses arrive in units: one number, published once per frame, so a
++// world-scale drag moves the zones with everything else instead of leaving them
++// at the old body's hips.
++float vkq_vr_worldscale = 39.37f;
++void  VKQ_VR_SetWorldScale (float ups)
++{
++	if (ups > 1.0f && ups < 500.0f)
++		vkq_vr_worldscale = ups;
++}
++
++// overlay 0020 fix 1 — how far above Quake's own eye the VR camera sits, in
++// units, AFTER the low-ceiling clamp and its smoothing. Everything that needs
++// the player-frame origin (the eye base matrix, the hand transform, the
++// viewmodel, the laser) reads this ONE value, so they cannot disagree.
++float		 vkq_vr_eye_rise = 0.0f;
++static float vkq_vr_eye_rise_raw = 0.0f;   // what the cvar asked for
++static float vkq_vr_eye_rise_limit = 0.0f; // what the ceiling allows
++static double vkq_vr_eye_rise_time = 0.0;
+ 
+ // Whether the Sense path is currently driving the shared attack/jump buttons.
+ // Latched so that losing the controllers releases them exactly ONCE instead of
+@@ -6224,7 +6338,14 @@
+ 	MatrixMultiply (base, rot);
+ 	RotationMatrix (rot, VKQ_VR_DEG2RAD (-vkq_vr_body_yaw), 0.0f, 0.0f, 1.0f);
+ 	MatrixMultiply (base, rot);
+-	TranslationMatrix (trans, -r_refdef.vieworg[0], -r_refdef.vieworg[1], -(r_refdef.vieworg[2] + vkq_vr_height_ofs));
++	// overlay 0020 fix 1: + vkq_vr_eye_rise. Quake's eye is 46 units above the
++	// floor (24 origin + 22 view_ofs) = 1.17 m at the default world scale, which
++	// in VR reads as standing in a pit. The rise puts the camera where a standing
++	// adult's eyes actually are. It is computed ONCE per frame in
++	// VKQ_VR_UpdateEyeRise (traced against low ceilings) and read here and by
++	// vkq_vr_player_origin, so the eyes, the hands and the laser share one origin.
++	TranslationMatrix (
++		trans, -r_refdef.vieworg[0], -r_refdef.vieworg[1], -(r_refdef.vieworg[2] + vkq_vr_eye_rise + vkq_vr_height_ofs));
+ 	MatrixMultiply (base, trans);
+ 
+ 	memcpy (out, vkq_vr_cur[eye & 1].eye_from_player, 16 * sizeof (float));
+@@ -6288,6 +6409,22 @@
+ 		cl.viewangles[YAW] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
+ 		cl.viewangles[ROLL] = 0.0f;
+ 	}
++	// ------------------------------------------------------------------
++	// overlay 0020 fix 2a — PITCH DRIFT. This is half of "the gun shoots low".
++	//
++	// cl.nodrift is FALSE out of CL_ClearState (the struct is memset), so
++	// V_DriftPitch runs from the first frame of every map and drags the SENT
++	// pitch toward 0 at v_centerspeed (500 deg/s, ramping). On a desktop nobody
++	// ever sees it because IN_MouseMove calls V_StopPitchDrift on every mouse
++	// motion; on the 2D iOS build the touch-look and gyro paths do the same. In
++	// VR with Sense controllers NOTHING touched pitch through those paths, so the
++	// angles this function had just written were being eaten between here and
++	// CL_FinishMove. the user's device log shows it directly: hand=(p+52.0) sent
++	// (p+24.8), hand=(p+34.0) sent (p+7.4) — every sample compressed toward level.
++	//
++	// The fix is the one every other look device already uses: a VR frame IS
++	// manual pitch adjustment, so say so. Cheap, and it fixes head aim too.
++	V_StopPitchDrift ();
+ 	last_sent = cl.viewangles[YAW];
+ }
+ 
+@@ -6383,20 +6520,44 @@
+ }
+ 
+ // The player frame's origin in Quake world: the body's eye point, i.e. exactly
+-// what VKQ_VR_ComposeView translates by.
++// what VKQ_VR_ComposeView translates by — INCLUDING overlay 0020's standing-eye
++// rise. If these two ever disagree the hands detach from the body, so they are
++// deliberately written as one expression in two places and nothing else adds to
++// either.
+ static void vkq_vr_player_origin (vec3_t out)
+ {
+ 	out[0] = r_refdef.vieworg[0];
+ 	out[1] = r_refdef.vieworg[1];
+-	out[2] = r_refdef.vieworg[2] + vkq_vr_height_ofs;
++	out[2] = r_refdef.vieworg[2] + vkq_vr_eye_rise + vkq_vr_height_ofs;
+ }
+ 
+-// One hand, in Quake world space, with its own basis. `grip` applies the
+-// tunable grip rotation (vkqvr_gunpitch/yaw/roll) — the ARKit held-controller
+-// frame and a Quake .mdl's frame are two different conventions and nothing
+-// guarantees they agree, so that correction is a live setting rather than a
+-// constant discovered over several headset rounds.
+-static qboolean vkq_vr_hand_world (int hand, qboolean grip, vec3_t org, vec3_t fwd, vec3_t right, vec3_t up)
++// overlay 0020 fix 2 — ONE definition of "where the gun points".
++//
++// R2 had two. `VKQ_VR_AimAngles` used the RAW controller frame, while the
++// viewmodel, the laser, the muzzle flash and the beam all used the frame after
++// the global grip rotation (vkqvr_gunpitch, shipping at -20°). The comment there
++// claimed the grip rotation was cosmetic; it is not — it is what makes the
++// BARREL point where the player is pointing, because a held Sense controller's
++// tracked axis is tilted ~20° from its aim axis. So the model and the laser
++// pointed 20° above the shot. That is the other half of "aim shoots low": you
++// aim with the barrel you can see, and the bullet left along the raw axis
++// underneath it. the user compensated by aiming 30-40° high (20° of this plus the
++// pitch drift above).
++//
++// Now there are three frames and they are named, and only one of them can turn:
++//   VKQ_HAND_RAW  the controller as ARKit reports it (nothing consumes it for
++//                 aiming; kept for the off-hand movement reference, where the
++//                 grip correction would be meaningless)
++//   VKQ_HAND_AIM  RAW rotated by the global grip rotation. THE aim frame: sent
++//                 angles, laser, muzzle flash, lightning start.
++//   VKQ_HAND_GUN  AIM plus the global positional grip offset. Where the model
++//                 is mounted. Position only — it cannot change a direction.
++// The per-weapon table is position and scale only for the same reason.
++#define VKQ_HAND_RAW 0
++#define VKQ_HAND_AIM 1
++#define VKQ_HAND_GUN 2
++
++static qboolean vkq_vr_hand_world (int hand, int frame, vec3_t org, vec3_t fwd, vec3_t right, vec3_t up)
+ {
+ 	const vkq_vr_hand_t *h;
+ 	vec3_t				 f, r, u, o;
+@@ -6419,7 +6580,7 @@
+ 		VectorAdd (o, wp, org);
+ 	}
+ 
+-	if (grip)
++	if (frame != VKQ_HAND_RAW)
+ 	{
+ 		// Rotate the hand basis about its own axes: pitch about right, yaw about
+ 		// up, roll about forward. Order pitch -> yaw -> roll, so the pitch knob
+@@ -6454,7 +6615,13 @@
+ 		}
+ 		VectorCopy (nr, r);
+ 		VectorCopy (nu, u);
+-		// Global grip offset, in the (already corrected) hand frame.
++	}
++	if (frame == VKQ_HAND_GUN)
++	{
++		// Global grip offset, in the (already corrected) hand frame. POSITION
++		// ONLY — a direction is never derived from a frame that has had this
++		// applied, which is what keeps the laser, the barrel and the shot on one
++		// ray however the mounting is tuned.
+ 		VectorMA (org, vkqvr_gunfwd.value, f, org);
+ 		VectorMA (org, vkqvr_gunright.value, r, org);
+ 		VectorMA (org, vkqvr_gunup.value, u, org);
+@@ -6481,34 +6648,39 @@
+ 	out[ROLL] = (float)(atan2 (-right[2], up[2]) * 180.0 / M_PI);
+ }
+ 
+-// The SENT view angles when a hand is aiming. Uses the RAW hand frame, not the
+-// gripped one: the grip rotation exists to make the MODEL sit right in the fist
+-// and must never move where the shot goes (that is how a "tuning" slider turns
+-// into an aiming bug).
++// The SENT view angles when a hand is aiming — the AIM frame (overlay 0020), the
++// same one the barrel and the laser use.
+ void VKQ_VR_AimAngles (float out[3])
+ {
+ 	vec3_t org, f, r, u;
+ 	out[0] = vkq_vr_head_pitch;
+ 	out[1] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
+ 	out[2] = 0.0f;
+-	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), false, org, f, r, u))
++	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), VKQ_HAND_AIM, org, f, r, u))
+ 		return;
+ 	vkq_vr_angles_from_basis (f, r, u, out);
+ 	out[ROLL] = 0.0f;
+ }
+ 
+-// Where the shot LOOKS like it comes from: the gripped hand frame plus the
+-// active weapon's muzzle offset. Used by the laser, the muzzle-flash dlight and
+-// the lightning beam so all three agree with the model the player can see.
+-qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd)
++// The aim RAY: origin at the muzzle, direction along the aim frame. The one
++// function every "where does the shot go" question is answered from — the laser
++// traces it, the barrel-true origin shift moves the player edict along it, and
++// the sent angles are its direction expressed as Quake angles.
++qboolean VKQ_VR_AimRay (vec3_t org, vec3_t dir)
+ {
+ 	vec3_t r, u;
+-	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), true, org, fwd, r, u))
++	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), VKQ_HAND_GUN, org, dir, r, u))
+ 		return false;
+-	VectorMA (org, VKQ_VR_WeaponMuzzle (), fwd, org);
++	VectorMA (org, VKQ_VR_WeaponMuzzle (), dir, org);
+ 	return true;
+ }
+ 
++// Where the shot comes from, for everything that must agree with the model the
++// player can see: the laser, the muzzle-flash dlight, the lightning beam and the
++// barrel-true origin shift. Now a thin alias of VKQ_VR_AimRay so there is
++// literally one implementation.
++qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd) { return VKQ_VR_AimRay (org, fwd); }
++
+ // --- input (charter A10's fixed layout) --------------------------------------
+ static float vkq_vr_stick_axis (float v)
+ {
+@@ -6621,6 +6793,10 @@
+ 				vkq_vr_owned_buttons = 0;
+ 				vkq_vr_hold (&in_attack, false);
+ 				vkq_vr_hold (&in_jump, false);
++				// R3 release-on-doff (charter A7): the controllers have gone, so
++				// every grip goes with them and Immersive hands the weapon back.
++				// Never leave a player axe-locked because a battery died.
++				vkq_vr_grip_release_all ("controllers disconnected");
+ 			}
+ 			return;
+ 		}
+@@ -6675,6 +6851,9 @@
+ 		// Nothing below this line may reach gameplay while a menu is up.
+ 		vkq_vr_hold (&in_attack, false);
+ 		vkq_vr_hold (&in_jump, false);
++		// A menu opening mid-hold must not leave a grip latched, or Immersive
++		// would stow on the release the player made to press a menu button.
++		vkq_vr_grip_release_all ("menu opened");
+ 		return;
+ 	}
+ 
+@@ -6745,6 +6924,11 @@
+ 	}
+ 	if (fabsf (rs[1]) < 0.4f)
+ 		cycleArmed = 1;
++
++	// R3 (charter A7): the grips, LAST, after the fixed layout has had its say.
++	// Nothing above reads a grip, so the holster machine cannot collide with
++	// fire, jump, turn or cycle — and B stays unbound for the weapon wheel.
++	VKQ_VR_UpdateHolsters (now);
+ 	(void)ry;
+ 	(void)rOff;
+ 	(void)pOff;
+@@ -6770,7 +6954,7 @@
+ 		return; // aim-hand relative: the server already uses the aim yaw
+ 	if (mode == 2)
+ 	{
+-		if (!vkq_vr_hand_world (vkq_vr_off_hand (), false, org, fwd, right, up))
++		if (!vkq_vr_hand_world (vkq_vr_off_hand (), VKQ_HAND_RAW, org, fwd, right, up))
+ 			return;
+ 		ref = (float)(atan2 (fwd[1], fwd[0]) * 180.0 / M_PI);
+ 	}
+@@ -6794,26 +6978,78 @@
+ }
+ 
+ // --- weapon at the hand (charter A8) -----------------------------------------
+-// Per-weapon offsets seeded from QuakeQuest's table (darkplaces/view.c:882-926 —
+-// same stock .mdl files, so their units are ours), keyed the same way: on the
+-// active weapon's item bit. fwd/right/up are in the GRIPPED hand frame; scale
+-// multiplies the model.
++// Per-weapon mounting, seeded from QuakeQuest (darkplaces/view.c:874-926 — the
++// same stock .mdl files, so its units are ours), keyed the same way on the active
++// weapon's item bit. `fwd`/`right`/`up` are POSITION ONLY, in the aim frame; the
++// per-weapon pitch the donor carries is deliberately NOT here (see below).
++//
++// TWO CORRECTIONS TO THE DONOR'S NUMBERS, both paid for on device (2026-08-10):
++//
++//  1. SIGN. The donor's second column is commented `// fb / lr / ud` and is a
++//     translate in the QUAKE ENTITY frame, where +Y is LEFT. Ours multiplies
++//     AngleVectors' `right`, which is -Y — the player's RIGHT. R2 copied the
++//     numbers without the flip. Only ONE weapon in the whole table has a
++//     non-zero lateral offset, so exactly one weapon was visibly wrong, and it
++//     was: the axe rendered far to the right of the body, detached, at twice
++//     the intended distance. Everything else has lr = 0 and was unaffected.
++//  2. SCALE. The donor concatenates its offset INSIDE the scaled weapon matrix,
++//     so its numbers are pre-scale; ours are applied in world units after. For
++//     the guns the R2 numbers were judged good on device as they stand, so they
++//     are kept verbatim. For the axe — scale 0.5, and the one entry with a
++//     lateral term — the donor's effective placement is half its raw numbers,
++//     so the axe entry below is the donor's (-22, +12 left, +28) x 0.5, mirrored
++//     into our convention: (-11, -6 right, +14).
++//
++// NO PER-WEAPON PITCH. The donor tilts the shotgun and rocket launcher models by
++// -5 degrees for looks. A model-only tilt breaks the one identity this round is
++// judged on — that the laser endpoint, the barrel extended, and the actual
++// impact are the same ray. If a model reads nose-heavy, the correction is the
++// GLOBAL grip pitch, which turns aim, barrel and laser together.
+ typedef struct
+ {
+ 	int	  item;
+-	float fwd, right, up, pitch, scale;
++	float fwd, right, up, scale;
+ } vkq_vr_gun_t;
+ 
+ static const vkq_vr_gun_t vkq_vr_guns[] = {
+-	{IT_SHOTGUN, -6.0f, 0.0f, 7.0f, -5.0f, 0.65f},		 {IT_SUPER_SHOTGUN, -7.0f, 0.0f, 8.0f, 0.0f, 0.90f},
+-	{IT_NAILGUN, -12.0f, 0.0f, 14.0f, 0.0f, 0.50f},		 {IT_SUPER_NAILGUN, -16.0f, 0.0f, 16.0f, 0.0f, 0.40f},
+-	{IT_GRENADE_LAUNCHER, -8.0f, 0.0f, 10.0f, 0.0f, 1.0f}, {IT_ROCKET_LAUNCHER, -16.0f, 0.0f, 11.0f, -5.0f, 0.45f},
+-	{IT_LIGHTNING, -8.0f, 0.0f, 9.0f, 0.0f, 1.0f},		 {IT_AXE, -22.0f, 12.0f, 28.0f, 0.0f, 0.50f},
++	{IT_SHOTGUN, -6.0f, 0.0f, 7.0f, 0.65f},		   {IT_SUPER_SHOTGUN, -7.0f, 0.0f, 8.0f, 0.90f},
++	{IT_NAILGUN, -12.0f, 0.0f, 14.0f, 0.50f},	   {IT_SUPER_NAILGUN, -16.0f, 0.0f, 16.0f, 0.40f},
++	{IT_GRENADE_LAUNCHER, -8.0f, 0.0f, 10.0f, 1.0f}, {IT_ROCKET_LAUNCHER, -16.0f, 0.0f, 11.0f, 0.45f},
++	{IT_LIGHTNING, -8.0f, 0.0f, 9.0f, 1.0f},	   {IT_AXE, -11.0f, -6.0f, 14.0f, 0.50f},
+ };
+ 
++// The impulse that selects a given weapon item bit — the inverse of the table
++// above, and what R3's zone reassignment needs to record "what is in my hand".
++// Stock progs' 1-8; a mod that reorders them reorders the zones with it, which
++// is right and costs nothing.
++static int vkq_vr_weapon_impulse (int itembit)
++{
++	switch (itembit)
++	{
++	case IT_AXE:
++		return 1;
++	case IT_SHOTGUN:
++		return 2;
++	case IT_SUPER_SHOTGUN:
++		return 3;
++	case IT_NAILGUN:
++		return 4;
++	case IT_SUPER_NAILGUN:
++		return 5;
++	case IT_GRENADE_LAUNCHER:
++		return 6;
++	case IT_ROCKET_LAUNCHER:
++		return 7;
++	case IT_LIGHTNING:
++		return 8;
++	default:
++		return 0;
++	}
++}
++
+ static const vkq_vr_gun_t *vkq_vr_gun_entry (void)
+ {
+-	static const vkq_vr_gun_t def = {0, -6.0f, 0.0f, 7.0f, 0.0f, 1.0f};
++	static const vkq_vr_gun_t def = {0, -6.0f, 0.0f, 7.0f, 1.0f};
+ 	const int				  w = cl.stats[STAT_ACTIVEWEAPON];
+ 	size_t					  i;
+ 	for (i = 0; i < sizeof (vkq_vr_guns) / sizeof (vkq_vr_guns[0]); i++)
+@@ -6822,36 +7058,74 @@
+ 	return &def;
+ }
+ 
+-// Distance from the grip point to the muzzle, for the laser / flash / beam.
+-// Taken as the weapon's own forward offset so it tracks the same table.
++// Distance from the grip point to the muzzle, for the laser / flash / beam /
++// barrel-true origin. Taken as the weapon's own forward offset so it tracks the
++// same table. The axe has no muzzle — its "barrel" is the haft, so keep the ray
++// short rather than pretending the head is a gun barrel.
+ float VKQ_VR_WeaponMuzzle (void)
+ {
+ 	const vkq_vr_gun_t *g = vkq_vr_gun_entry ();
++	if (g->item == IT_AXE)
++		return 8.0f;
+ 	return -g->fwd + 8.0f;
+ }
+ 
+ /*
+ ==================
+-VKQ_VR_PlaceViewmodel -- overlay 0019
++VKQ_VR_PlaceViewmodel -- overlay 0019, reworked by 0020
+ 
+-Called at the end of V_CalcRefdef. Returns false when nothing is tracked, and
+-V_CalcRefdef's own face-attached placement stands — which is R1's behaviour,
+-unchanged, so a build with no controllers is not a build with a new bug.
++Called at the end of V_CalcRefdef. With a tracked aim hand the weapon is mounted
++in that hand; WITHOUT one it is placed head-attached, R0-style, by this same
++function — see VKQ_VR_PlaceViewmodelHead. What it must never do is fall through
++to V_CalcRefdef's own placement, which is what R2 did and is where the
++"belly-button weapon" came from: that placement puts the model at
++ent->origin + STAT_VIEWHEIGHT (Quake's eye) and orients it from
++r_refdef.viewangles — which in VR are the SENT angles, i.e. the hand's. With the
++camera raised to standing height (fix 1) Quake's eye is around the player's
++navel, so the gun hung there, aimed by a hand that was not being tracked.
++Structurally: this path now never consumes a hand pose at all.
+ ==================
+ */
++static qboolean VKQ_VR_PlaceViewmodelHead (entity_t *view)
++{
++	const vkq_vr_gun_t *g = vkq_vr_gun_entry ();
++	vec3_t				o, f, r, u, ang;
++	// HEAD angles only. Not cl.viewangles, not r_refdef.viewangles — in VR those
++	// carry whatever the aim source is, and the whole point of this path is that
++	// there is no trustworthy aim source.
++	ang[PITCH] = vkq_vr_head_pitch;
++	ang[YAW] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
++	ang[ROLL] = 0.0f;
++	AngleVectors (ang, f, r, u);
++	vkq_vr_player_origin (o); // the VR camera, not Quake's eye
++	// Classic viewmodel framing: down and to the aim-hand side, an arm ahead.
++	VectorMA (o, 14.0f, f, o);
++	VectorMA (o, vkq_vr_aim_hand () ? 5.0f : -5.0f, r, o);
++	VectorMA (o, -7.0f, u, o);
++	VectorCopy (o, view->origin);
++	view->angles[PITCH] = -ang[PITCH];
++	view->angles[YAW] = ang[YAW];
++	view->angles[ROLL] = 0.0f;
++	view->netstate.scale = (byte)ENTSCALE_ENCODE (0.75f * g->scale * vkqvr_gunscale.value);
++	return true;
++}
++
+ qboolean VKQ_VR_PlaceViewmodel (entity_t *view)
+ {
+ 	const vkq_vr_gun_t *g;
+ 	vec3_t				org, fwd, right, up;
+ 	float				ang[3];
+-	if (!vkq_vr_active || !vkq_vr_have || vkqvr_weapon.value < 0.5f)
++	if (!vkq_vr_active || !vkq_vr_have)
+ 		return false;
+-	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), true, org, fwd, right, up))
++	// overlay 0020 fix 5: no toggle any more. Hands tracked -> weapon in the
++	// hand; no hands (gamepad-only VR) -> the R0-style head-attached viewmodel.
++	// vkqvr_weapon survives as a console-only force-off for A/B work.
++	if (vkqvr_weapon.value < 0.5f)
+ 		return false;
++	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), VKQ_HAND_GUN, org, fwd, right, up))
++		return VKQ_VR_PlaceViewmodelHead (view);
+ 
+ 	g = vkq_vr_gun_entry ();
+-	// The per-weapon pitch tweak turns the model in the fist; it must not move
+-	// the muzzle ray, so it is applied to the ANGLES only.
+ 	vkq_vr_angles_from_basis (fwd, right, up, ang);
+ 	VectorMA (org, g->fwd, fwd, org);
+ 	VectorMA (org, g->right, right, org);
+@@ -6860,7 +7134,7 @@
+ 	VectorCopy (org, view->origin);
+ 	// Entity pitch is stored backwards from view angles (V_CalcRefdef's own
+ 	// comment, and what CalcGunAngle does to this same entity).
+-	view->angles[PITCH] = -(ang[PITCH] + g->pitch);
++	view->angles[PITCH] = -ang[PITCH];
+ 	view->angles[YAW] = ang[YAW];
+ 	view->angles[ROLL] = ang[ROLL];
+ 	view->netstate.scale = (byte)ENTSCALE_ENCODE (g->scale * vkqvr_gunscale.value);
+@@ -6907,18 +7181,513 @@
+ 		VKQ_VR_HandsTracked ());
+ }
+ 
+-qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal)
++/*
++==================
++VKQ_VR_LaserSight -- overlay 0019, corrected by 0020
++
++R2 shipped `CL_TraceLine (start, start + 8192*fwd, ...)` and IGNORED THE RETURN
++VALUE. Two consequences, and together they are the whole of the user's "no laser
++anywhere, and a red cone floating near the muzzle":
++
++  * The trace's hit mask is CONTENTMASK_FROMQ1(CONTENTS_SOLID) (r_part_fte.c:545)
++    — SKY IS NOT SOLID. Aim at anything with sky behind it and the trace runs the
++    full 8192 units. The ribbon's half-width was `0.35 + len * 0.0015`, so an
++    8192-unit trace drew a quad 25 UNITS (63 cm) WIDE starting right at the
++    muzzle and receding to the vanishing point: a red wedge hanging off the gun,
++    with its impact dot 8192 units away and therefore invisible. That is the red
++    cone, named.
++  * Indoors the trace was short and the ribbon was thin — but its width direction
++    was `cross(dir, start - r_origin)`, and `start - r_origin` is the eye-to-muzzle
++    vector, which is very nearly PARALLEL to `dir` exactly when you sight down the
++    barrel. The cross product collapses, the quad degenerates, and the beam
++    vanishes precisely when you are looking along it.
++
++So: report the hit, cap the trace, and let the geometry be built per-endpoint at
++constant ANGULAR thickness (R_DrawVRLaserGeometry). `hit` is 0 when the ray left
++the world, and the caller then draws no impact dot rather than a dot at infinity.
++==================
++*/
++#define VKQ_VR_LASER_RANGE 4096.0f
++
++qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal, int *hit)
+ {
+ 	vec3_t far_pt, fwd;
++	float  frac;
++	if (hit)
++		*hit = 0;
+ 	if (!vkq_vr_active || !vkq_vr_have || vkqvr_laser.value < 0.5f)
+ 		return false;
+ 	if (cl.intermission || cls.demoplayback || cl.stats[STAT_HEALTH] <= 0 || !cl.worldmodel)
+ 		return false;
++	// The donor suppresses the laser for the axe (no barrel to sight along) and
++	// the grenade launcher (grenades arc, so a straight line lies about where the
++	// shot lands). Both are right, and both are cheap.
++	if (cl.stats[STAT_ACTIVEWEAPON] == IT_AXE || cl.stats[STAT_ACTIVEWEAPON] == IT_GRENADE_LAUNCHER)
++		return false;
+ 	if (!VKQ_VR_MuzzleWorld (start, fwd))
+ 		return false;
+-	VectorMA (start, 8192.0f, fwd, far_pt);
+-	CL_TraceLine (start, far_pt, end, normal, NULL);
++	VectorMA (start, VKQ_VR_LASER_RANGE, fwd, far_pt);
++	frac = CL_TraceLine (start, far_pt, end, normal, NULL);
++	if (hit)
++		*hit = (frac < 1.0f);
+ 	return true;
+ }
+ 
++// ---------------------------------------------------------------------------
++// overlay 0020 fix 1 — standing eye height, computed once per frame.
++//
++// The rise is derived, not guessed: the shell publishes the player's REAL
++// standing eye height (the tracking alignment's Y, in metres — 1.679 m in
++// the user's device log), and the camera goes exactly that high above the game
++// floor. Quake's own eye is 24 (the standing hull's mins[2], a BSP-baked
++// protocol constant) + 22 (view_ofs) = 46 units up, so
++//
++//     rise = standing_eye_m * worldscale - 46
++//
++// At the default 39.37 u/m and 1.679 m that is +20.1 units; at the user's 40.04
++// it is +21.2. He measured +22.0 by hand on device — the same number.
++//
++// The formula also makes World Scale mean one thing again. QuakeQuest solves the
++// same problem the other way round (darkplaces/gl_rmain.c:53): it leaves the
++// camera at 46 units and ships vr_worldscale 26.2467 = 39.37/1.5, i.e. it grows
++// the world by 1.5x until 46 units IS 1.75 m. Feed 26.25 into the formula above
++// and the rise comes out ~0 — the donor's configuration falls out of ours as a
++// special case, so a player who prefers a big world just drags World Scale down
++// and stature stays correct on the way.
++// ---------------------------------------------------------------------------
++#define VKQ_VR_QUAKE_EYE_UNITS 46.0f // 24 hull mins + 22 view_ofs, above the floor
++
++static float vkq_vr_standing_eye_m = 0.0f; // published by the shell each frame
++
++void VKQ_VR_SetStandingEye (float metres)
++{
++	if (metres > 0.6f && metres < 2.6f)
++		vkq_vr_standing_eye_m = metres;
++}
++
++/*
++==================
++VKQ_VR_UpdateEyeRise -- overlay 0020
++
++Runs at the END of V_CalcRefdef, where r_refdef.vieworg is final, and BEFORE the
++viewmodel is placed — so the eyes, the hands, the weapon and the laser all use
++one origin for the frame.
++
++The clamp: a camera 22 units above Quake's eye is 12 units above the player
++hull's own head, and a 56-unit-tall corridor would put it inside the ceiling
++brush, rendering the world from inside solid. Trace up and stop short. Falling is
++instant (being inside a wall for even one frame is a visible defect); rising back
++is eased, because a camera that snaps upward in VR is the one motion the head
++did not ask for.
++==================
++*/
++void VKQ_VR_UpdateEyeRise (void)
++{
++	float  want, limit, dt;
++	double now;
++	if (!vkq_vr_active)
++	{
++		vkq_vr_eye_rise = vkq_vr_eye_rise_raw = vkq_vr_eye_rise_limit = 0.0f;
++		vkq_vr_eye_rise_time = 0.0;
++		return;
++	}
++	if (vkq_vr_standing_eye_m > 0.0f)
++		want = vkq_vr_standing_eye_m * vkq_vr_worldscale - VKQ_VR_QUAKE_EYE_UNITS;
++	else
++		want = vkqvr_eyerise.value; // no tracked height yet: the measured default
++	want = CLAMP (-16.0f, want, 48.0f);
++	vkq_vr_eye_rise_raw = want;
++
++	limit = want;
++	if (want > 0.5f && vkqvr_eyeclamp.value >= 0.5f && cl.worldmodel && !cls.demoplayback)
++	{
++		vec3_t from, to, impact, normal;
++		VectorCopy (r_refdef.vieworg, from);
++		VectorCopy (from, to);
++		to[2] += want + 4.0f;
++		if (CL_TraceLine (from, to, impact, normal, NULL) < 1.0f)
++		{
++			limit = impact[2] - from[2] - 4.0f;
++			if (limit < 0.0f)
++				limit = 0.0f;
++		}
++	}
++	vkq_vr_eye_rise_limit = limit;
++
++	now = Sys_DoubleTime ();
++	dt = (vkq_vr_eye_rise_time > 0.0) ? (float)(now - vkq_vr_eye_rise_time) : 0.0f;
++	vkq_vr_eye_rise_time = now;
++	if (dt > 0.25f)
++		dt = 0.25f;
++	if (limit <= vkq_vr_eye_rise || dt <= 0.0f)
++		vkq_vr_eye_rise = limit; // ducking under something: immediately
++	else
++	{
++		const float step = 40.0f * dt; // units/sec back up
++		vkq_vr_eye_rise += (limit - vkq_vr_eye_rise > step) ? step : (limit - vkq_vr_eye_rise);
++	}
++}
++
++void VKQ_VR_EyeHeightDebugString (char *out, int len)
++{
++	float total;
++	if (!out || len <= 0)
++		return;
++	total = VKQ_VR_QUAKE_EYE_UNITS + vkq_vr_eye_rise + vkq_vr_height_ofs;
++	q_snprintf (
++		out, len,
++		"standing HMD %.3f m x %.2f u/m = %.1f u | Quake eye %.0f u above the floor, VR eye %.1f u (%.2f m) | rise %+.1f (want %+.1f, ceiling allows %+.1f) trim %+.1f",
++		vkq_vr_standing_eye_m, vkq_vr_worldscale, vkq_vr_standing_eye_m * vkq_vr_worldscale, VKQ_VR_QUAKE_EYE_UNITS, total,
++		total / (vkq_vr_worldscale > 1.0f ? vkq_vr_worldscale : 39.37f), vkq_vr_eye_rise, vkq_vr_eye_rise_raw, vkq_vr_eye_rise_limit, vkq_vr_height_ofs);
++}
++
++// ===========================================================================
++// overlay 0020 — R3: body-anchored holsters, the grip state machine, and the
++// two interaction styles (docs/VR-CHARTER.md A7).
++//
++// Zones are plain geometry on the ONE published hand state R2 built: each zone
++// is a point offset from the eye in the yaw-only body frame under the head,
++// expressed in METRES and scaled into Quake units by the live world scale, with
++// a radius threshold. QuakeVR's layout (vr.cpp:2254-2390) is the design
++// reference — 2 hip, 2 shoulder, 1 chest — but its numbers are OpenVR metres
++// against its own body model, so ours are ours.
++//
++// Nothing here touches progs.dat: a zone fires an IMPULSE, which is the same
++// thing pressing "3" does. Mods that reorder impulses reorder the zones with
++// them, which is the correct behaviour and costs nothing.
++// ===========================================================================
++#define VKQ_VR_ZONE_RHIP  0
++#define VKQ_VR_ZONE_LHIP  1
++#define VKQ_VR_ZONE_RSH	  2
++#define VKQ_VR_ZONE_LSH	  3
++#define VKQ_VR_ZONE_CHEST 4
++#define VKQ_VR_ZONES	  5
++
++static const char *const vkq_vr_zone_names[VKQ_VR_ZONES] = {"right hip", "left hip", "right shoulder", "left shoulder", "chest"};
++
++// Per-hand grip machine. Deliberately per-hand: the off hand can hold a holster
++// gesture while the aim hand is firing, and Immersive mode's draw/stow is only
++// ever the AIM hand's grip.
++typedef struct
++{
++	int	   down;	  // past the hysteresis
++	double downTime;  // when it went down
++	int	   zoneAt;	  // which zone it was in when it went down (-1 = none)
++	int	   zoneNow;	  // which zone it is in this frame (-1 = none)
++	int	   assigned;  // this press already did a long-hold reassign
++} vkq_vr_grip_t;
++
++static vkq_vr_grip_t vkq_vr_grip[2];
++static int			 vkq_vr_stowed = 0;	 // impulse to re-draw in Immersive (0 = nothing)
++static int			 vkq_vr_out = 1;	 // Immersive: is a weapon currently drawn
++static char			 vkq_vr_zone_log[256];
++
++int VKQ_VR_ZoneCount (void) { return VKQ_VR_ZONES; }
++
++static int vkq_vr_zone_impulse (int z)
++{
++	switch (z)
++	{
++	case VKQ_VR_ZONE_RHIP:
++		return (int)vkqvr_zone_rhip.value;
++	case VKQ_VR_ZONE_LHIP:
++		return (int)vkqvr_zone_lhip.value;
++	case VKQ_VR_ZONE_RSH:
++		return (int)vkqvr_zone_rsh.value;
++	case VKQ_VR_ZONE_LSH:
++		return (int)vkqvr_zone_lsh.value;
++	default:
++		return (int)vkqvr_zone_chest.value;
++	}
++}
++
++static void vkq_vr_zone_set_impulse (int z, int imp)
++{
++	static const char *const names[VKQ_VR_ZONES] = {"vkqvr_zone_rhip", "vkqvr_zone_lhip", "vkqvr_zone_rsh", "vkqvr_zone_lsh", "vkqvr_zone_chest"};
++	if (z >= 0 && z < VKQ_VR_ZONES && imp >= 1 && imp <= 8)
++		Cvar_SetValue (names[z], (float)imp);
++}
++
++// Zone centre in the PLAYER frame, in Quake units (x right, y up, z back) — the
++// same frame the hand poses arrive in, so the test below is a plain distance.
++static void vkq_vr_zone_centre (int z, float out[3])
++{
++	const float ws = vkq_vr_worldscale;
++	switch (z)
++	{
++	case VKQ_VR_ZONE_RHIP:
++		out[0] = vkqvr_hip_x.value * ws, out[1] = vkqvr_hip_y.value * ws, out[2] = vkqvr_hip_z.value * ws;
++		break;
++	case VKQ_VR_ZONE_LHIP:
++		out[0] = -vkqvr_hip_x.value * ws, out[1] = vkqvr_hip_y.value * ws, out[2] = vkqvr_hip_z.value * ws;
++		break;
++	case VKQ_VR_ZONE_RSH:
++		out[0] = vkqvr_sh_x.value * ws, out[1] = vkqvr_sh_y.value * ws, out[2] = vkqvr_sh_z.value * ws;
++		break;
++	case VKQ_VR_ZONE_LSH:
++		out[0] = -vkqvr_sh_x.value * ws, out[1] = vkqvr_sh_y.value * ws, out[2] = vkqvr_sh_z.value * ws;
++		break;
++	default:
++		out[0] = vkqvr_chest_x.value * ws, out[1] = vkqvr_chest_y.value * ws, out[2] = vkqvr_chest_z.value * ws;
++		break;
++	}
++}
++
++static float vkq_vr_zone_radius (int z)
++{
++	const float ws = vkq_vr_worldscale;
++	if (z == VKQ_VR_ZONE_RHIP || z == VKQ_VR_ZONE_LHIP)
++		return vkqvr_hip_r.value * ws;
++	if (z == VKQ_VR_ZONE_RSH || z == VKQ_VR_ZONE_LSH)
++		return vkqvr_sh_r.value * ws;
++	return vkqvr_chest_r.value * ws;
++}
++
++// Which zone a hand at player-frame `pos` is in, or -1. Nearest wins when two
++// overlap, so a generous radius never makes a zone unreachable. Takes the
++// position by value: the caller has already snapshotted it under the publish
++// lock, and reaching back into vkq_vr_hand_pub from here would be a second,
++// unlocked read of a struct the compositor thread rewrites every frame.
++static int vkq_vr_zone_at (const float pos[3])
++{
++	int	  z, best = -1;
++	float bestd = 0.0f;
++	if (vkqvr_zones.value < 0.5f)
++		return -1;
++	for (z = 0; z < VKQ_VR_ZONES; z++)
++	{
++		float c[3], d[3], r = vkq_vr_zone_radius (z), len;
++		vkq_vr_zone_centre (z, c);
++		d[0] = pos[0] - c[0], d[1] = pos[1] - c[1], d[2] = pos[2] - c[2];
++		len = sqrtf (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
++		if (len <= r && (best < 0 || len < bestd))
++			best = z, bestd = len;
++	}
++	return best;
++}
++
++void VKQ_VR_ZoneLayoutString (char *out, int len)
++{
++	int	 z;
++	int	 n = 0;
++	if (!out || len <= 0)
++		return;
++	out[0] = 0;
++	for (z = 0; z < VKQ_VR_ZONES && n < len - 1; z++)
++	{
++		float c[3];
++		vkq_vr_zone_centre (z, c);
++		n += q_snprintf (
++			out + n, len - n, "%s%s=imp%d @(%.0f,%.0f,%.0f)u r%.0f", z ? " | " : "", vkq_vr_zone_names[z], vkq_vr_zone_impulse (z), c[0], c[1], c[2],
++			vkq_vr_zone_radius (z));
++	}
++}
++
++void VKQ_VR_HolsterDebugString (char *out, int len)
++{
++	if (!out || len <= 0)
++		return;
++	q_snprintf (
++		out, len, "style=%s zones=%s L(grip=%d zone=%s) R(grip=%d zone=%s) out=%d stowed=imp%d | %s", vkqvr_style.value >= 0.5f ? "IMMERSIVE" : "convenience",
++		vkqvr_zones.value >= 0.5f ? "on" : "off", vkq_vr_grip[0].down, vkq_vr_grip[0].zoneNow < 0 ? "-" : vkq_vr_zone_names[vkq_vr_grip[0].zoneNow],
++		vkq_vr_grip[1].down, vkq_vr_grip[1].zoneNow < 0 ? "-" : vkq_vr_zone_names[vkq_vr_grip[1].zoneNow], vkq_vr_out, vkq_vr_stowed, vkq_vr_zone_log);
++}
++
++static void vkq_vr_holster_note (const char *fmt, ...)
++{
++	va_list ap;
++	va_start (ap, fmt);
++	q_vsnprintf (vkq_vr_zone_log, sizeof (vkq_vr_zone_log), fmt, ap);
++	va_end (ap);
++	Con_DPrintf ("VR holster: %s\n", vkq_vr_zone_log);
++}
++
++// Release EVERYTHING a grip was holding, without stowing. The donors' rule and
++// charter A7's: a battery dying mid-hold must never leave the player axe-locked,
++// so Immersive falls back to Convenience with the weapon OUT.
++static void vkq_vr_grip_release_all (const char *why)
++{
++	int h;
++	int wasHeld = 0, handedBack = 0;
++	for (h = 0; h < 2; h++)
++	{
++		if (vkq_vr_grip[h].down)
++			wasHeld = 1;
++		vkq_vr_grip[h].down = 0;
++		vkq_vr_grip[h].zoneAt = vkq_vr_grip[h].zoneNow = -1;
++		vkq_vr_grip[h].assigned = 0;
++	}
++	if (!vkq_vr_out)
++	{
++		// Put the last weapon back in the player's hands rather than leaving them
++		// holding an axe they never chose.
++		if (vkq_vr_stowed)
++		{
++			in_impulse = vkq_vr_stowed;
++			handedBack = vkq_vr_stowed;
++		}
++		vkq_vr_out = 1;
++	}
++	// Log the HANDBACK, not just the grip. A doff that happens while the player
++	// is already stowed releases no grip at all — nothing was held — but it is
++	// the case that matters most, because it is the one where somebody would
++	// otherwise be left holding an axe. R3's simulator round caught this as a
++	// silent success: the weapon came back and the file said nothing.
++	if (handedBack)
++		vkq_vr_holster_note ("released (%s) — handed imp%d back, never axe-locked", why, handedBack);
++	else if (wasHeld)
++		vkq_vr_holster_note ("released (%s)", why);
++}
++
++void VKQ_VR_HolsterReset (void)
++{
++	memset (vkq_vr_grip, 0, sizeof (vkq_vr_grip));
++	vkq_vr_grip[0].zoneAt = vkq_vr_grip[0].zoneNow = -1;
++	vkq_vr_grip[1].zoneAt = vkq_vr_grip[1].zoneNow = -1;
++	vkq_vr_stowed = 0;
++	vkq_vr_out = 1;
++	vkq_vr_zone_log[0] = 0;
++}
++
++/*
++==================
++VKQ_VR_UpdateHolsters -- overlay 0020
++
++One call per input frame, from VKQ_VR_ApplyHandInput, AFTER the fixed layout has
++had its say — grips carry no other meaning, so nothing here can collide with
++fire, jump, turn or cycle. B is deliberately still free (the wheel wants it).
++
++Convenience (default): hand in a zone + grip TAP -> that zone's impulse. Nothing
++else changes and the weapon never leaves the hand.
++
++Immersive: the aim hand's grip IS the hand. Press in a zone draws that zone's
++weapon; press in empty space re-draws the last stowed one; release stows (axe).
++
++Either style: holding the grip inside a zone for vkqvr_grip_hold seconds
++ASSIGNS the weapon currently in hand to that zone, with a double haptic. That is
++one gesture, unambiguous in both styles, and it cannot be confused with a tap.
++==================
++*/
++static void VKQ_VR_UpdateHolsters (double now)
++{
++	const int aim = vkq_vr_aim_hand ();
++	int		  hand;
++	float	  on = (vkqvr_grip_on.value > 0.05f && vkqvr_grip_on.value < 1.0f) ? vkqvr_grip_on.value : 0.65f;
++	float	  off = (vkqvr_grip_off.value > 0.0f && vkqvr_grip_off.value < on) ? vkqvr_grip_off.value : 0.35f;
++
++	if (vkqvr_zones.value < 0.5f)
++	{
++		vkq_vr_grip_release_all ("holsters disabled");
++		return;
++	}
++
++	for (hand = 0; hand < 2; hand++)
++	{
++		vkq_vr_grip_t *g = &vkq_vr_grip[hand];
++		float		   grip, pos[3];
++		int			   tracked, zone;
++		// ONE locked read per hand per frame: tracking, grip and position all
++		// from the same publish, so a zone test can never mix this frame's
++		// position with last frame's grip.
++		pthread_mutex_lock (&vkq_vr_mtx);
++		tracked = vkq_vr_hand_pub[hand].tracked;
++		grip = tracked ? vkq_vr_hand_pub[hand].grip : 0.0f;
++		// The digital grip bit counts too: a controller that reports the button
++		// but no analog travel must not be a hand that can never grip.
++		if (tracked && (vkq_vr_hand_pub[hand].buttons & VKQ_VRB_GRIP))
++			grip = 1.0f;
++		pos[0] = vkq_vr_hand_pub[hand].pos[0];
++		pos[1] = vkq_vr_hand_pub[hand].pos[1];
++		pos[2] = vkq_vr_hand_pub[hand].pos[2];
++		pthread_mutex_unlock (&vkq_vr_mtx);
++
++		if (!tracked)
++		{
++			if (g->down)
++				vkq_vr_grip_release_all ("tracking lost");
++			g->zoneNow = -1;
++			continue;
++		}
++
++		zone = vkq_vr_zone_at (pos);
++		if (zone != g->zoneNow)
++		{
++			if (zone >= 0)
++			{
++				VKQ_VR_Haptic (hand, 0.35f, 0.02f); // you can feel the holster
++				vkq_vr_holster_note ("%s hand entered %s", hand == aim ? "aim" : "off", vkq_vr_zone_names[zone]);
++			}
++			g->zoneNow = zone;
++		}
++
++		if (!g->down && grip >= on)
++		{
++			g->down = 1;
++			g->downTime = now;
++			g->zoneAt = zone;
++			g->assigned = 0;
++			if (vkqvr_style.value >= 0.5f && hand == aim)
++			{
++				// Immersive: the press IS the draw.
++				int imp = (zone >= 0) ? vkq_vr_zone_impulse (zone) : vkq_vr_stowed;
++				if (imp <= 0)
++					imp = 2; // nothing remembered yet: the first real weapon
++				in_impulse = imp;
++				// Remember it NOW, not at release. The server has not processed
++				// the impulse yet, so a quick draw-and-release would otherwise
++				// read STAT_ACTIVEWEAPON as whatever was in hand BEFORE the draw
++				// and remember the wrong weapon.
++				vkq_vr_stowed = imp;
++				vkq_vr_out = 1;
++				VKQ_VR_Haptic (hand, 0.6f, 0.03f);
++				vkq_vr_holster_note ("IMMERSIVE draw imp%d from %s", imp, zone >= 0 ? vkq_vr_zone_names[zone] : "empty space");
++			}
++		}
++		else if (g->down && grip <= off)
++		{
++			const double held = now - g->downTime;
++			g->down = 0;
++			if (vkqvr_style.value >= 0.5f && hand == aim)
++			{
++				// Prefer what is ACTUALLY in hand (the player may have cycled
++				// while holding), but never remember the axe as the stowed
++				// weapon — that is what "stowed" means.
++				const int held_imp = vkq_vr_weapon_impulse (cl.stats[STAT_ACTIVEWEAPON]);
++				if (held_imp > 1)
++					vkq_vr_stowed = held_imp;
++				in_impulse = 1; // the axe is stock progs' empty hands
++				vkq_vr_out = 0;
++				VKQ_VR_Haptic (hand, 0.4f, 0.03f);
++				vkq_vr_holster_note ("IMMERSIVE stow (remembering imp%d)", vkq_vr_stowed);
++			}
++			else if (!g->assigned && g->zoneAt >= 0)
++			{
++				// Any release that did NOT become a reassign is a select. The
++				// obvious alternative — "select only if held <= grip_tap" —
++				// leaves a dead band between the tap window and the hold
++				// window where a squeeze does nothing at all, which reads as
++				// the holster being broken. There is no third gesture, so
++				// there is no reason for a gap.
++				const int imp = vkq_vr_zone_impulse (g->zoneAt);
++				in_impulse = imp;
++				VKQ_VR_Haptic (hand, 0.5f, 0.03f);
++				vkq_vr_holster_note ("select imp%d from %s (%.2fs)", imp, vkq_vr_zone_names[g->zoneAt], held);
++			}
++			g->zoneAt = -1;
++			g->assigned = 0;
++		}
++		else if (g->down && !g->assigned && g->zoneAt >= 0 && zone == g->zoneAt && (now - g->downTime) >= vkqvr_grip_hold.value)
++		{
++			const int imp = vkq_vr_weapon_impulse (cl.stats[STAT_ACTIVEWEAPON]);
++			if (imp > 0)
++			{
++				vkq_vr_zone_set_impulse (g->zoneAt, imp);
++				g->assigned = 1;
++				VKQ_VR_Haptic (hand, 0.8f, 0.05f);
++				vkq_vr_holster_note ("ASSIGNED imp%d to %s", imp, vkq_vr_zone_names[g->zoneAt]);
++			}
++		}
++	}
++}
++
+ #endif
+--- a/Quake/view.c
++++ b/Quake/view.c
+@@ -867,7 +867,13 @@
+ 	// Returns false with no controller tracked, and everything above stands:
+ 	// that is exactly R1, so a gamepad player sees no change.
+ 	{
++		extern void		VKQ_VR_UpdateEyeRise (void);
+ 		extern qboolean VKQ_VR_PlaceViewmodel (entity_t * v);
++		// overlay 0020 fix 1: the standing-eye rise is resolved HERE, where
++		// r_refdef.vieworg is final, and BEFORE the weapon is placed — the eyes,
++		// the hands, the viewmodel and the laser all read the same number for
++		// the frame, which is the only way they stay attached to one body.
++		VKQ_VR_UpdateEyeRise ();
+ 		VKQ_VR_PlaceViewmodel (view);
+ 	}
+ #endif
+--- a/Quake/r_part.c
++++ b/Quake/r_part.c
+@@ -1058,21 +1058,58 @@
+ colour while the dot keeps the texture's soft round falloff.
+ ===============
+ */
+-static void R_DrawVRLaserGeometry (cb_context_t *cbx)
++// How far a point on the beam is from the eye — the beam and the dot are
++// sized in ANGLE, not world units, so this is what they are scaled by.
++static float R_VRLaserEyeDist (const vec3_t p)
+ {
+-	extern qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal);
++	vec3_t d;
++	VectorSubtract (p, r_origin, d);
++	return VectorLength (d);
++}
++
++// A perpendicular to `dir` that faces the eye at world point `p`, robust when
++// the two are parallel. THE bug that made R2's beam invisible: it built ONE
++// width axis from cross(dir, start - r_origin), and start - r_origin is the
++// eye-to-muzzle vector, which is nearly parallel to dir exactly when the player
++// sights along the barrel — so the ribbon collapsed precisely when it was being
++// looked at. Per-endpoint, with a real fallback, it cannot.
++static void R_VRLaserWidthAxis (const vec3_t dir, const vec3_t p, vec3_t out)
++{
++	vec3_t toEye;
++	VectorSubtract (p, r_origin, toEye);
++	CrossProduct (dir, toEye, out);
++	if (VectorLength (out) < 0.01f)
++	{
++		CrossProduct (dir, vup, out);
++		if (VectorLength (out) < 0.01f)
++			CrossProduct (dir, vright, out);
++	}
++	VectorNormalize (out);
++}
++
++static void R_DrawVRLaserGeometry (cb_context_t *cbx)
++{
++	extern qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal, int *hit);
+ 	extern cvar_t	vkqvr_laser;
+-	vec3_t			start, end, normal, dir, side, up2, a, b;
++	vec3_t			start, end, normal, dir, from, w0, w1, a, b, c, d;
+ 	basicvertex_t  *v;
+ 	VkBuffer		vbuf;
+ 	VkDeviceSize	voff;
+-	float			len, half;
+-	int				n = 0, i;
++	float			len, t, h0, h1;
++	int				n = 0, i, hit = 0;
+ 	const byte		beam_c[4] = {255, 40, 20, 255};
+ 	const byte		dot_c[4] = {255, 90, 40, 255};
+ 	const qboolean	want_beam = (vkqvr_laser.value < 1.5f);
++	// Constant APPARENT thickness. R2 scaled the half-width by the TOTAL trace
++	// length (0.35 + len*0.0015), so a trace that escaped into the sky — and sky
++	// is not solid to this trace, see VKQ_VR_LaserSight — drew a quad 25 units
++	// wide starting at the muzzle: the red cone the user photographed. Sizing each
++	// end by ITS OWN distance from the eye makes the beam a constant sliver of
++	// arc instead, which is both correct and incapable of that failure.
++	const float		kHalfAngle = 0.0014f; // ~0.16 deg half-width
++	const float		kDotAngle = 0.0075f;  // the impact dot, likewise
+ 
+-	if (!VKQ_VR_LaserSight (start, end, normal))
++	if (!VKQ_VR_LaserSight (start, end, normal, &hit))
+ 		return;
+ 
+ 	VectorSubtract (end, start, dir);
+@@ -1080,14 +1117,6 @@
+ 	if (len < 1.0f)
+ 		return;
+ 	VectorScale (dir, 1.0f / len, dir);
+-
+-	// Ribbon width: face the viewer by crossing the beam with the eye-to-beam
+-	// vector, so it reads as a line from every angle instead of vanishing edge-on.
+-	VectorSubtract (start, r_origin, side);
+-	CrossProduct (dir, side, up2);
+-	if (VectorLength (up2) < 0.001f)
+-		VectorCopy (vup, up2);
+-	VectorNormalize (up2);
+ 
+ 	v = (basicvertex_t *)R_VertexAllocate (12 * sizeof (basicvertex_t), &vbuf, &voff);
+ 
+@@ -1103,34 +1132,47 @@
+ 
+ 	if (want_beam)
+ 	{
+-		// Thickness grows a little with distance so the far end never falls below
+-		// a pixel — the same "keep it visible" hack the particles themselves use.
+-		half = 0.35f + len * 0.0015f;
+-		VectorMA (start, half, up2, a);
+-		VectorMA (start, -half, up2, b);
++		// Start the drawn ribbon at the point on the beam CLOSEST TO THE EYE
++		// (QuakeQuest's r_lasersight.c does exactly this) — everything nearer
++		// than that would smear across the near plane and paint the inside of
++		// the player's face. Then step a little further so the muzzle end never
++		// clips.
++		t = (DotProduct (r_origin, dir) - DotProduct (start, dir)) / len;
++		t = CLAMP (0.0f, t, 1.0f);
++		VectorMA (start, t * len + 6.0f, dir, from);
++		if (DotProduct (from, dir) >= DotProduct (end, dir) - 1.0f)
++			VectorMA (start, t * len, dir, from); // very short trace: keep what we can
++
++		h0 = q_max (0.05f, kHalfAngle * R_VRLaserEyeDist (from));
++		h1 = q_max (0.05f, kHalfAngle * R_VRLaserEyeDist (end));
++		R_VRLaserWidthAxis (dir, from, w0);
++		R_VRLaserWidthAxis (dir, end, w1);
++		VectorMA (from, h0, w0, a);
++		VectorMA (from, -h0, w0, b);
++		VectorMA (end, -h1, w1, c);
++		VectorMA (end, h1, w1, d);
+ 		VKQ_LASER_VERT (a, beam_c);
+ 		VKQ_LASER_VERT (b, beam_c);
+-		VectorMA (end, -half, up2, a);
++		VKQ_LASER_VERT (c, beam_c);
+ 		VKQ_LASER_VERT (a, beam_c);
+-		VectorMA (start, half, up2, a);
+-		VKQ_LASER_VERT (a, beam_c);
+-		VectorMA (end, -half, up2, a);
+-		VKQ_LASER_VERT (a, beam_c);
+-		VectorMA (end, half, up2, a);
+-		VKQ_LASER_VERT (a, beam_c);
++		VKQ_LASER_VERT (c, beam_c);
++		VKQ_LASER_VERT (d, beam_c);
+ 	}
+ 
+-	// The impact dot, nudged off the surface so it does not z-fight the wall.
++	// The impact dot — only when the ray actually HIT something. R2 drew it
++	// unconditionally, which put a dot 8192 units away (i.e. nowhere) whenever
++	// the trace ran off into the sky.
++	if (hit)
+ 	{
+-		vec3_t c;
+-		float  r = 1.6f + len * 0.004f;
+-		VectorMA (end, 0.5f, normal, c);
++		vec3_t ctr;
++		float  r = q_max (0.4f, kDotAngle * R_VRLaserEyeDist (end));
++		VectorMA (end, 0.5f, normal, ctr);
+ 		for (i = 0; i < 6; i++)
+ 		{
+ 			static const float qx[6] = {-1, 1, 1, -1, 1, -1};
+ 			static const float qy[6] = {-1, -1, 1, -1, 1, 1};
+ 			vec3_t			   p;
+-			VectorMA (c, qx[i] * r, vright, p);
++			VectorMA (ctr, qx[i] * r, vright, p);
+ 			VectorMA (p, qy[i] * r, vup, p);
+ 			v[n].position[0] = p[0], v[n].position[1] = p[1], v[n].position[2] = p[2];
+ 			v[n].texcoord[0] = (qx[i] + 1.0f) * 0.5f;
+--- a/Quake/sv_phys.c
++++ b/Quake/sv_phys.c
+@@ -992,8 +992,122 @@
+ SV_Physics_Client
+ 
+ Player character actions
++================
++*/
++#ifdef VKQ_VISIONOS
++/*
++================
++vkquake-ios overlay 0020 — BARREL-TRUE PROJECTILES (charter A8, REVISED)
++
++Charter A8 originally accepted the parallax: hitscan and missiles leave the
++player's BODY along the hand's direction, and the laser sight tells the truth
++about it. the user's device round settled it the other way ("definitely want"), so
++this is QuakeQuest's answer, ported with the hole in it fixed.
++
++The mechanism (their sv_phys.c:3002-3043, SV_SetWeapon_ClientOrigin): stock
++QuakeC computes every shot from `self.origin`, so if the player edict's origin is
++standing at the muzzle for the duration of the think that fires, the shot leaves
++the muzzle — with no progs change at all, which is what keeps the mod guarantee.
++`PlayerPostThink` is where `W_WeaponFrame` -> `W_Attack` lives, and the player's
++own `.think` is where the nailgun's repeat fire lives, so those are the two
++windows. The origin is restored before anything else can see it, and in
++particular before SV_LinkEdict — physics, collision and the network never
++observe the shifted edict.
++
++The -16 is not a fudge: stock QC's muzzle is `self.origin + '0 0 16'`
++(launch_spike, W_FireRocket, W_FireAxe) and FireBullets' is
++`absmin_z + size_z*0.7` = origin_z + 15.2. Pre-subtracting it makes the QC's own
++muzzle land ON our muzzle.
++
++WHAT WE ADD OVER THE DONOR. It has no wall handling of any kind — I read it
++looking for one (no trace, no contents test, no magnitude clamp), so a controller
++poked through a wall spawns rockets inside the wall. Here the shifted muzzle is
++traced from the player's real muzzle height and stopped short of solid, and the
++shift is magnitude-limited. Failing safe means firing from the body, which is
++exactly R2's shipped behaviour.
+ ================
+ */
++extern int	  vkq_vr_active;
++extern cvar_t vkqvr_barrelfire;
++extern qboolean VKQ_VR_AimRay (vec3_t org, vec3_t dir);
++extern int		VKQ_VR_AimHandTracked (void);
++
++#define VKQ_VR_QC_MUZZLE_Z 16.0f // stock progs' own '0 0 16'
++// Sanity bound on the whole shift. Generous on purpose: it exists to reject
++// garbage, not to limit reach. A raised arm legitimately puts the muzzle ~55
++// units from the player origin (24 above the floor) once the standing-eye rise
++// is in there, so a tight bound would silently switch the feature off exactly
++// when someone aims upward.
++#define VKQ_VR_SHIFT_MAX   96.0f
++
++static vec3_t vkq_vr_origin_backup;
++static int	  vkq_vr_origin_shifted = 0;
++
++static void VKQ_VR_ShiftToMuzzle (edict_t *ent, int num)
++{
++	vec3_t muzzle, dir, want, from, to, step, delta;
++	int	   i;
++	trace_t tr;
++
++	vkq_vr_origin_shifted = 0;
++	if (!vkq_vr_active || vkqvr_barrelfire.value < 0.5f || !VKQ_VR_AimHandTracked ())
++		return;
++	// LOCAL PLAYER ONLY. On a listen server every client runs through here, and
++	// the hand pose belongs to exactly one of them.
++	if (num != cl.viewentity)
++		return;
++	if (!VKQ_VR_AimRay (muzzle, dir))
++		return;
++	for (i = 0; i < 3; i++)
++		if (IS_NAN (muzzle[i]) || fabs (muzzle[i]) > 1000000.0)
++			return;
++
++	// Express the muzzle RELATIVE to the client's own copy of the player, then
++	// re-apply to the server's edict: the client's entity lags the server by up
++	// to a frame, and this cancels the lag instead of importing it.
++	VectorSubtract (muzzle, cl.entities[cl.viewentity].origin, delta);
++	if (VectorLength (delta) > VKQ_VR_SHIFT_MAX)
++		return;
++	// `want` is where the SHOT should come out, in server coordinates.
++	VectorAdd (ent->v.origin, delta, want);
++
++	// Clamp against solid: trace from where the QC's muzzle IS right now
++	// (origin + '0 0 16') to where we want it, and stop 2 units short of
++	// anything in between. A point trace against the world and brush models,
++	// ignoring monsters — a monster standing between your chest and your
++	// outstretched gun should not veto the shot, a wall should.
++	VectorCopy (ent->v.origin, from);
++	from[2] += VKQ_VR_QC_MUZZLE_Z;
++	VectorCopy (want, to);
++	tr = SV_Move (from, vec3_origin, vec3_origin, to, MOVE_NOMONSTERS, ent);
++	if (tr.allsolid || tr.startsolid)
++		return; // the body is already inside something: leave well alone
++	if (tr.fraction < 1.0f)
++	{
++		VectorSubtract (tr.endpos, from, step);
++		if (VectorLength (step) < 1.0f)
++			return; // nowhere to go — fire from the body, i.e. R2's behaviour
++		VectorNormalize (step);
++		VectorMA (tr.endpos, -2.0f, step, want);
++	}
++
++	// The QC will add its own '0 0 16' back on, so hand it the origin that makes
++	// that land on `want`.
++	VectorCopy (ent->v.origin, vkq_vr_origin_backup);
++	want[2] -= VKQ_VR_QC_MUZZLE_Z;
++	VectorCopy (want, ent->v.origin);
++	vkq_vr_origin_shifted = 1;
++}
++
++static void VKQ_VR_RestoreOrigin (edict_t *ent)
++{
++	if (!vkq_vr_origin_shifted)
++		return;
++	VectorCopy (vkq_vr_origin_backup, ent->v.origin);
++	vkq_vr_origin_shifted = 0;
++}
++#endif
++
+ static void SV_Physics_Client (edict_t *ent, int num)
+ {
+ 	if (!svs.clients[num - 1].active)
+@@ -1026,8 +1140,21 @@
+ 		break;
+ 
+ 	case MOVETYPE_WALK:
++#ifdef VKQ_VISIONOS
++		// overlay 0020: the nailgun's repeat fire runs off the PLAYER's own
++		// .think, so the muzzle has to be standing in for the body here too
++		// (QuakeQuest makes the same second wrap, for the same reason).
++		VKQ_VR_ShiftToMuzzle (ent, num);
+ 		if (!SV_RunThink (ent))
++		{
++			VKQ_VR_RestoreOrigin (ent);
+ 			return;
++		}
++		VKQ_VR_RestoreOrigin (ent);
++#else
++		if (!SV_RunThink (ent))
++			return;
++#endif
+ 		if (!SV_CheckWater (ent) && !((int)ent->v.flags & FL_WATERJUMP))
+ 			SV_AddGravity (ent);
+ 		SV_CheckStuck (ent);
+@@ -1066,7 +1193,17 @@
+ 
+ 	pr_global_struct->time = qcvm->time;
+ 	pr_global_struct->self = EDICT_TO_PROG (ent);
++#ifdef VKQ_VISIONOS
++	// overlay 0020: PlayerPostThink is where W_WeaponFrame -> W_Attack lives, so
++	// this is THE window in which the player edict stands at the muzzle. Note it
++	// is AFTER SV_LinkEdict above — the shifted origin is never linked, never
++	// collided against and never networked.
++	VKQ_VR_ShiftToMuzzle (ent, num);
+ 	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
++	VKQ_VR_RestoreOrigin (ent);
++#else
++	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
++#endif
+ }
+ 
+ //============================================================================

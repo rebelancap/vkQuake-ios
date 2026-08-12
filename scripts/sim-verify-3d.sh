@@ -9,9 +9,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE=com.rebelancap.vkquake
 PORT=27999
-# Default: vkQuake-Vision-Pro (26.5, D-025). Override with VKQ_SIM_UDID to run
-# on another runtime (e.g. vkQuake-Vision-Pro-27, the xrOS 27 beta sim — D-028).
-UDID=${VKQ_SIM_UDID:-5ACC8FB7-17D2-450B-8A88-F8FD5FC5792F}
+# LANE 1 (~/dev/CLAUDE.md): the existing "Apple Vision Pro" on visionOS 27.0 —
+# the same device sim-verify-vr.sh uses, and the only Vision Pro simulator this
+# machine has. The old default here (5ACC8FB7-…, "vkQuake-Vision-Pro" on 26.5)
+# was deleted in the per-project-simulator cleanup and this script has been
+# pointing at a device that does not exist since. Override with VKQ_SIM_UDID.
+UDID=${VKQ_SIM_UDID:-9D4499E9-CCED-4AF1-9303-925E9515D346}
 VKQ_ART_SUFFIX=${VKQ_ART_SUFFIX:-} # artifact filename suffix (e.g. -xr27)
 APP="$ROOT/build/visionos-sim/xcode/Release-xrsimulator/vkQuake.app"
 ARTS="$ROOT/artifacts/sim"

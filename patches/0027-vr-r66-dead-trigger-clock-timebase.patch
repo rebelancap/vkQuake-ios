@@ -1,0 +1,243 @@
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -6434,8 +6434,19 @@
+ // here, so the match gate can see the switch it would otherwise be blind to.
+ static void vkq_vr_fire_note_pending (int itembit)
+ {
++	/*
++	 * R6.6 — THE TIMESTAMP IS ONLY STAMPED WHEN THE REQUEST CHANGES.
++	 *
++	 * It used to be re-stamped on every call, and the switch request is re-issued
++	 * on EVERY FRAME while the server has not caught up. So `now - pending_t` never
++	 * grew, VKQ_VR_FIRE_PENDING_MAX never expired, and a switch that could not land
++	 * left `pending` set forever with the gate refusing to fire behind it. The
++	 * 0.5 s escape hatch existed and could not fire — which is why the user's jam
++	 * lasted 79 seconds instead of half of one.
++	 */
++	if (vkq_vr_fire_pending != itembit)
++		vkq_vr_fire_pending_t = Sys_DoubleTime ();
+ 	vkq_vr_fire_pending = itembit;
+-	vkq_vr_fire_pending_t = Sys_DoubleTime ();
+ }
+ 
+ void VKQ_VR_FireReset (void)
+@@ -6477,6 +6488,52 @@
+ 	const int activeW = cl.stats[STAT_ACTIVEWEAPON];
+ 	int		  ownerW, issued = 0, fire = 0;
+ 
++	/*
++	 * R6.6 — A NEW LEVEL STARTS THE SCHEDULER FROM NOTHING.
++	 *
++	 * Every piece of this state machine describes a conversation with a server that
++	 * no longer exists: an owner who pulled a trigger last level, a switch we asked
++	 * for and never saw land, a handoff waiting on a discharge that will never be
++	 * signalled. VKQ_VR_FireReset existed but had exactly ONE caller — the VR mode
++	 * change — so none of it was cleared by map, changelevel, restart or load.
++	 *
++	 * The signon edge is the right trigger for it: it fires exactly once per level
++	 * going live, on every one of those paths, and it is the same signal the v2
++	 * inventory already trusts to mean "the server has told us what we are holding".
++	 * FireReset also clears the per-weapon clocks, which is the other half of the
++	 * jam (see sv_phys.c).
++	 */
++	{
++		static int wasLive = 0;
++		const int  live = (cls.state == ca_connected && cls.signon == SIGNONS);
++		if (live && !wasLive)
++		{
++			VKQ_VR_FireReset ();
++			Con_DPrintf ("VR fire: level live — scheduler and per-weapon clocks reset\n");
++		}
++		wasLive = live;
++	}
++
++	/*
++	 * R6.6 — A FRESH TRIGGER EDGE ALWAYS RESTARTS THE REQUEST CLEANLY.
++	 *
++	 * the user's jam came unstuck when a new press arrived, and that should be a rule
++	 * rather than luck: a trigger going down is the player asking again, so anything
++	 * we were waiting on from before that press is abandoned. Bounded by
++	 * construction — there is one request, and a new press replaces it.
++	 */
++	{
++		static int prevWant[2] = {0, 0};
++		const int  rising = (wantA && !prevWant[0]) || (wantO && !prevWant[1]);
++		if (rising && vkq_vr_fire_pending != 0)
++		{
++			Con_DPrintf ("VR fire: fresh trigger edge — abandoning the stale pending switch (%d)\n", vkq_vr_fire_pending);
++			vkq_vr_fire_pending = 0;
++		}
++		prevWant[0] = wantA;
++		prevWant[1] = wantO;
++	}
++
+ 	// --- resolve the pending switch ------------------------------------------
+ 	// A pending impulse is one we cannot see the result of yet. It clears when
+ 	// the server confirms it, and it EXPIRES so that an impulse the progs
+@@ -6498,8 +6555,7 @@
+ 	// cannot be closed from the client.)
+ 	if (vkq_vr_fire_owner >= 0 && activeW && activeW != vkq_vr_held_item_get (vkq_vr_fire_owner) && vkq_vr_fire_pending == 0)
+ 	{
+-		vkq_vr_fire_pending = -1;
+-		vkq_vr_fire_pending_t = now;
++		vkq_vr_fire_note_pending (-1);
+ 	}
+ 
+ 	// --- ownership ------------------------------------------------------------
+@@ -6594,8 +6650,10 @@
+ 		if (imp > 0 && (in_impulse == 0 || in_impulse == imp))
+ 		{
+ 			in_impulse = imp;
+-			vkq_vr_fire_pending = ownerW;
+-			vkq_vr_fire_pending_t = now;
++			// R6.6: through the helper, which stamps the time only when the REQUEST
++			// changes. Stamping it here every frame is what made the pending timeout
++			// unreachable — see vkq_vr_fire_note_pending.
++			vkq_vr_fire_note_pending (ownerW);
+ 			issued = 1;
+ 		}
+ 		else if (in_impulse != 0)
+@@ -6603,8 +6661,7 @@
+ 			// Somebody else's impulse is going out this frame. It may well change
+ 			// the weapon, so this frame CANNOT fire: an attack that rides out
+ 			// beside a foreign switch is precisely the cross-fire.
+-			vkq_vr_fire_pending = -1;
+-			vkq_vr_fire_pending_t = now;
++			vkq_vr_fire_note_pending (-1);
+ 		}
+ 	}
+ 
+@@ -6654,11 +6711,11 @@
+ 		return;
+ 	q_snprintf (
+ 		out, len,
+-		"owner=%s last=%s activeW=imp%d ownerW=imp%d pending=%d gateblocked=%d handoffs=%d shots=L%d/R%d crossfire=%d dualclock=%s | ammo shells=%d "
++		"owner=%s last=%s activeW=imp%d ownerW=imp%d pendingW=imp%d gateblocked=%d handoffs=%d shots=L%d/R%d unauthfired=%d dualclock=%s | ammo shells=%d "
+ 		"nails=%d rockets=%d cells=%d",
+ 		vkq_vr_fire_owner < 0 ? "-" : (vkq_vr_fire_owner ? "right" : "left"), vkq_vr_fire_last < 0 ? "-" : (vkq_vr_fire_last ? "right" : "left"),
+ 		vkq_vr_weapon_impulse (cl.stats[STAT_ACTIVEWEAPON]),
+-		vkq_vr_fire_owner < 0 ? 0 : vkq_vr_weapon_impulse (vkq_vr_held_item_get (vkq_vr_fire_owner)), vkq_vr_fire_pending, vkq_vr_fire_gate_block,
++		vkq_vr_fire_owner < 0 ? 0 : vkq_vr_weapon_impulse (vkq_vr_held_item_get (vkq_vr_fire_owner)), vkq_vr_fire_pending < 0 ? -1 : vkq_vr_weapon_impulse (vkq_vr_fire_pending), vkq_vr_fire_gate_block,
+ 		vkq_vr_fire_handoffs, vkq_vr_fire_shots[0], vkq_vr_fire_shots[1], vkq_vr_fire_crossfire,
+ 		vkqvr_dualclock.value < 0.5f ? "off (cvar)" : (VKQ_VR_ClockAvailable () ? "on" : "unavailable (this progs has no attack_finished)"),
+ 		cl.stats[STAT_SHELLS], cl.stats[STAT_NAILS], cl.stats[STAT_ROCKETS], cl.stats[STAT_CELLS]);
+--- a/Quake/sv_phys.c
++++ b/Quake/sv_phys.c
+@@ -1201,12 +1201,64 @@
+ 	if (vkq_vr_af_ofs < 0)
+ 		return NULL;
+ 	return &GetEdictFieldValue (ent, vkq_vr_af_ofs)->_float;
++}
++
++/*
++ * R6.6 — THE DEAD TRIGGER. This is the root cause, and it is here.
++ *
++ * vkq_vr_af_wclock[] holds ABSOLUTE `attack_finished` values, and `sv.qcvm.time`
++ * RESTARTS AT ZERO on every new server — map, changelevel, restart, load. Nothing
++ * reset these across that boundary: VKQ_VR_ClockReset had exactly one caller, the
++ * VR mode change.
++ *
++ * So a clock saved at t=300 near the end of one level is restored onto the player
++ * edict at t=2 in the next, putting attack_finished ~298 seconds in the future.
++ * And stock weapons.qc is:
++ *
++ *     void() W_WeaponFrame =
++ *     {
++ *         if (time < self.attack_finished)  return;   <- nothing below this runs
++ *         ImpulseCommands ();                         <- the weapon switch
++ *         if (self.button0) { ... W_Attack(); }       <- the shot
++ *     };
++ *
++ * The early return is ABOVE ImpulseCommands, so the pending weapon switch is not
++ * merely delayed — it is never read. The scheduler re-issues it forever, the gate
++ * refuses to fire while a switch is unresolved, and BOTH triggers go dead until
++ * server time catches up to the stale value. That is precisely the user's report:
++ * deterministic at the start of a level, both hands, and "fixes itself eventually".
++ *
++ * Two guards, because one of them alone leaves a hole:
++ *   - the time base going BACKWARDS is a new server; drop every stored clock.
++ *   - any single value further ahead than the slowest stock refire is not a refire,
++ *     it is a leftover from another time base; treat it as expired. This also
++ *     rescues an edict that is ALREADY stuck (a save from an affected build, or a
++ *     clock written before this code ran), which the backwards test cannot.
++ */
++#define VKQ_VR_AF_MAX_AHEAD 2.0f // stock's slowest refire is the RL's 0.8 s
++static float vkq_vr_af_lastt = 0.0f;
++
++static void vkq_vr_clock_timebase (float t)
++{
++	if (t + 0.001f < vkq_vr_af_lastt)
++	{
++		Con_DPrintf ("VR dual clock: server time went backwards (%.2f -> %.2f) — clocks reset\n", vkq_vr_af_lastt, t);
++		memset (vkq_vr_af_wclock, 0, sizeof (vkq_vr_af_wclock));
++		vkq_vr_af_cur = 0;
++	}
++	vkq_vr_af_lastt = t;
+ }
+ 
++static float vkq_vr_clock_sane (float v, float t)
++{
++	return (v > t + VKQ_VR_AF_MAX_AHEAD) ? 0.0f : v;
++}
++
+ void VKQ_VR_ClockReset (void)
+ {
+ 	memset (vkq_vr_af_wclock, 0, sizeof (vkq_vr_af_wclock));
+ 	vkq_vr_af_cur = 0;
++	vkq_vr_af_lastt = 0.0f;
+ }
+ 
+ int VKQ_VR_ClockAvailable (void) { return vkq_vr_af_ofs >= 0; }
+@@ -1248,11 +1300,14 @@
+ 	if (imp < 1 || imp > 8)
+ 		return 1;
+ 	t = (float)sv.qcvm.time;
++	// R6.6: an impossible clock reads as READY rather than as "this hand can never
++	// fire". Without this the scheduler refuses to hand the pipeline to a weapon
++	// whose stored clock is stale, which is the dead trigger wearing its other face.
+ 	if (imp != vkq_vr_af_cur)
+-		return (vkq_vr_af_wclock[imp] <= t) ? 1 : 0;
++		return (vkq_vr_clock_sane (vkq_vr_af_wclock[imp], t) <= t) ? 1 : 0;
+ 	ent = svs.clients[0].edict;
+ 	val = GetEdictFieldValue (ent, vkq_vr_af_ofs);
+-	return (!val || val->_float <= t) ? 1 : 0;
++	return (!val || vkq_vr_clock_sane (val->_float, t) <= t) ? 1 : 0;
+ }
+ 
+ // Before the think: put the clock belonging to the weapon that is about to act
+@@ -1267,6 +1322,19 @@
+ 	af = vkq_vr_attack_finished (ent);
+ 	if (!af)
+ 		return;
++	{
++		// R6.6: the time-base guard runs before anything reads or writes a clock,
++		// and the edict's OWN attack_finished is rescued here too — that is the
++		// value W_WeaponFrame tests, so an insane one is the dead trigger itself
++		// rather than a stale entry waiting to cause one.
++		const float t = (float)sv.qcvm.time;
++		vkq_vr_clock_timebase (t);
++		if (*af > t + VKQ_VR_AF_MAX_AHEAD)
++		{
++			Con_DPrintf ("VR dual clock: attack_finished %.2f is impossible at t=%.2f — clearing (dead-trigger rescue)\n", *af, t);
++			*af = 0.0f;
++		}
++	}
+ 	if (vkqvr_dualclock.value >= 0.5f && vkq_vr_dual_wield ())
+ 	{
+ 		// WHICH weapon is about to act, from the server's own state only: the
+@@ -1277,9 +1345,13 @@
+ 		const int imp = (pend >= 1 && pend <= 8) ? pend : VKQ_VR_WeaponImpulse ((int)ent->v.weapon);
+ 		if (imp >= 1 && imp <= 8 && imp != vkq_vr_af_cur)
+ 		{
++			// R6.6: sane() on BOTH sides. On the way out so a bad value is never
++			// stored, and on the way in so one stored by an earlier build (or by a
++			// save) cannot jam the weapon it belongs to.
++			const float t = (float)sv.qcvm.time;
+ 			if (vkq_vr_af_cur >= 1 && vkq_vr_af_cur <= 8)
+-				vkq_vr_af_wclock[vkq_vr_af_cur] = *af;
+-			*af = vkq_vr_af_wclock[imp];
++				vkq_vr_af_wclock[vkq_vr_af_cur] = vkq_vr_clock_sane (*af, t);
++			*af = vkq_vr_clock_sane (vkq_vr_af_wclock[imp], t);
+ 			vkq_vr_af_cur = imp;
+ 		}
+ 	}

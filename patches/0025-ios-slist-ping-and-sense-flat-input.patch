@@ -1,0 +1,599 @@
+--- a/Quake/net_defs.h
++++ b/Quake/net_defs.h
+@@ -263,6 +263,14 @@
+ 	int				 maxusers;
+ 	int				 driver;
+ 	int				 ldriver;
++	// vkquake-ios R6.3: round-trip time of the slist query that produced this
++	// entry, in milliseconds, or -1 when it could not be measured. The slist
++	// query is already a datagram round trip, so this costs one timestamp at the
++	// send and one subtraction at the reply — no protocol extension, and nothing
++	// the far end has to support. MUST be assigned on EVERY fill path: hostcache[]
++	// is never memset (NET_Slist_f resets only hostCacheCount), so a new slot
++	// silently inherits the previous search's bytes.
++	int				 ping_ms;
+ 	struct qsockaddr addr;
+ } hostcache_t;
+ 
+--- a/Quake/net.h
++++ b/Quake/net.h
+@@ -113,6 +113,10 @@
+ void		NET_SlistSort (void);
+ const char *NET_SlistPrintServer (size_t n);
+ const char *NET_SlistPrintServerName (size_t n);
++// vkquake-ios R6.3: the measured round-trip in milliseconds as text, or "--".
++// menu.c cannot see hostcache_t (it does not include net_defs.h), so the ping
++// reaches the menu through this accessor exactly as the name and map already do.
++const char *NET_SlistPingText (size_t n);
+ 
+ /* FIXME: driver related, but public:
+  */
+--- a/Quake/net_main.c
++++ b/Quake/net_main.c
+@@ -275,10 +275,14 @@
+ 	}
+ }
+ 
++// vkquake-ios R6.3: the ping column costs cells, and the menu row is already
++// wider than the 320-unit menu canvas. Name 15->13 and map 15->11 pays for
++// " %4s" of milliseconds and brings the row back inside the canvas. The console
++// and the menu use the SAME widths so the two lists look like the same list.
+ static void PrintSlistHeader (void)
+ {
+-	Con_Printf ("Server          Map             Users\n");
+-	Con_Printf ("--------------- --------------- -----\n");
++	Con_Printf ("Server        Map         Users Ping\n");
++	Con_Printf ("------------- ----------- ----- ----\n");
+ 	slistLastShown = 0;
+ }
+ 
+@@ -289,9 +293,11 @@
+ 	for (n = slistLastShown; n < hostCacheCount; n++)
+ 	{
+ 		if (hostcache[n].maxusers)
+-			Con_Printf ("%-15.15s %-15.15s %2u/%2u\n", hostcache[n].name, hostcache[n].map, hostcache[n].users, hostcache[n].maxusers);
++			Con_Printf (
++				"%-13.13s %-11.11s %2u/%2u %4s\n", hostcache[n].name, hostcache[n].map, hostcache[n].users, hostcache[n].maxusers,
++				NET_SlistPingText (n));
+ 		else
+-			Con_Printf ("%-15.15s %-15.15s\n", hostcache[n].name, hostcache[n].map);
++			Con_Printf ("%-13.13s %-11.11s       %4s\n", hostcache[n].name, hostcache[n].map, NET_SlistPingText (n));
+ 	}
+ 	slistLastShown = n;
+ }
+@@ -322,6 +328,48 @@
+ 	SchedulePollProcedure (&slistPollProcedure, 0.1);
+ 
+ 	hostCacheCount = 0;
++}
++
++/*
++====================
++NET_SlistPingText -- vkquake-ios R6.3
++
++The ping column, as it is rendered in both the console list and the menu. One
++definition, so the two surfaces cannot disagree. "--" is an honest answer for a
++server whose RTT we could not measure; it is not 0 and not 999.
++====================
++*/
++const char *NET_SlistPingText (size_t idx)
++{
++	static char text[8];
++
++	if (idx >= hostCacheCount || hostcache[idx].ping_ms < 0)
++		return "--";
++	q_snprintf (text, sizeof (text), "%d", q_min (hostcache[idx].ping_ms, 9999));
++	return text;
++}
++
++/*
++====================
++NET_SlistSort -- vkquake-ios R6.3: ping ascending, then name
++
++the user asked for the list to sort itself by ping. Unmeasured servers (ping_ms
++< 0) sort AFTER every measured one rather than first, which is what a -1 would do
++numerically — that inversion is the whole reason the comparator is written with an
++explicit key rather than a subtraction. Name remains the tie-break, so an
++all-LAN list (every RTT the same sub-millisecond 0) keeps the alphabetical order
++it has always had instead of becoming arbitrary.
++
++Deliberately still called ONCE per entry into the list screen, from
++M_ServerList_Draw's slist_sorted latch. See the note there: re-sorting a list the
++user is already looking at is a defect on this port, not a feature.
++====================
++*/
++static int NET_SlistSortKey (size_t idx)
++{
++	// INT_MAX rather than a large literal: any measured ping, however awful,
++	// still outranks "never answered".
++	return (hostcache[idx].ping_ms < 0) ? INT_MAX : hostcache[idx].ping_ms;
+ }
+ 
+ void NET_SlistSort (void)
+@@ -334,7 +382,10 @@
+ 		{
+ 			for (j = i + 1; j < hostCacheCount; j++)
+ 			{
+-				if (strcmp (hostcache[j].name, hostcache[i].name) < 0)
++				const int ki = NET_SlistSortKey (i);
++				const int kj = NET_SlistSortKey (j);
++				const qboolean before = (kj != ki) ? (kj < ki) : (strcmp (hostcache[j].name, hostcache[i].name) < 0);
++				if (before)
+ 				{
+ 					memcpy (&temp, &hostcache[j], sizeof (hostcache_t));
+ 					memcpy (&hostcache[j], &hostcache[i], sizeof (hostcache_t));
+@@ -352,14 +403,19 @@
+ 	if (idx >= hostCacheCount)
+ 		return "";
+ 
++	// R6.3: no trailing '\n'. M_Print has no newline handling — it blits every
++	// byte it is given — so the old format drew a stray glyph at x=324 on every
++	// row, off the right of the 320-unit canvas. The console printer above does
++	// its own newline, and this string is drawn, not printed.
+ 	if (hostcache[idx].maxusers)
+ 	{
+ 		q_snprintf (
+-			string, sizeof (string), "%-15.15s %-15.15s %2u/%2u\n", hostcache[idx].name, hostcache[idx].map, hostcache[idx].users, hostcache[idx].maxusers);
++			string, sizeof (string), "%-13.13s %-11.11s %2u/%2u %4s", hostcache[idx].name, hostcache[idx].map, hostcache[idx].users,
++			hostcache[idx].maxusers, NET_SlistPingText (idx));
+ 	}
+ 	else
+ 	{
+-		q_snprintf (string, sizeof (string), "%-15.15s %-15.15s\n", hostcache[idx].name, hostcache[idx].map);
++		q_snprintf (string, sizeof (string), "%-13.13s %-11.11s       %4s", hostcache[idx].name, hostcache[idx].map, NET_SlistPingText (idx));
+ 	}
+ 
+ 	return string;
+--- a/Quake/net_dgrm.c
++++ b/Quake/net_dgrm.c
+@@ -1637,10 +1637,61 @@
+ 	int				 driver;
+ 	qboolean		 requery;
+ 	qboolean		 master;
++	// vkquake-ios R6.3: when this host's CCREQ_SERVER_INFO / getinfo went out.
++	// The unicast query is per-host, so the only correct place for the clock is
++	// here rather than in one global. 0 means "never queried in this session".
++	double			 sendtime;
+ 	struct qsockaddr addr;
+ }		   *hostlist;
+ size_t		hostlist_count;
+ size_t		hostlist_max;
++
++/*
++====================
++_Datagram_SlistPing -- vkquake-ios R6.3
++
++The round trip, in milliseconds, for a reply that has just arrived from `addr`.
++
++Two clocks, because there are two kinds of query. An internet search unicasts a
++query per host (from hostlist[], max four per 100 ms poll) so each host has its own
++send time and the RTT is exact. A LAN search only ever broadcasts, so no per-host
++record exists and the broadcast time is the only honest reference — on a LAN that
++is sub-millisecond anyway.
++
++Returns -1 when neither clock can answer, which is what puts a row's ping column
++at "--" and sinks it below every measured server in the sort.
++====================
++*/
++static double slist_broadcast_time;
++
++static int _Datagram_SlistPing (struct qsockaddr *addr)
++{
++	const double now = Sys_DoubleTime ();
++	double		 sent = 0.0;
++	size_t		 u;
++	double		 rtt;
++
++	for (u = 0; u < hostlist_count; u++)
++	{
++		if (hostlist[u].sendtime > 0.0 && dfunc.AddrCompare (addr, &hostlist[u].addr) == 0)
++		{
++			sent = hostlist[u].sendtime;
++			break;
++		}
++	}
++	if (sent <= 0.0)
++		sent = slist_broadcast_time;
++	if (sent <= 0.0)
++		return -1;
++
++	rtt = (now - sent) * 1000.0;
++	if (rtt < 0.0)
++		return -1; // a clock that ran backwards is not a measurement
++	if (rtt > 9999.0)
++		rtt = 9999.0;
++	return (int)(rtt + 0.5);
++}
++
+ static void _Datagram_AddPossibleHost (struct qsockaddr *addr, qboolean master)
+ {
+ 	size_t u;
+@@ -1660,6 +1711,7 @@
+ 	hostlist[hostlist_count].requery = true;
+ 	hostlist[hostlist_count].master = master;
+ 	hostlist[hostlist_count].driver = net_landriverlevel;
++	hostlist[hostlist_count].sendtime = 0.0;
+ 	hostlist_count++;
+ }
+ 
+@@ -1725,6 +1777,7 @@
+ 		MSG_WriteString (&net_message, "QUAKE");
+ 		MSG_WriteByte (&net_message, NET_PROTOCOL_VERSION);
+ 		*((int *)net_message.data) = BigLong (NETFLAG_CTL | (net_message.cursize & NETFLAG_LENGTH_MASK));
++		slist_broadcast_time = Sys_DoubleTime (); // R6.3: the LAN clock starts here
+ 		dfunc.Broadcast (dfunc.controlSock, net_message.data, net_message.cursize);
+ 		SZ_Clear (&net_message);
+ 
+@@ -1864,6 +1917,9 @@
+ 				memcpy (&hostcache[n].addr, &readaddr, sizeof (struct qsockaddr));
+ 				hostcache[n].driver = net_driverlevel;
+ 				hostcache[n].ldriver = net_landriverlevel;
++				// R6.3: unconditional. hostcache[] is never zeroed, so a slot reused
++				// from a previous search would otherwise report that search's ping.
++				hostcache[n].ping_ms = _Datagram_SlistPing (&readaddr);
+ 				q_strlcpy (hostcache[n].cname, dfunc.AddrToString (&readaddr, false), sizeof (hostcache[n].cname));
+ 
+ 				// check for a name conflict
+@@ -1946,6 +2002,8 @@
+ 		memcpy (&hostcache[n].addr, &readaddr, sizeof (struct qsockaddr));
+ 		hostcache[n].driver = net_driverlevel;
+ 		hostcache[n].ldriver = net_landriverlevel;
++		// R6.3: unconditional, for the same reason as the infoResponse path above.
++		hostcache[n].ping_ms = _Datagram_SlistPing (&readaddr);
+ 		q_strlcpy (hostcache[n].cname, dfunc.AddrToString (&readaddr, false), sizeof (hostcache[n].cname));
+ 
+ 		// check for a name conflict
+@@ -1982,6 +2040,7 @@
+ 			if (hostlist[i].requery && hostlist[i].driver == net_landriverlevel)
+ 			{
+ 				hostlist[i].requery = false;
++				hostlist[i].sendtime = Sys_DoubleTime (); // R6.3: this host's clock starts here
+ 				_Datagram_SendServerQuery (&hostlist[i].addr, hostlist[i].master);
+ 				sentsomething = true;
+ 				n--;
+--- a/Quake/net_loop.c
++++ b/Quake/net_loop.c
+@@ -55,6 +55,11 @@
+ 	hostcache[0].users = net_activeconnections;
+ 	hostcache[0].maxusers = svs.maxclients;
+ 	hostcache[0].driver = net_driverlevel;
++	// vkquake-ios R6.3: the loopback server IS this process — the round trip is
++	// zero, and it is a measurement rather than a missing one, so it reads "0" and
++	// sorts to the top rather than showing "--" at the bottom. Assigned here
++	// because hostcache[] is never zeroed between searches.
++	hostcache[0].ping_ms = 0;
+ 	strcpy (hostcache[0].cname, "local");
+ 	return false;
+ }
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -3685,7 +3685,12 @@
+ static int		slist_cursor;
+ static int		slist_first;
+ static qboolean slist_sorted;
+-#define SERVER_LIST_MAX_ON_SCREEN 21
++// vkquake-ios R6.3: one row of the list is now a column header, so the list body
++// starts 8 units lower and shows one fewer server. The header is what makes the
++// ping column mean something to someone who did not ask for it.
++#define SERVER_LIST_MAX_ON_SCREEN 20
++#define SERVER_LIST_HEADER_Y	  32
++#define SERVER_LIST_TOP_Y		  40
+ 
+ static void M_Menu_ServerList_f (void)
+ {
+@@ -3705,6 +3710,24 @@
+ 	size_t	n;
+ 	qpic_t *p;
+ 
++	/*
++	 * R6.3 — SORTED ONCE, ON ENTRY, AND DELIBERATELY NOT LIVE.
++	 *
++	 * The brief asked for the list to re-sort as replies arrive. It must not, on
++	 * this port, and the reason is patch 0009: a touch sets the highlighted row
++	 * during THIS draw and the synthetic K_MOUSE1 fires two frames later, so any
++	 * re-order inside that window connects the player to a different server than
++	 * the row their finger was on. `slist_cursor` is a raw index into hostcache[]
++	 * with no name or address memo behind it, so there is nothing to re-find the
++	 * selection by.
++	 *
++	 * Nothing is lost by sorting once, because the engine finishes the search
++	 * BEFORE the list is ever shown: M_Search_Draw pumps NET_Poll and only calls
++	 * M_Menu_ServerList_f once slistInProgress goes false. Every ping is already
++	 * known by the time the first row is drawn, so "sort as they arrive" and "sort
++	 * on entry" produce the same order for the user — one of them just cannot
++	 * connect you to the wrong server.
++	 */
+ 	if (!slist_sorted)
+ 	{
+ 		slist_sorted = true;
+@@ -3712,14 +3735,18 @@
+ 	}
+ 
+ 	if (hostCacheCount > SERVER_LIST_MAX_ON_SCREEN)
+-		M_DrawScrollbar (cbx, 0, 40, (float)(slist_first) / (hostCacheCount - SERVER_LIST_MAX_ON_SCREEN), SERVER_LIST_MAX_ON_SCREEN - 2);
+-	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, 32, 8, SERVER_LIST_MAX_ON_SCREEN, slist_first);
++		M_DrawScrollbar (
++			cbx, 0, SERVER_LIST_TOP_Y, (float)(slist_first) / (hostCacheCount - SERVER_LIST_MAX_ON_SCREEN), SERVER_LIST_MAX_ON_SCREEN - 2);
++	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, SERVER_LIST_TOP_Y, 8, SERVER_LIST_MAX_ON_SCREEN, slist_first);
+ 
+ 	p = Draw_CachePic ("gfx/p_multi.lmp");
+ 	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
++	// Column widths are NET_SlistPrintServer's, kept in step by hand: name 13,
++	// map 11, users 5, ping 4.
++	M_PrintWhite (cbx, 28, SERVER_LIST_HEADER_Y, "Server        Map         Users Ping");
+ 	for (n = 0; n < SERVER_LIST_MAX_ON_SCREEN && n < hostCacheCount; n++)
+-		M_Print (cbx, 28, 32 + 8 * n, NET_SlistPrintServer (slist_first + n));
+-	Draw_Character (cbx, 16, 32 + (slist_cursor - slist_first) * 8, 12 + ((int)(realtime * 4) & 1));
++		M_Print (cbx, 28, SERVER_LIST_TOP_Y + 8 * n, NET_SlistPrintServer (slist_first + n));
++	Draw_Character (cbx, 16, SERVER_LIST_TOP_Y + (slist_cursor - slist_first) * 8, 12 + ((int)(realtime * 4) & 1));
+ 
+ 	if (*m_return_reason)
+ 		M_PrintWhite (cbx, 16, 148, m_return_reason);
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -449,7 +449,150 @@
+ 			Key_Event (key, true);
+ 		}
+ 	}
++}
++
++#ifdef VKQ_VISIONOS
++/*
++================
++IN_SenseFlatMerge -- vkquake-ios overlay 0025 (VR R6.3 item 2)
++
++THE PSVR2 SENSE PAIR PLAYING THE GAME IN 2D AND 3D MODE.
++
++the user: "when i got out of VR mode, i noticed my psvr2 controllers did not WORK to
++play the game in 2d or 3d mode." Menus worked, gameplay did not, and that split is
++exactly the architecture: charter A10's SDL filter hands the spatial pair to the
++native backend, so SDL never sees it and `joy_active_controller` is NULL; VR drives
++it through VKQ_VR_ApplyHandInput, which only runs while a VR world frame is being
++built; and R5's VKQ_VR_UIInputPump covers menus, the console and modals — its gate
++is `modal || sheet || key_dest != key_game`, i.e. everything EXCEPT gameplay.
++
++So this function fills that one hole, and it does it by making the pair a VIRTUAL
++GAMEPAD rather than a second input system. It writes nothing but SDL axis values
++and SDL button flags into the snapshot IN_Commands is already building, which means
++every downstream property is inherited instead of reimplemented:
++
++  - the response curves are IN_ApplyDeadzone (circular) and IN_ApplyEasing, with
++    joy_deadzone_move / joy_deadzone_look / joy_exponent* / joy_sensitivity_* —
++    the pad's curves, not the VR path's own quadratic vkq_vr_stick_axis;
++  - the binds are whatever K_* the pad's binds are, through
++    IN_KeyForControllerButton and the port's defaults in ios/shell/ios_shell.m:
++    A = +jump, B = +movedown, LSHOULDER = impulse 12, RSHOULDER = +weaponwheel,
++    RTRIGGER = +attack, START = menu, LTHUMB = +speed, RTHUMB = +movedown.
++    A and B therefore land on jump and swim-down, which is VR's own grammar,
++    without this file knowing that;
++  - a user rebind moves the Sense pair with it, because there is no second table.
++
++COEXISTENCE WITH A REAL MFi PAD IS BY MERGE, NOT BY ARBITRATION. Both sources OR
++into one snapshot, so both drive and neither wins. That is also what makes the
++handoff safe with no boundary hook at all: when this layer stops being eligible it
++simply contributes nothing, the merged snapshot loses those bits, and the ordinary
++edge detector below emits the key-ups on the very next frame. A held +attack cannot
++cross a mode boundary latched (the R5 vkq_vr_hold lesson) — and, unlike an
++unconditional release, it cannot cancel a gamepad player's trigger either, because
++the pad is still contributing its own bits to the same snapshot.
++
++THE THREE GATES, each for a different failure:
++  - not in VR: VR owns the pair, and running here too would double every input;
++  - gameplay only: the UI pump owns menus and has already run this frame. Two
++    emitters on one stick is two menu presses per flick — the exact mistake the
++    pump's own comments document;
++  - a hand actually answered: with no controller assigned this must be a no-op, or
++    it would zero a real pad's axes every frame.
++
++The Sense masks below are a THIRD mirror of one list — VKQSenseController.h:18-23
++is the definition, gl_vidsdl.c's VKQ_VRB_* is the second, and neither header is
++reachable from here (the shell cannot be included by engine code, and gl_vidsdl.c
++does not pull SDL's gamepad enums). They are 1<<0..1<<5 and have not changed since
++R2; if that list ever grows, all three sites change together.
++================
++*/
++#define IN_SENSE_TRIGGER (1u << 0)
++#define IN_SENSE_GRIP	 (1u << 1)
++#define IN_SENSE_A		 (1u << 2)
++#define IN_SENSE_B		 (1u << 3)
++#define IN_SENSE_STICK	 (1u << 4)
++#define IN_SENSE_MENU	 (1u << 5)
++#define IN_SENSE_LEFT	 0
++#define IN_SENSE_RIGHT	 1
++
++// Set every frame by IN_SenseFlatMerge; read by IN_JoyMove, which must run its
++// stick maths when the pair is the ONLY controller (joy_active_controller NULL).
++static int joy_sense_flat_active;
++
++static int IN_SenseFlatMerge (qboolean *buttons, joyaxisstate_t *axes)
++{
++	extern int VKQ_Sense_UISample (unsigned *btn, float *stick);
++	extern int VKQ_GetMode (void);				 // VKQVR.h: 0 = 2D, 1 = 3D, 2 = VR
++	extern int VKQ_iOS_SettingsSheetOpen (void); // UIKit/SwiftUI, invisible to key_dest
++	extern int vkq_ios_modal_active;			 // gl_screen.c — SCR_ModalMessage is blocking
++	unsigned   btn[2] = {0u, 0u};
++	float	   stick[4] = {0.0f, 0.0f, 0.0f, 0.0f};
++	unsigned   either;
++
++	joy_sense_flat_active = 0;
++
++	if (VKQ_GetMode () == 2) // VKQ_MODE_VR
++		return 0;
++	if (key_dest != key_game || vkq_ios_modal_active || VKQ_iOS_SettingsSheetOpen ())
++		return 0;
++	if (!VKQ_Sense_UISample (btn, stick))
++		return 0;
++
++	joy_sense_flat_active = 1;
++	either = btn[IN_SENSE_LEFT] | btn[IN_SENSE_RIGHT];
++
++	// STICKS. GameController's Y is up-POSITIVE; SDL's is up-NEGATIVE, and every
++	// consumer below (`cmd->forwardmove -= speed * moveEased.y`) is written to
++	// SDL's convention. The negation is what makes a forward push walk forward.
++	// Left hand moves, right hand looks — the two sticks of a pad, so
++	// joy_swapmovelook and joy_invert keep working with no special case.
++	axes->axisvalue[SDL_GAMEPAD_AXIS_LEFTX] += stick[0];
++	axes->axisvalue[SDL_GAMEPAD_AXIS_LEFTY] += -stick[1];
++	axes->axisvalue[SDL_GAMEPAD_AXIS_RIGHTX] += stick[2];
++	axes->axisvalue[SDL_GAMEPAD_AXIS_RIGHTY] += -stick[3];
++
++	// TRIGGER -> the trigger AXIS rather than a button, so joy_deadzone_trigger and
++	// K_RTRIGGER's bind apply exactly as they do for a pad. EITHER hand fires: in VR
++	// each trigger fires its own gun, and outside VR there is one weapon, so both
++	// firing it is the direct continuation of that rather than a new rule. Digital,
++	// because VKQ_Sense_UISample publishes the bit and not the analog value — enough
++	// for +attack, which is all a trigger is bound to.
++	if (either & IN_SENSE_TRIGGER)
++		axes->axisvalue[SDL_GAMEPAD_AXIS_RIGHT_TRIGGER] = 1.0f;
++
++	// BUTTONS -> SDL button indices. Hand-agnostic where the action is not
++	// handed (a player holding the pair the other way round still jumps), and
++	// per-hand where it is.
++	if (either & IN_SENSE_A)
++		buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true; // K_ABUTTON  -> +jump
++	if (either & IN_SENSE_B)
++		buttons[SDL_GAMEPAD_BUTTON_EAST] = true; // K_BBUTTON  -> +movedown
++	if (either & IN_SENSE_MENU)
++		buttons[SDL_GAMEPAD_BUTTON_START] = true; // K_ESCAPE   -> the menu
++	if (btn[IN_SENSE_LEFT] & IN_SENSE_GRIP)
++		buttons[SDL_GAMEPAD_BUTTON_LEFT_SHOULDER] = true; // K_LSHOULDER -> impulse 12
++	if (btn[IN_SENSE_RIGHT] & IN_SENSE_GRIP)
++		buttons[SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER] = true; // K_RSHOULDER -> weapon wheel
++
++	/*
++	 * STICK CLICKS, decided deliberately (the brief asked for this to be recorded).
++	 *
++	 * In VR the left click clears both holsters and the right click Recenters. Both
++	 * are VR semantics with nothing to act on here: there are no holsters outside
++	 * VR, and there is no play space to recentre. Rather than invent a third
++	 * meaning or make the buttons dead, they emit exactly what a pad's stick
++	 * clicks emit — K_LTHUMB and K_RTHUMB — which the port's defaults bind to
++	 * +speed (run) and +movedown (crouch). So they do something standard and
++	 * useful, they follow a rebind, and no VR-only behaviour leaks into flat mode.
++	 */
++	if (btn[IN_SENSE_LEFT] & IN_SENSE_STICK)
++		buttons[SDL_GAMEPAD_BUTTON_LEFT_STICK] = true; // K_LTHUMB -> +speed
++	if (btn[IN_SENSE_RIGHT] & IN_SENSE_STICK)
++		buttons[SDL_GAMEPAD_BUTTON_RIGHT_STICK] = true; // K_RTHUMB -> +movedown
++
++	return 1;
+ }
++#endif // VKQ_VISIONOS
+ 
+ /*
+ ================
+@@ -461,7 +604,9 @@
+ void IN_Commands (void)
+ {
+ 	joyaxisstate_t newaxisstate;
++	qboolean	   newbuttonstate[SDL_GAMEPAD_BUTTON_COUNT];
+ 	int			   i;
++	int			   have_source = 0;
+ 	const float	   stickthreshold = 0.9;
+ 	const float	   triggerthreshold = joy_deadzone_trigger.value;
+ 
+@@ -492,17 +637,64 @@
+ 	if (!joy_enable.value)
+ 		return;
+ 
+-	if (!joy_active_controller)
+-		return;
+-
+-	// emit key events for controller buttons
++	/*
++	 * R6.3 — ONE MERGED SNAPSHOT PER FRAME, FROM EVERY SOURCE THAT IS DRIVING.
++	 *
++	 * This used to read SDL straight into `newaxisstate` and return early when
++	 * there was no SDL controller. It now builds a zeroed snapshot, lets each
++	 * source OR its own contribution into it, and runs the SINGLE edge detector
++	 * below over the result. Two reasons it is a merge rather than a second
++	 * independent state block:
++	 *
++	 *   - joy_buttonstate / joy_axisstate / joy_buttontimer are single globals, so
++	 *     a parallel block would stomp them; and two blocks pressing the same K_*
++	 *     would emit two key-downs and two key-ups for one press.
++	 *   - a source that stops contributing loses its bits from the snapshot, and
++	 *     the edge detector emits the key-up for free — while a source that is
++	 *     STILL holding the key keeps it down. That is what makes a mode boundary
++	 *     safe without an explicit release hook, and what stops one source's
++	 *     cleanup from cancelling another's held trigger.
++	 *
++	 * The early return is gone deliberately: with nothing connected the snapshot is
++	 * all zeros, which is what releases anything a just-disconnected controller left
++	 * held. The loops are 21 buttons and 6 axes of nothing.
++	 */
++	memset (&newaxisstate, 0, sizeof (newaxisstate));
+ 	for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
++		newbuttonstate[i] = false;
++
++	if (joy_active_controller)
+ 	{
++		have_source = 1;
++		for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
++		{
+ #ifdef USE_SDL3
+-		qboolean newstate = SDL_GetGamepadButton (joy_active_controller, (SDL_GamepadButton)i);
++			newbuttonstate[i] = SDL_GetGamepadButton (joy_active_controller, (SDL_GamepadButton)i);
+ #else
+-		qboolean newstate = SDL_GameControllerGetButton (joy_active_controller, (SDL_GameControllerButton)i);
++			newbuttonstate[i] = SDL_GameControllerGetButton (joy_active_controller, (SDL_GameControllerButton)i);
+ #endif
++		}
++		for (i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)
++		{
++#ifdef USE_SDL3
++			newaxisstate.axisvalue[i] = SDL_GetGamepadAxis (joy_active_controller, (SDL_GamepadAxis)i) / 32768.0f;
++#else
++			newaxisstate.axisvalue[i] = SDL_GameControllerGetAxis (joy_active_controller, (SDL_GameControllerAxis)i) / 32768.0f;
++#endif
++		}
++	}
++
++#ifdef VKQ_VISIONOS
++	// The Sense pair, in 2D and 3D mode only. See IN_SenseFlatMerge.
++	if (IN_SenseFlatMerge (newbuttonstate, &newaxisstate))
++		have_source = 1;
++#endif
++	(void)have_source; // the snapshot is authoritative; this is for readers
++
++	// emit key events for controller buttons
++	for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
++	{
++		qboolean newstate = newbuttonstate[i];
+ 		qboolean oldstate = joy_buttonstate.buttondown[i];
+ 
+ 		joy_buttonstate.buttondown[i] = newstate;
+@@ -512,15 +704,6 @@
+ 		IN_JoyKeyEvent (oldstate, newstate, IN_KeyForControllerButton ((SDL_GamepadButton)i), &joy_buttontimer[i]);
+ #else
+ 		IN_JoyKeyEvent (oldstate, newstate, IN_KeyForControllerButton ((SDL_GameControllerButton)i), &joy_buttontimer[i]);
+-#endif
+-	}
+-
+-	for (i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)
+-	{
+-#ifdef USE_SDL3
+-		newaxisstate.axisvalue[i] = SDL_GetGamepadAxis (joy_active_controller, (SDL_GamepadAxis)i) / 32768.0f;
+-#else
+-		newaxisstate.axisvalue[i] = SDL_GameControllerGetAxis (joy_active_controller, (SDL_GameControllerAxis)i) / 32768.0f;
+ #endif
+ 	}
+ 
+@@ -567,8 +750,17 @@
+ 	if (!joy_enable.value)
+ 		return;
+ 
++	// R6.3: the Sense pair is deliberately not an SDL gamepad (charter A10), so
++	// joy_active_controller is NULL when it is the only controller in the room.
++	// Gating the stick maths on SDL's state would make the pair depend on hardware
++	// it is defined not to be — which is precisely why it did nothing in 2D and 3D.
++#ifdef VKQ_VISIONOS
++	if (!joy_active_controller && !joy_sense_flat_active)
++		return;
++#else
+ 	if (!joy_active_controller)
+ 		return;
++#endif
+ 
+ 	if (cl.paused || key_dest != key_game)
+ 		return;

@@ -1,0 +1,1360 @@
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -1017,7 +1017,60 @@
+ 
+ const char *scr_notifystring;
+ qboolean	scr_drawdialog;
++
++#ifdef VKQ_IOS
++// vkquake-ios overlay 0022 (VR R5 item 1) — the modal soft-lock.
++//
++// SCR_ModalMessage spins a blocking loop that starves the whole app, and patch
++// 0006's answer was a pair of UIKit buttons added to "the key window". On
++// visionOS that window is not reliably the game's (connectedScenes is an
++// UNORDERED set and a SwiftUI ornament/sheet host can win the isKeyWindow test —
++// the same defect VKQ_SetCurtain already had to fix), and inside VR the game
++// window is parked behind the curtain in a corner of the room anyway. the user got
++// hard-stuck on "New Game over a loaded game": prompt visible, no way to answer
++// it, engine loop blocked forever, and the console bridge could not help because
++// Cbuf never drained inside the pump.
++//
++// The fix that reaches EVERY surface at once is to draw the answer affordance in
++// the ENGINE's own 2D composite, because that composite is what the 2D window
++// shows AND what the VR/3D panel samples. One draw, three surfaces, no UIKit.
++static int vkq_modal_answer_row (void) { return (int)(200 * 0.35f); }
+ 
++int vkq_ios_modal_active = 0; // read by the Sense UI pump (gl_vidsdl.c)
++// How many frames were actually drawn AS THE DIALOG while the last modal was
++// up. This is the assertion for the sticky-flag fix, and it needs to be a
++// count rather than a yes/no: upstream draws the dialog once and clears the
++// flag, which on this platform yields a handful of dialog frames buried under
++// hundreds of ordinary ones from the display link. Sticky yields ALL of them.
++static int vkq_modal_dialog_frames = 0;
++
++static void SCR_DrawModalButtons (cb_context_t *cbx, int y)
++{
++	// 320x200 menu canvas. Two boxes, wide enough to read at panel distance, with
++	// the key legend INSIDE them — a player in a headset should not have to
++	// correlate two rows of text. Palette indices 0 and 15 only: the greyscale
++	// ramp is a structural fact of every Quake palette, so this cannot come out
++	// the wrong colour on a mod's replacement palette.
++	const int	bw = 96, bh = 24, gap = 28;
++	const int	x0 = (320 - (bw * 2 + gap)) / 2;
++	const int	x1 = x0 + bw + gap;
++	static const char *const kHint = "gamepad A/B, Sense trigger/menu, or Y/N";
++	int			i;
++	for (i = 0; i < 2; i++)
++	{
++		const int bx = i ? x1 : x0;
++		Draw_Fill (cbx, (float)bx, (float)y, (float)bw, (float)bh, 0, 0.75f);
++		Draw_Fill (cbx, (float)bx, (float)y, (float)bw, 1.0f, 15, 0.9f);
++		Draw_Fill (cbx, (float)bx, (float)(y + bh - 1), (float)bw, 1.0f, 15, 0.9f);
++		Draw_Fill (cbx, (float)bx, (float)y, 1.0f, (float)bh, 15, 0.9f);
++		Draw_Fill (cbx, (float)(bx + bw - 1), (float)y, 1.0f, (float)bh, 15, 0.9f);
++	}
++	Draw_String (cbx, (float)(x0 + (bw - 9 * CHARACTER_SIZE) / 2), (float)(y + (bh - CHARACTER_SIZE) / 2), "YES  Y/A");
++	Draw_String (cbx, (float)(x1 + (bw - 9 * CHARACTER_SIZE) / 2), (float)(y + (bh - CHARACTER_SIZE) / 2), "NO   N/B");
++	Draw_String (cbx, (float)((320 - (int)strlen (kHint) * CHARACTER_SIZE) / 2), (float)(y + bh + 10), kHint);
++}
++#endif
++
+ static void SCR_DrawNotifyString (cb_context_t *cbx)
+ {
+ 	const char *start;
+@@ -1048,6 +1101,12 @@
+ 			break;
+ 		start++; // skip the \n
+ 	} while (1);
++#ifdef VKQ_IOS
++	// The answer, where the prompt is, on whatever surface the prompt is on.
++	SCR_DrawModalButtons (cbx, y + 12);
++	vkq_modal_dialog_frames++;
++	(void)vkq_modal_answer_row;
++#endif
+ }
+ 
+ /*
+@@ -1069,9 +1128,30 @@
+ 	scr_notifystring = text;
+ 
+ 	// draw a fresh screen
++#ifdef VKQ_IOS
++	// STICKY FOR THE WHOLE MODAL, and this is the second half of why the prompt
++	// was unanswerable rather than a cosmetic nicety.
++	//
++	// Upstream sets the flag, draws ONE frame, and clears it — which is right on
++	// a platform where the blocking loop below is the only thing running. On iOS
++	// and visionOS it is not: VKQ_iOS_ModalPump spins the main run loop so that
++	// UIKit can deliver the button taps, and the CADisplayLink lives on that same
++	// run loop — so Host_Frame keeps firing THROUGHOUT the modal and each of its
++	// ordinary frames overwrites the dialog frame within milliseconds. The
++	// simulator caught this exactly: with the modal provably up and answerable,
++	// the VR panel was showing the plain Single Player menu with the status bar
++	// under it, i.e. a normal frame, not the prompt.
++	//
++	// Leaving the flag set for the duration means EVERY frame drawn while the
++	// modal is up is the dialog — the 2D window, the 3D panel and the VR panel
++	// all show the question and its YES/NO for as long as it is being asked.
+ 	scr_drawdialog = true;
+ 	SCR_UpdateScreen (false);
++#else
++	scr_drawdialog = true;
++	SCR_UpdateScreen (false);
+ 	scr_drawdialog = false;
++#endif
+ 
+ 	S_ClearBuffer (); // so dma doesn't loop current sound
+ 
+@@ -1084,7 +1164,15 @@
+ 	// deadlocks touch input. Show touch Yes/No buttons and pump the run loop.
+ 	{
+ 		extern void VKQ_iOS_ModalBegin (const char *t);
++		vkq_ios_modal_active = 1;
+ 		VKQ_iOS_ModalBegin (text);
++		// Loud, in the console log, on both sides of the wait. A modal is the one
++		// state in this engine that stops the world, and the round that shipped a
++		// soft-lock had no way — from a log, from a bridge, from anywhere — to
++		// tell "blocked in a modal" from "hung". One line each way settles it,
++		// and the simulator asserts on both.
++		vkq_modal_dialog_frames = 0;
++		Con_Printf ("MODAL: waiting for an answer — %s", text);
+ 	}
+ #endif
+ 	do
+@@ -1094,7 +1182,34 @@
+ #ifdef VKQ_IOS
+ 		{
+ 			extern void VKQ_iOS_ModalPump (void);
++			static int	spin = 0;
+ 			VKQ_iOS_ModalPump (); // spin the run loop so the Yes/No button taps are delivered
++			// R5 item 1 — REMOTE RESCUE. The console bridge injects into Cbuf and
++			// nothing else; with the host loop parked here Cbuf never drained, so a
++			// stuck player could not be talked out of it from a laptop either
++			// (confirmed on the user's device: TCP accepted, commands vanished).
++			// Draining here costs nothing and is the difference between "relaunch
++			// the app" and "type `y`". Re-entrancy is impossible in practice — the
++			// only commands that reach a second SCR_ModalMessage are menu ones, and
++			// key_dest is grabbed — but the guard is free.
++			{
++				static int inCbuf = 0;
++				if (!inCbuf)
++				{
++					inCbuf = 1;
++					Cbuf_Execute ();
++					inCbuf = 0;
++				}
++			}
++			// Re-draw at ~6 Hz so the composite stays live even if the run loop's
++			// own frames stop arriving (a backgrounded scene, a paused display
++			// link): a bridge command executed above has to become visible, and a
++			// panel sampling a frame frozen before the prompt existed is the bug
++			// this round is fixing. scr_drawdialog stays set for the whole modal
++			// (see the note at the top), so this and the display link's frames draw
++			// the same thing.
++			if (((spin++) % 10) == 0)
++				SCR_UpdateScreen (false);
+ 		}
+ #else
+ 		Sys_Sleep (16);
+@@ -1107,6 +1222,8 @@
+ #ifdef VKQ_IOS
+ 	{
+ 		extern void VKQ_iOS_ModalEnd (void);
++		scr_drawdialog = false; // the sticky flag ends with the question
++		vkq_ios_modal_active = 0;
+ 		VKQ_iOS_ModalEnd ();
+ 	}
+ #endif
+@@ -1115,10 +1232,21 @@
+ 
+ 	// johnfitz -- timeout
+ 	if (time2 > time1)
++	{
++#ifdef VKQ_IOS
++		Con_Printf ("MODAL: answered TIMEOUT after %d dialog frames\n", vkq_modal_dialog_frames);
++#endif
+ 		return false;
++	}
+ 	// johnfitz
+ 
+-	return (lastchar == 'y' || lastchar == 'Y' || lastkey == K_ABUTTON);
++	{
++		const int yes = (lastchar == 'y' || lastchar == 'Y' || lastkey == K_ABUTTON);
++#ifdef VKQ_IOS
++		Con_Printf ("MODAL: answered %s after %d dialog frames (key %d char %d)\n", yes ? "YES" : "NO", vkq_modal_dialog_frames, lastkey, lastchar);
++#endif
++		return yes;
++	}
+ }
+ 
+ //=============================================================================
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -6003,6 +6003,19 @@
+ cvar_t vkqvr_gripup = {"vkqvr_gripup", "0.75", CVAR_NONE};	   // fist above the rear-quarter axis
+ cvar_t vkqvr_guntrim = {"vkqvr_guntrim", "1", CVAR_NONE};	   // apply the four residual trims
+ cvar_t vkqvr_crosshair = {"vkqvr_crosshair", "1", CVAR_NONE};  // R4 part B: the reticle at the hit point
++// overlay 0022 (R5 item 4) — the reticle, made falsifiable.
++//   0 = normal, 1 = DEBUG: huge, magenta, pinned at 2 m along the aim ray whether
++//       or not the trace hits anything.
++// The debug reticle exists because two rounds in a row shipped a crosshair that
++// verified as NUMBERS and was invisible as PIXELS. A known colour at a known
++// distance and a known angular size is something a screenshot can be grepped
++// for; "the aim trim moved by 15 degrees" never was.
++cvar_t vkqvr_xhairdebug = {"vkqvr_xhairdebug", "0", CVAR_NONE};
++// Angular half-extent of one arm, in radians at the reticle's own distance, and
++// the arm half-thickness. R4 shipped 0.0100/0.0011; the thickness is the number
++// the user could not see, so it is a cvar now and the default is thicker.
++cvar_t vkqvr_xhairsize = {"vkqvr_xhairsize", "0.011", CVAR_NONE};
++cvar_t vkqvr_xhairthick = {"vkqvr_xhairthick", "0.0019", CVAR_NONE};
+ // R4 part E — strict weapon-flick gating. See the comment at the cycle site.
+ cvar_t vkqvr_flick_y = {"vkqvr_flick_y", "0.85", CVAR_NONE};
+ cvar_t vkqvr_flick_x = {"vkqvr_flick_x", "0.25", CVAR_NONE};
+@@ -6072,6 +6085,42 @@
+ // A grip release inside a zone SELECTS; a grip held inside a zone for this long
+ // ASSIGNS instead (and suppresses the select). One threshold, no dead band.
+ cvar_t vkqvr_grip_hold = {"vkqvr_grip_hold", "1.0", CVAR_NONE}; // seconds in-zone: reassign
++
++// ---------------------------------------------------------------------------
++// overlay 0022 (R5 item 3) — holsters: where the model is DRAWN vs where the
++// hand has to REACH.
++//
++// the user, in the headset: the grabs work at his waist, but the holstered guns
++// hang out in front of his body. Two defects, both in the RENDER half only —
++// which is exactly the shape the brief predicted, and exactly the shape the R4
++// comment ("placed through EXACTLY the transform a hand pose takes") claimed was
++// impossible:
++//
++//   1. THE TRIMS. VKQ_VR_MountWeapon applies the four per-weapon residual trims
++//      along (fwd, right, up). For a HAND those are the aim axis, the hand's
++//      right and the hand's up — which is what they were fitted against. For a
++//      HOLSTER the same three vectors mean (straight down, body right, body
++//      FORWARD), so the shotgun's +2.65 "up" trim became +2.65 units of FORWARD
++//      and its -3.03 "forward" trim became 3 units of lift. A hand-frame
++//      calibration reinterpreted in a body frame is not a calibration.
++//   2. THE SCALE. The mount computed the grip offset at the in-hand scale and
++//      the caller then multiplied the entity scale by 0.62 afterwards, so the
++//      model shrank ABOUT ITS ORIGIN and the grip point it had just been
++//      positioned by moved 38% of the way back toward that origin.
++//
++// Both are fixed by mounting holstered weapons at their FINAL scale with the
++// hand trims off, which is what makes "the model and the in-zone test cannot
++// disagree" true instead of aspirational. The sliders below are the insurance
++// the user asked for regardless.
++//
++// Holster Size is a fraction of the in-hand size. R4 shipped 0.62; he asked for
++// bigger, so the default is 0.80 (1.29x).
++cvar_t vkqvr_holscale = {"vkqvr_holscale", "0.80", CVAR_NONE};
++// Holster Forward moves the whole body-anchored zone frame, in METRES, +ve
++// forward. It moves the ZONE, so detection and rendering move together — a
++// slider that moved only the drawn model would re-create the bug it exists to
++// work around.
++cvar_t vkqvr_holfwd = {"vkqvr_holfwd", "0", CVAR_NONE};
+ 
+ void VKQ_VR_RegisterCvars (void)
+ {
+@@ -6092,6 +6141,11 @@
+ 	Cvar_RegisterVariable (&vkqvr_gripup);
+ 	Cvar_RegisterVariable (&vkqvr_guntrim);
+ 	Cvar_RegisterVariable (&vkqvr_crosshair);
++	Cvar_RegisterVariable (&vkqvr_xhairdebug);
++	Cvar_RegisterVariable (&vkqvr_xhairsize);
++	Cvar_RegisterVariable (&vkqvr_xhairthick);
++	Cvar_RegisterVariable (&vkqvr_holscale);
++	Cvar_RegisterVariable (&vkqvr_holfwd);
+ 	Cvar_RegisterVariable (&vkqvr_flick_y);
+ 	Cvar_RegisterVariable (&vkqvr_flick_x);
+ 	Cvar_RegisterVariable (&vkqvr_flick_off);
+@@ -6368,6 +6422,12 @@
+ //
+ // Base = Rx(-90).Rz(90).Rz(-bodyYaw).T(-vieworg - heightOfs). Pitch and roll are
+ // deliberately absent: the head owns them.
++//
++// The world-space position of the eye the CURRENT pass is rendering, published
++// below and read by the crosshair (r_part.c) — the one thing in the world pass
++// whose size is defined by how far away the viewer actually is.
++float vkq_vr_eye_world[3] = {0.0f, 0.0f, 0.0f};
++
+ void VKQ_VR_ComposeView (int eye, float out[16])
+ {
+ 	float base[16], rot[16], trans[16];
+@@ -6388,6 +6448,25 @@
+ 
+ 	memcpy (out, vkq_vr_cur[eye & 1].eye_from_player, 16 * sizeof (float));
+ 	MatrixMultiply (out, base); // out = eyeFromPlayer * base
++
++	// overlay 0022 (R5 item 4) — WHERE THE EYE ACTUALLY IS, in Quake world.
++	//
++	// r_origin is r_refdef.vieworg, i.e. Quake's own 46-unit eye — which in VR is
++	// around the player's navel (the standing-eye rise is added by the matrix
++	// above, and the head's positional tracking offset lives inside
++	// eye_from_player and never touches vieworg at all). Anything that sizes
++	// itself by "distance from the viewer" therefore measured from the wrong
++	// point: the VR crosshair's angular size was computed from a point that can
++	// be 22+ units low and half a metre away laterally, which at close range is a
++	// large error in exactly the direction that makes a reticle too small.
++	//
++	// `out` is rigid (the metres->units scale is on the translation column only),
++	// so the camera position is the standard -R^T t and no inverse is needed.
++	{
++		int i;
++		for (i = 0; i < 3; i++)
++			vkq_vr_eye_world[i] = -(out[i * 4 + 0] * out[3 * 4 + 0] + out[i * 4 + 1] * out[3 * 4 + 1] + out[i * 4 + 2] * out[3 * 4 + 2]);
++	}
+ }
+ 
+ void VKQ_VR_GetProjection (int eye, float out[16]) { memcpy (out, vkq_vr_cur[eye & 1].projection, 16 * sizeof (float)); }
+@@ -6784,7 +6863,118 @@
+ 	{
+ 		if (b->state & 1)
+ 			b->state = 4; // up, and "released this frame"
++	}
++}
++
++/*
++==================
++VKQ_VR_UIInputPump -- overlay 0022 (VR R5 item 1)
++
++The Sense pair driving MENUS, THE CONSOLE AND MODALS, in every mode.
++
++Called from IN_Commands (in_sdl.c), which is the only function in the engine
++that runs both once per host frame AND once per iteration of SCR_ModalMessage's
++blocking pump — upstream put the joystick's key emission there for exactly that
++reason, and this is the same idea for a controller SDL is deliberately not
++allowed to own (charter A10's spatial filter).
++
++Before this, the Sense pair reached the engine only through
++VKQ_VR_ApplyHandInput, i.e. only from CL_AccumulateCmd, i.e. only while a VR
++frame was being built. So the controllers did nothing in the 2D window, nothing
++in the 3D panel, and nothing inside the modal that blocks CL_AccumulateCmd —
++which is how the user ended up looking at an unanswerable "are you sure?" with two
++tracked controllers in his hands.
++
++It reads the hardware DIRECTLY rather than the published per-frame hand state,
++because the published state only exists while the VR compositor loop is running.
++Its own press edges are kept here, and are reset whenever it goes inactive, so a
++button held across the gameplay/menu boundary cannot fire twice.
++==================
++*/
++extern int vkq_ios_modal_active; // gl_screen.c — SCR_ModalMessage is blocking
++
++void VKQ_VR_UIInputPump (void)
++{
++	extern int	  VKQ_Sense_UISample (unsigned *btn, float *stick);
++	static unsigned prev[2] = {0u, 0u};
++	static double	repeat = 0.0;
++	static int		wasActive = 0;
++	const int		modal = vkq_ios_modal_active;
++	const int		active = modal || (key_dest != key_game);
++	unsigned		btn[2] = {0u, 0u}, pressed;
++	float			stick[4] = {0.0f, 0.0f, 0.0f, 0.0f};
++	float			x, y;
++	int				k = 0;
++	double			now;
++
++	if (!active)
++	{
++		// Re-baseline on the way out, so releasing a trigger that fired a shot
++		// cannot be seen as a fresh press the moment a menu opens.
++		if (wasActive)
++			wasActive = 0;
++		prev[0] = prev[1] = 0u;
++		repeat = 0.0;
++		return;
++	}
++	if (!VKQ_Sense_UISample (btn, stick))
++	{
++		prev[0] = prev[1] = 0u;
++		return;
++	}
++	if (!wasActive)
++	{
++		// First frame in a UI context: adopt whatever is already held as the
++		// baseline instead of treating it as a press.
++		wasActive = 1;
++		prev[0] = btn[0];
++		prev[1] = btn[1];
++		return;
+ 	}
++	pressed = (btn[0] & ~prev[0]) | (btn[1] & ~prev[1]);
++	prev[0] = btn[0];
++	prev[1] = btn[1];
++
++	// Chirality-appropriate and hand-agnostic: trigger or A on EITHER controller
++	// is yes/select, B or menu on either is no/back. A player who put the pair
++	// down left-handed still gets out of the dialog.
++	if (pressed & (VKQ_VRB_TRIGGER | VKQ_VRB_A))
++	{
++		// K_ABUTTON is what SCR_ModalMessage's own exit test accepts as YES, and
++		// what the gamepad path emits — so the modal answers identically however
++		// it was answered.
++		const int key = modal ? K_ABUTTON : K_ENTER;
++		Key_Event (key, true);
++		Key_Event (key, false);
++	}
++	if (pressed & (VKQ_VRB_B | VKQ_VRB_MENU))
++	{
++		const int key = modal ? K_BBUTTON : K_ESCAPE;
++		Key_Event (key, true);
++		Key_Event (key, false);
++	}
++	if (modal)
++		return; // a modal has exactly two answers; arrows would only be noise
++
++	x = vkq_vr_stick_axis (stick[0]) + vkq_vr_stick_axis (stick[2]);
++	y = vkq_vr_stick_axis (stick[1]) + vkq_vr_stick_axis (stick[3]);
++	if (y > 0.5f)
++		k = K_UPARROW;
++	else if (y < -0.5f)
++		k = K_DOWNARROW;
++	else if (x > 0.5f)
++		k = K_RIGHTARROW;
++	else if (x < -0.5f)
++		k = K_LEFTARROW;
++	now = Sys_DoubleTime ();
++	if (!k)
++		repeat = 0.0;
++	else if (now >= repeat)
++	{
++		Key_Event (k, true);
++		Key_Event (k, false);
++		repeat = now + (repeat > 0.0 ? 0.15 : 0.4); // one step, then autorepeat
++	}
+ }
+ 
+ /*
+@@ -6854,45 +7044,15 @@
+ 	vkq_vr_stick_now (off, ls);
+ 	vkq_vr_stick_now (aim, rs);
+ 
+-	// The MENU button works everywhere, including in menus — it is the only way
+-	// back out of the console without a keyboard.
+-	if ((pAim | pOff) & VKQ_VRB_MENU)
+-		Cbuf_AddText ("togglemenu\n");
+-
+ 	if (key_dest != key_game)
+ 	{
+-		// In a menu the sticks and the trigger drive the SAME keys the gamepad
+-		// path emits, so the panel menus stay drivable with nothing else plumbed.
+-		static double repeat = 0.0;
+-		int			  k = 0;
+-		float		  x = vkq_vr_stick_axis (ls[0]) + vkq_vr_stick_axis (rs[0]);
+-		float		  y = vkq_vr_stick_axis (ls[1]) + vkq_vr_stick_axis (rs[1]);
+-		if (y > 0.5f)
+-			k = K_UPARROW;
+-		else if (y < -0.5f)
+-			k = K_DOWNARROW;
+-		else if (x > 0.5f)
+-			k = K_RIGHTARROW;
+-		else if (x < -0.5f)
+-			k = K_LEFTARROW;
+-		if (!k)
+-			repeat = 0.0;
+-		else if (now >= repeat)
+-		{
+-			Key_Event (k, true);
+-			Key_Event (k, false);
+-			repeat = now + (repeat > 0.0 ? 0.15 : 0.4); // one step, then autorepeat
+-		}
+-		if ((pAim | pOff) & (VKQ_VRB_TRIGGER | VKQ_VRB_A))
+-		{
+-			Key_Event (K_ENTER, true);
+-			Key_Event (K_ENTER, false);
+-		}
+-		if ((pAim | pOff) & VKQ_VRB_B)
+-		{
+-			Key_Event (K_ESCAPE, true);
+-			Key_Event (K_ESCAPE, false);
+-		}
++		// overlay 0022 (R5 item 1): menu/console navigation is NOT handled here
++		// any more. VKQ_VR_UIInputPump owns it, from IN_Commands, so that the
++		// Sense pair drives the UI in the 2D window and the 3D panel too — and,
++		// critically, inside SCR_ModalMessage, which never reaches this function
++		// at all because it blocks the host loop. Emitting keys from both places
++		// would double every menu press, so this branch now does cleanup only.
++		//
+ 		// Nothing below this line may reach gameplay while a menu is up.
+ 		vkq_vr_hold (&in_attack, false);
+ 		vkq_vr_hold (&in_jump, false);
+@@ -6902,6 +7062,12 @@
+ 		return;
+ 	}
+ 
++	// The MENU button opens the game menu. In a menu it is "back" instead, and
++	// that is the UI pump's job (above) — this one is the gameplay meaning, so
++	// it lives on the gameplay side of the guard.
++	if ((pAim | pOff) & VKQ_VRB_MENU)
++		Cbuf_AddText ("togglemenu\n");
++
+ 	// --- gameplay -------------------------------------------------------------
+ 	// Convenience: right trigger fires, left trigger and A jump. Fixed layout,
+ 	// deliberately not bindable (both donors' ledgers paid for that).
+@@ -7011,18 +7177,28 @@
+ 	// since the last cycle. Measured with synthetic stick injection in
+ 	// sim-verify-vr.sh: the R3 gate fires on 8 of 16 sampled diagonals, this one
+ 	// on 0, and both fire on all 4 clean vertical flicks.
++	//
++	// overlay 0022 (R5 item 2) — THE EMPTY HAND IS DIFFERENT, and the user asked
++	// for it to be simpler. In Immersive v2 an empty aim hand has nothing to
++	// switch AWAY from: the strict gate exists to stop a turn-and-glance from
++	// changing the weapon you are holding, and there is no such accident when
++	// your hand is empty — the worst case is drawing a gun you did not mean to,
++	// which the next press undoes. So a plain up/down press fills it. The strict
++	// three-condition gate is unchanged for every other case.
+ 	{
+ 		const float fy = (vkqvr_flick_y.value > 0.1f) ? vkqvr_flick_y.value : 0.85f;
+ 		const float fx = (vkqvr_flick_x.value > 0.0f) ? vkqvr_flick_x.value : 0.25f;
+ 		const float fo = (vkqvr_flick_off.value > 0.0f) ? vkqvr_flick_off.value : 0.40f;
+ 		const float ay = fabsf (rs[1]), ax = fabsf (rs[0]);
+-		if (cycleArmed && ay >= fy && ax <= fx && ay >= 2.5f * ax && !cl.paused)
++		const int	emptyHand = vkq_vr_immersive () && vkq_vr_held_item_get (aim) == 0;
++		const int	fired = emptyHand ? (ay >= 0.5f && ay > ax) : (ay >= fy && ax <= fx && ay >= 2.5f * ax);
++		if (cycleArmed && fired && !cl.paused)
+ 		{
+ 			VKQ_VR_CycleWeapon (rs[1] > 0.0f);
+ 			cycleArmed = 0;
+ 			VKQ_VR_Haptic (aim, 0.3f, 0.02f);
+ 		}
+-		if (ay < fo)
++		if (ay < (emptyHand ? 0.30f : fo))
+ 			cycleArmed = 1;
+ 	}
+ 
+@@ -7359,10 +7535,40 @@
+ in the same fist.
+ ==================
+ */
+-void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, const vec3_t hand, const vec3_t fwd, const vec3_t right, const vec3_t up, const float ang[3])
++/*
++overlay 0022 (R5 item 3) adds the two parameters the holster path needed and R4
++did not have:
++
++  extraScale — folded into the scale BEFORE the anchor offsets are computed.
++               R4's holster path mounted at the in-hand scale and then multiplied
++               the entity scale by 0.62 afterwards, which shrinks the model about
++               its ORIGIN and drags the grip point 38% of the way back toward it.
++               The offsets and the drawn size must come from one number or the
++               placement means nothing.
++  trims      — the four per-weapon residual trims are a HAND-FRAME calibration
++               (fwd = aim axis, up = the hand's up). A holster's frame is
++               (fwd = straight down, up = body FORWARD), so applying them there
++               silently converts a vertical trim into a forward push — which is
++               precisely what the user photographed. Off for anything not in a fist.
++*/
++void VKQ_VR_MountWeaponEx (
++	entity_t *view, const vkq_vr_gun_t *g, int itembit, const vec3_t hand, const vec3_t fwd, const vec3_t right, const vec3_t up, const float ang[3],
++	float extraScale, qboolean trims)
+ {
+ 	vec3_t org, anchor;
+-	float  s = g->scale * (vkqvr_gunscale.value > 0.01f ? vkqvr_gunscale.value : 1.0f);
++	byte   enc;
++	float  s = g->scale * (vkqvr_gunscale.value > 0.01f ? vkqvr_gunscale.value : 1.0f) * (extraScale > 0.01f ? extraScale : 1.0f);
++	// QUANTISE FIRST, then derive the offsets from the size the model will
++	// ACTUALLY be drawn at. An entity's scale travels as a byte in 4.4 fixed
++	// point (ENTSCALE_ENCODE truncates to 1/16), so asking for 0.32 draws 0.3125
++	// — and R4 positioned the model by offsets computed from the REQUESTED
++	// scale while the renderer drew it at the quantised one. R5's HOLGEOMNOW
++	// measured the consequence directly: the super nailgun's holstered grip
++	// point missed its zone centre by 0.60 units, entirely from this. Deriving
++	// everything from the decoded value makes the placement exact, in the hand
++	// as well as on the hip.
++	enc = (byte)ENTSCALE_ENCODE (s);
++	s = ENTSCALE_DECODE (enc);
+ 	VectorCopy (hand, org);
+ 	if (vkq_vr_grip_anchor (view->model, s, anchor, NULL, NULL))
+ 	{
+@@ -7377,7 +7583,7 @@
+ 		VectorMA (org, s * -6.0f, fwd, org);
+ 		VectorMA (org, s * 7.0f, up, org);
+ 	}
+-	if (vkqvr_guntrim.value > 0.5f)
++	if (trims && vkqvr_guntrim.value > 0.5f)
+ 	{
+ 		VectorMA (org, g->trimf, fwd, org);
+ 		VectorMA (org, g->trimr, right, org);
+@@ -7390,9 +7596,14 @@
+ 	view->angles[PITCH] = -ang[PITCH];
+ 	view->angles[YAW] = ang[YAW];
+ 	view->angles[ROLL] = ang[ROLL];
+-	view->netstate.scale = (byte)ENTSCALE_ENCODE (s);
++	view->netstate.scale = enc; // the value the offsets above were derived from
+ }
+ 
++void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, const vec3_t hand, const vec3_t fwd, const vec3_t right, const vec3_t up, const float ang[3])
++{
++	VKQ_VR_MountWeaponEx (view, g, itembit, hand, fwd, right, up, ang, 1.0f, true);
++}
++
+ /*
+ ==================
+ VKQ_VR_LaserSight -- overlay 0019 (charter A8)
+@@ -7494,7 +7705,24 @@
+ 	if (cl.intermission || cls.demoplayback || cl.stats[STAT_HEALTH] <= 0 || !cl.worldmodel)
+ 		return false;
+ 	if (!VKQ_VR_MuzzleWorld (start, fwd))
+-		return false;
++	{
++		// overlay 0022 (R5 item 4) — GAMEPAD-ONLY VR had no reticle at all,
++		// because the muzzle is defined by a hand and there is no hand. The
++		// gamepad player aims with the head and the viewmodel is head-attached
++		// (R4 part 7), so the aim ray is the head's: same origin the centred
++		// weapon is mounted from, same direction the shot leaves along.
++		vec3_t o, f, r, u;
++		float  ang[3];
++		if (VKQ_VR_AimHandTracked ())
++			return false;
++		ang[PITCH] = vkq_vr_head_pitch;
++		ang[YAW] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
++		ang[ROLL] = 0.0f;
++		AngleVectors (ang, f, r, u);
++		vkq_vr_player_origin (o);
++		VectorMA (o, 20.0f, f, start);
++		VectorCopy (f, fwd);
++	}
+ 	VectorMA (start, VKQ_VR_LASER_RANGE, fwd, far_pt);
+ 	frac = CL_TraceLine (start, far_pt, end, normal, NULL);
+ 	if (hit)
+@@ -7510,6 +7738,56 @@
+ 	return true;
+ }
+ 
++/*
++==================
++VKQ_VR_CrosshairDebugString -- overlay 0022 (VR R5 item 4)
++
++Two rounds shipped a reticle that verified as NUMBERS (the aim trim moved the
++sent angles by exactly +-15 degrees, both data sets) and was invisible as PIXELS.
++The numbers were never wrong; nothing ever asked whether anything was drawn.
++
++So the reticle now reports itself: whether geometry was emitted, where it is,
++how far away, and — the number that actually matters — how big it is IN PIXELS
++of the eye render target, computed from this eye's own vertical tangents rather
++than from a guess about field of view. A sub-pixel reticle and a culled reticle
++and a reticle behind a wall are three different bugs, and this line separates
++them without a headset.
++==================
++*/
++int	   vkq_vr_xhair_drawn = 0; // geometry emitted on the LAST world pass
++int	   vkq_vr_xhair_hit = 0;
++int	   vkq_vr_xhair_dbg = 0; // drawn in debug mode
++vec3_t vkq_vr_xhair_pos = {0.0f, 0.0f, 0.0f};
++vec3_t vkq_vr_xhair_eye = {0.0f, 0.0f, 0.0f};
++float  vkq_vr_xhair_dist = 0.0f;  // units, eye -> reticle
++float  vkq_vr_xhair_arm = 0.0f;	  // arm half-extent, units at that distance
++float  vkq_vr_xhair_thick = 0.0f; // arm half-thickness, units
++int	   vkq_vr_xhair_verts = 0;
++float  vkq_vr_xhair_ndc[2] = {0.0f, 0.0f}; // normalised device coords of the centre
++int	   vkq_vr_xhair_onscreen = 0;		   // 1 inside the frame, 0 outside, -1 behind
++
++void VKQ_VR_CrosshairDebugString (char *out, int len)
++{
++	float tanspan, pxarm = 0.0f, pxthick = 0.0f;
++	if (!out || len <= 0)
++		return;
++	tanspan = vkq_vr_cur[0].tan_u - vkq_vr_cur[0].tan_d;
++	if (tanspan > 1e-4f && vkq_vr_xhair_dist > 1.0f && glheight > 0)
++	{
++		pxarm = (vkq_vr_xhair_arm / vkq_vr_xhair_dist) / tanspan * (float)glheight;
++		pxthick = (vkq_vr_xhair_thick / vkq_vr_xhair_dist) / tanspan * (float)glheight;
++	}
++	q_snprintf (
++		out, len,
++		"drawn=%d verts=%d mode=%s hit=%d onscreen=%d ndc=(%+.3f,%+.3f) px=(%.0f,%.0f) at=(%.1f,%.1f,%.1f) eye=(%.1f,%.1f,%.1f) dist=%.1fu (%.2fm) "
++		"arm=%.2fu thick=%.2fu -> %.1f px arm, %.1f px thick (eye %dx%d, vtan %.4f) cvar=%.0f",
++		vkq_vr_xhair_drawn, vkq_vr_xhair_verts, vkq_vr_xhair_dbg ? "DEBUG" : "normal", vkq_vr_xhair_hit, vkq_vr_xhair_onscreen, vkq_vr_xhair_ndc[0],
++		vkq_vr_xhair_ndc[1], (vkq_vr_xhair_ndc[0] * 0.5f + 0.5f) * (float)glwidth, (vkq_vr_xhair_ndc[1] * 0.5f + 0.5f) * (float)glheight,
++		vkq_vr_xhair_pos[0], vkq_vr_xhair_pos[1], vkq_vr_xhair_pos[2], vkq_vr_xhair_eye[0], vkq_vr_xhair_eye[1], vkq_vr_xhair_eye[2], vkq_vr_xhair_dist,
++		vkq_vr_xhair_dist / (vkq_vr_worldscale > 1.0f ? vkq_vr_worldscale : 39.37f), vkq_vr_xhair_arm, vkq_vr_xhair_thick, pxarm, pxthick, glwidth, glheight,
++		tanspan, vkqvr_crosshair.value);
++}
++
+ // ---------------------------------------------------------------------------
+ // overlay 0020 fix 1 — standing eye height, computed once per frame.
+ //
+@@ -7700,6 +7978,13 @@
+ static int vkq_vr_held_item[2];	   // by HAND: 0 = left, 1 = right. 0 = empty hand
+ static int vkq_vr_v2_started = 0; // seeded the aim hand from the server yet
+ 
++// overlay 0022 (R5 item 3) — the last frame's holster render geometry, kept so
++// the coincidence of "where it is drawn" and "where the hand must reach" is a
++// measurement rather than a comment. See VKQ_VR_HolsterGeomString.
++static vec3_t vkq_vr_hol_zone[2], vkq_vr_hol_org[2], vkq_vr_hol_err[2];
++static float  vkq_vr_hol_scale[2];
++static int	  vkq_vr_hol_live[2];
++
+ static qboolean vkq_vr_immersive (void) { return vkqvr_style.value >= 0.5f; }
+ static int		vkq_vr_held_item_get (int hand) { return (hand >= 0 && hand < 2) ? vkq_vr_held_item[hand] : 0; }
+ 
+@@ -7891,6 +8176,114 @@
+ 	return 1;
+ }
+ 
++/*
++==================
++VKQ_VR_HudIcon -- overlay 0022 (VR R5 item 5)
++
++Quake's OWN status-bar iconography, handed to the shell as RGBA.
++
++R4's head-locked HUD drew its own 3x5 glyphs, and the user's verdict on the result
++was blunt: "unclear" — a diamond, a number and a small box. The icons a Quake
++player recognises without thinking already exist, in gfx.wad, in every data set
++and in every mod that replaces them: the face, the armour plates, the four ammo
++boxes. Nothing needs to be authored, and a mod that ships its own sbar art gets
++its own art in VR for free.
++
++The shell cannot reach them the normal way — Draw_PicFromWad uploads to Vulkan
++and hands back a gltexture_t, and the HUD is a Metal texture the shell rasterises
++itself — so this reads the WAD lump directly and converts 8-bit indices through
++the live palette. Index 255 is Quake's transparent index (the same rule
++TEXPREF_ALPHA applies), so it becomes alpha 0 and the icon composites over the
++world instead of sitting in a box.
++
++Returns 0 (and touches nothing) when the lump is absent, which is a missing
++decoration rather than a failure: the HUD falls back to its own glyph.
++==================
++*/
++int VKQ_VR_HudIcon (const char *name, unsigned *out, int maxw, int maxh, int *ow, int *oh)
++{
++	lumpinfo_t *info = NULL;
++	qpic_t	   *p;
++	int			x, y, w, h;
++	if (!name || !out || maxw <= 0 || maxh <= 0)
++		return 0;
++	p = (qpic_t *)W_GetLumpName (name, &info);
++	if (!p || !info)
++		return 0;
++	w = LittleLong (p->width);
++	h = LittleLong (p->height);
++	if (w <= 0 || h <= 0 || w > maxw || h > maxh)
++		return 0;
++	// Same sanity check Draw_PicFromWad makes: the lump must actually hold the
++	// pixels its header claims (a truncated or mislabelled lump is a crash).
++	if ((size_t)info->size < (size_t) (w * h) + 8)
++		return 0;
++	for (y = 0; y < h; y++)
++		for (x = 0; x < w; x++)
++		{
++			const byte idx = p->data[y * w + x];
++			out[y * maxw + x] = (idx == 255) ? 0u : (d_8to24table[idx] | 0xFF000000u);
++		}
++	if (ow)
++		*ow = w;
++	if (oh)
++		*oh = h;
++	return 1;
++}
++
++/*
++==================
++VKQ_VR_HudIcons -- overlay 0022 (VR R5 item 5)
++
++Which sbar lumps the HUD wants THIS frame, chosen exactly the way sbar.c chooses
++them: the face by health band, the armour plate by which armour the player is
++actually wearing, the ammo box by the ammo type of the weapon in each hand.
++Writes up to four names (health, armour, ammo0, ammo1); an empty string means
++"nothing to draw here".
++==================
++*/
++void VKQ_VR_HudIcons (char *health, char *armour, char *ammo0, char *ammo1, int len)
++{
++	static const char *const kAmmo[4] = {"sb_shells", "sb_nails", "sb_rocket", "sb_cells"};
++	int						 t0 = -1, t1 = -1, f;
++	if (len <= 0)
++		return;
++	if (health)
++		health[0] = 0;
++	if (armour)
++		armour[0] = 0;
++	if (ammo0)
++		ammo0[0] = 0;
++	if (ammo1)
++		ammo1[0] = 0;
++	if (!vkq_vr_active || cls.state != ca_connected)
++		return;
++	// sbar.c's own banding: face1 is healthiest, face5 is nearly dead.
++	f = cl.stats[STAT_HEALTH];
++	if (health)
++		q_snprintf (health, len, "face%d", f >= 100 ? 1 : (f >= 80 ? 1 : (f >= 60 ? 2 : (f >= 40 ? 3 : (f >= 20 ? 4 : 5)))));
++	if (armour && cl.stats[STAT_ARMOR] > 0)
++	{
++		if (cl.items & IT_ARMOR3)
++			q_snprintf (armour, len, "sb_armor3");
++		else if (cl.items & IT_ARMOR2)
++			q_snprintf (armour, len, "sb_armor2");
++		else
++			q_snprintf (armour, len, "sb_armor1");
++	}
++	if (vkq_vr_immersive () && vkq_vr_have)
++	{
++		t0 = vkq_vr_ammo_type (vkq_vr_held_item_get (vkq_vr_aim_hand ()));
++		t1 = vkq_vr_ammo_type (vkq_vr_held_item_get (vkq_vr_off_hand ()));
++	}
++	else
++		t0 = vkq_vr_ammo_type (cl.stats[STAT_ACTIVEWEAPON]);
++	if (ammo0 && t0 >= 0 && t0 < 4)
++		q_snprintf (ammo0, len, "%s", kAmmo[t0]);
++	if (ammo1 && t1 >= 0 && t1 < 4)
++		q_snprintf (ammo1, len, "%s", kAmmo[t1]);
++}
++
+ int VKQ_VR_HeldItem (int hand) { return vkq_vr_held_item_get (hand); }
+ int VKQ_VR_HolsterItem (int zone) { return (zone >= 0 && zone < 2) ? vkq_vr_holster_item[zone] : 0; }
+ 
+@@ -7953,6 +8346,7 @@
+ {
+ 	const int aim = vkq_vr_aim_hand (), off = vkq_vr_off_hand ();
+ 	int		  n = 0, z;
++	vkq_vr_hol_live[0] = vkq_vr_hol_live[1] = 0;
+ 	if (!vkq_vr_active || !vkq_vr_have || !vkq_vr_immersive () || max <= 0)
+ 		return 0;
+ 	if (cl.intermission || cl.stats[STAT_HEALTH] <= 0)
+@@ -8000,7 +8394,9 @@
+ 		// EXACTLY the transform a hand pose takes (vkq_vr_hand_world): the zone
+ 		// centre is published in the same player frame the hand positions are,
+ 		// so the model and the in-zone test cannot disagree about where the
+-		// holster is. That equality is the whole reason to reuse it.
++		// holster is. That equality is the whole reason to reuse it — and R5 had
++		// to make it true, because R4 then applied two hand-frame corrections on
++		// top of it (see VKQ_VR_MountWeaponEx).
+ 		vkq_vr_zone_centre (z, c);
+ 		vkq_vr_player_to_world_dir (c, wc);
+ 		vkq_vr_player_origin (org);
+@@ -8014,14 +8410,83 @@
+ 			right[0] = 1.0f, right[1] = 0.0f, right[2] = 0.0f;
+ 		VectorNormalize (right);
+ 		CrossProduct (right, fwd, up);
+-		vkq_vr_angles_from_basis (fwd, right, up, ang);
+-		VKQ_VR_MountWeapon (e, vkq_vr_gun_entry_for (vkq_vr_holster_item[z]), vkq_vr_holster_item[z], org, fwd, right, up, ang);
++		// overlay 0022 (R5 item 3) — ANGLES, NOT A BASIS. `fwd` here is exactly
++		// (0,0,-1), and vkq_vr_angles_from_basis is GIMBAL-LOCKED there:
++		// atan2(fwd[1], fwd[0]) is atan2(0,0) and the yaw comes out 0 no matter
++		// which way the body is facing, while the OFFSETS above were computed
++		// from a correctly yawed basis. Position and orientation therefore came
++		// from two different frames, and the holstered gun kept a fixed world
++		// facing while its mounting point rotated with the player. The angles are
++		// exact here and need no inference: pitch 90 (barrel down), yaw = the
++		// body yaw, roll 0 — which reproduces this basis by construction.
++		ang[PITCH] = 90.0f;
++		ang[YAW] = anglemod (vkq_vr_body_yaw);
++		ang[ROLL] = 0.0f;
+ 		// Holster scale: smaller than in the hand, so a stowed weapon reads as
+-		// stowed and two of them do not collide with the player's own legs.
+-		e->netstate.scale = (byte)ENTSCALE_ENCODE (0.62f * ENTSCALE_DECODE (e->netstate.scale));
++		// stowed and two of them do not collide with the player's own legs — but
++		// folded into the mount rather than multiplied in afterwards, and with
++		// the hand trims off. the user asked for bigger; the default is 0.80 where
++		// R4 shipped 0.62.
++		VKQ_VR_MountWeaponEx (
++			e, vkq_vr_gun_entry_for (vkq_vr_holster_item[z]), vkq_vr_holster_item[z], org, fwd, right, up, ang,
++			CLAMP (0.3f, vkqvr_holscale.value, 1.5f), false);
++		// overlay 0022 (R5 item 3) — MEASURE the claim instead of asserting it in
++		// a comment. Recover the grip point from what was actually written to the
++		// entity and record how far it is from the zone centre the hand has to
++		// reach. R4's comment said these could not disagree; they disagreed by
++		// several units, and nothing anywhere could have noticed.
++		{
++			vec3_t		anchor, gp;
++			const float sdec = ENTSCALE_DECODE (e->netstate.scale);
++			VectorCopy (e->origin, gp);
++			if (vkq_vr_grip_anchor (e->model, sdec, anchor, NULL, NULL))
++			{
++				VectorMA (gp, sdec * anchor[0], fwd, gp);
++				VectorMA (gp, -sdec * anchor[1], right, gp);
++				VectorMA (gp, sdec * anchor[2], up, gp);
++			}
++			VectorSubtract (gp, org, vkq_vr_hol_err[z]);
++			VectorCopy (org, vkq_vr_hol_zone[z]);
++			VectorCopy (e->origin, vkq_vr_hol_org[z]);
++			vkq_vr_hol_scale[z] = sdec;
++			vkq_vr_hol_live[z] = 1;
++		}
+ 		n++;
+ 	}
+ 	return n;
++}
++
++/*
++==================
++VKQ_VR_HolsterGeomString -- overlay 0022 (R5 item 3)
++
++The render/detection coincidence, as a number a harness can assert on. `err` is
++the vector from the zone centre (where the hand must go) to the drawn weapon's
++grip point (where the hand looks like it should go). It is the whole bug, and
++the fix is that it is now zero.
++==================
++*/
++void VKQ_VR_HolsterGeomString (char *out, int len)
++{
++	int n = 0, z;
++	if (!out || len <= 0)
++		return;
++	out[0] = 0;
++	n += q_snprintf (
++		out + n, len - n, "holsize=%.2f holfwd=%.2fm zones=%s |", CLAMP (0.3f, vkqvr_holscale.value, 1.5f), CLAMP (-0.4f, vkqvr_holfwd.value, 0.4f),
++		vkq_vr_immersive () ? "immersive" : "convenience");
++	for (z = 0; z < 2 && n < len - 1; z++)
++	{
++		if (!vkq_vr_hol_live[z])
++		{
++			n += q_snprintf (out + n, len - n, " %s: empty", z ? "lhip" : "rhip");
++			continue;
++		}
++		n += q_snprintf (
++			out + n, len - n, " %s: zone=(%.1f,%.1f,%.1f) model=(%.1f,%.1f,%.1f) scale=%.2f err=(%.2f,%.2f,%.2f) |err|=%.2fu", z ? "lhip" : "rhip",
++			vkq_vr_hol_zone[z][0], vkq_vr_hol_zone[z][1], vkq_vr_hol_zone[z][2], vkq_vr_hol_org[z][0], vkq_vr_hol_org[z][1], vkq_vr_hol_org[z][2],
++			vkq_vr_hol_scale[z], vkq_vr_hol_err[z][0], vkq_vr_hol_err[z][1], vkq_vr_hol_err[z][2], VectorLength (vkq_vr_hol_err[z]));
++	}
+ }
+ 
+ // Convenience is untouched by all of this: it never consults held_item, so the
+@@ -8064,6 +8529,15 @@
+ static void vkq_vr_zone_centre (int z, float out[3])
+ {
+ 	const float ws = vkq_vr_worldscale;
++	// overlay 0022 (R5 item 3) — "Holster Forward". The player frame's origin is
++	// the LEVELLED HEAD at the last recentre, and a body's belt line is not
++	// directly under a head: how far forward depends on posture and on how the
++	// player was standing when they recentred. The single knob that fixes a
++	// belt that reads too far forward (or too far back) therefore moves the ZONE
++	// FRAME — which moves the drawn model and the place the hand has to reach by
++	// the same amount, because both read this function. +Z is BACK in the player
++	// frame, so a positive (forward) setting subtracts.
++	const float fwd = -CLAMP (-0.4f, vkqvr_holfwd.value, 0.4f) * ws;
+ 	switch (z)
+ 	{
+ 	case VKQ_VR_ZONE_RHIP:
+@@ -8082,6 +8556,7 @@
+ 		out[0] = vkqvr_chest_x.value * ws, out[1] = vkqvr_chest_y.value * ws, out[2] = vkqvr_chest_z.value * ws;
+ 		break;
+ 	}
++	out[2] += fwd;
+ }
+ 
+ static float vkq_vr_zone_radius (int z)
+--- a/Quake/r_part.c
++++ b/Quake/r_part.c
+@@ -1062,75 +1062,256 @@
+ rather than soft blobs.
+ ===============
+ */
+-static float R_VRCrosshairEyeDist (const vec3_t p)
+-{
+-	vec3_t d;
+-	VectorSubtract (p, r_origin, d);
+-	return VectorLength (d);
+-}
++/*
++===============
++R5 ITEM 4 — WHY THE RETICLE WAS NOT THERE.
++
++Two rounds in a row the user reported no crosshair on device, and the simulator
++passed both times because it only ever asserted the aim NUMBERS. Three defects,
++all in this function, and the first one is the one that made it unmissable:
++
++1. BACK-FACE CULLING ATE HALF OF IT. The particle pipeline is created from
++   R_InitDefaultStates, which sets cullMode = VK_CULL_MODE_BACK_BIT with
++   frontFace = CLOCKWISE (gl_rmisc.c R_CreateParticlesPipelines only overrides
++   depth test and blending). Real particles are emitted as (org, org+up,
++   org+right) — clockwise in the (vright, vup) plane, hence front-facing. R4's
++   reticle built its four arms with a `sign` flip on the horizontal pair and an
++   AXIS SWAP on the vertical pair, and each of those mirrors the winding: the
++   right arm and the down arm came out counter-clockwise and were discarded by
++   the rasterizer. What survived was two thin strokes meeting at a gap, which is
++   not a shape anybody recognises as a crosshair.
+ 
++2. IT WAS ~1 PIXEL THICK. The half-thickness was 0.0011 rad, i.e. 0.13 degrees
++   across — around three pixels at the eye target's angular resolution before
++   the foveal upscale, on top of arms that were half missing.
++
++3. IT WAS SIZED FROM THE WRONG POINT. `r_origin` is r_refdef.vieworg — Quake's
++   own 46-unit eye, which in VR sits near the player's navel and does not carry
++   the head's positional tracking at all. Angular sizing measured from there is
++   wrong by tens of units at exactly the close range where it matters most.
++
++The rebuild below fixes all three: one winding for all four arms (the arm basis
++is rotated by 90 degrees each time, which is a proper rotation and therefore
++preserves handedness), a thicker default, and the real eye position published by
++VKQ_VR_ComposeView. It also stops depending on `r_particles`: the reticle
++sampled the CENTRE of whatever particle texture was bound, and with
++`r_particles 2` (the menu's "Classic" setting) that texture is 2x2 with three of
++its four texels at alpha 0 — a player who had ever chosen Classic particles
++would have seen nothing whatsoever. It binds particle texture 1 explicitly now.
++===============
++*/
+ static void R_DrawVRCrosshairGeometry (cb_context_t *cbx)
+ {
+ 	extern qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit);
+-	vec3_t			start, end, normal, ctr;
++	extern float	vkq_vr_eye_world[3];
++	extern float	vkq_vr_worldscale;
++	extern cvar_t	vkqvr_xhairdebug, vkqvr_xhairsize, vkqvr_xhairthick;
++	extern int		vkq_vr_xhair_drawn, vkq_vr_xhair_hit, vkq_vr_xhair_dbg, vkq_vr_xhair_verts;
++	extern vec3_t	vkq_vr_xhair_pos, vkq_vr_xhair_eye;
++	extern float	vkq_vr_xhair_dist, vkq_vr_xhair_arm, vkq_vr_xhair_thick;
++	// R5.1 — WHERE ON THE SCREEN. The first R5 build reported drawn=1 with a
++	// 172-pixel arm and put ZERO pixels on the display, and nothing in the
++	// diagnostic could distinguish "discarded by the rasterizer" from "drawn
++	// perfectly, off the side of the frame" or "behind the parked window card".
++	// A world position is not a screen position; this is the screen position.
++	extern float	vkq_vr_xhair_ndc[2];
++	extern int		vkq_vr_xhair_onscreen;
++	vec3_t			start, end, normal, ctr, eye, look, cr, cu;
+ 	basicvertex_t  *v;
+ 	VkBuffer		vbuf;
+ 	VkDeviceSize	voff;
+ 	float			dist, arm, gap, half;
+ 	int				n = 0, hit = 0, seg, i;
++	const int		debug = vkqvr_xhairdebug.value >= 0.5f;
+ 	// Warm white when it has something to hit, dimmer and slightly smaller when
+ 	// it is pointing at sky - so "there is nothing there" is legible without the
+ 	// reticle ever disappearing, which is what made the laser untrustworthy.
++	// DEBUG mode is pure magenta, which no Quake palette entry sits near, so a
++	// screenshot can be grepped for it (scripts/sim-verify-vr.sh).
+ 	const byte hit_c[4] = {255, 235, 190, 255};
+-	const byte sky_c[4] = {150, 150, 150, 170};
++	const byte sky_c[4] = {150, 150, 150, 190};
++	const byte dbg_c[4] = {255, 0, 255, 255};
+ 	// Angular sizes, in radians of half-extent at the reticle's own distance.
+-	// 0.010 rad is about 0.6 deg of arm, roughly the apparent size of the
++	// 0.011 rad is about 0.63 deg of arm, roughly the apparent size of the
+ 	// classic 320x200 crosshair, and small enough never to cover the target.
+-	const float kArm = 0.0100f;
+-	const float kGap = 0.0034f;
+-	const float kHalf = 0.0011f; // arm half-thickness
++	const float kArm = debug ? 0.090f : q_max (0.002f, vkqvr_xhairsize.value);
++	const float kHalf = debug ? 0.020f : q_max (0.0004f, vkqvr_xhairthick.value);
++	const float kGap = kArm * 0.32f;
+ 
++	vkq_vr_xhair_drawn = 0;
++	vkq_vr_xhair_verts = 0;
++	vkq_vr_xhair_dbg = debug;
++
+ 	if (!VKQ_VR_AimTrace (start, end, normal, &hit))
+ 		return;
+ 
+-	// Lift off the surface so the reticle is not z-fighting the wall it is on.
+-	VectorMA (end, hit ? 0.6f : 0.0f, normal, ctr);
+-	dist = R_VRCrosshairEyeDist (ctr);
++	VectorCopy (vkq_vr_eye_world, eye);
++	if (debug)
++	{
++		// 2 m along the aim ray — OR just short of whatever is nearer, because a
++		// debug marker buried inside the wall you are standing next to is exactly
++		// as invisible as the bug it is meant to expose, and would have been read
++		// as one.
++		vec3_t dir;
++		float  want, reach;
++		VectorSubtract (end, start, dir);
++		reach = VectorNormalize (dir);
++		if (reach < 0.01f)
++			return;
++		want = 2.0f * (vkq_vr_worldscale > 1.0f ? vkq_vr_worldscale : 39.37f);
++		if (hit && reach - 2.0f < want)
++			want = q_max (8.0f, reach - 2.0f);
++		VectorMA (start, want, dir, ctr);
++		hit = 1;
++	}
++	else
++	{
++		// Lift off the surface so the reticle is not z-fighting the wall it is
++		// on. A FIXED 0.6 units is a fixed 1.5 cm however far away the surface
++		// is, which at 40 m is well inside the depth buffer's own resolution;
++		// scaling it with distance keeps the same bias in DEPTH terms.
++		vec3_t d0;
++		float  lift;
++		VectorSubtract (end, vkq_vr_eye_world, d0);
++		lift = q_max (1.0f, 0.006f * VectorLength (d0));
++		VectorMA (end, hit ? lift : 0.0f, normal, ctr);
++	}
++
++	VectorSubtract (ctr, eye, look);
++	dist = VectorLength (look);
+ 	if (dist < 1.0f)
+ 		return;
+ 	arm = kArm * dist * (hit ? 1.0f : 0.8f);
+ 	gap = kGap * dist;
+-	half = q_max (0.03f, kHalf * dist);
++	half = q_max (0.05f, kHalf * dist);
+ 
+-	v = (basicvertex_t *)R_VertexAllocate (24 * sizeof (basicvertex_t), &vbuf, &voff);
++	// A basis that faces the EYE, not the aim axis. In VR the two are different —
++	// the hand is half a metre off the eye line — and a reticle built in the aim
++	// frame foreshortens as the hand swings away from the head.
++	{
++		vec3_t wup = {0.0f, 0.0f, 1.0f};
++		VectorScale (look, 1.0f / dist, look);
++		CrossProduct (look, wup, cr);
++		if (VectorLength (cr) < 0.05f)
++		{
++			VectorCopy (vright, cr);
++			VectorCopy (vup, cu);
++		}
++		else
++		{
++			VectorNormalize (cr);
++			CrossProduct (cr, look, cu);
++			VectorNormalize (cu);
++		}
++	}
+ 
+-	// Four arms of a plus, built in the eye's own right/up basis so the reticle
+-	// always faces the viewer and never foreshortens on an angled wall.
++	// DOUBLE-SIDED, 48 vertices. The particle pipeline is created with
++	// VK_CULL_MODE_BACK_BIT, and which winding counts as front depends on a
++	// chain of conventions — the engine's Y-flipped projection, Vulkan's
++	// framebuffer-space definition of clockwise, and Quake's left-handed view
++	// basis. R5's first build reasoned that chain out, made all four arms share
++	// one winding, and still put nothing on the screen. A camera-facing reticle
++	// has no meaningful back face, so it emits BOTH windings and the question
++	// stops being load-bearing: four extra triangles, once per eye, against a
++	// bug that has now cost three rounds.
++	v = (basicvertex_t *)R_VertexAllocate (48 * sizeof (basicvertex_t), &vbuf, &voff);
++
++	// Four arms of a plus. Each arm has its own (along, across) basis, and the
++	// four are successive 90-degree rotations of (cr, cu) — a proper rotation, so
++	// every arm has the SAME handedness and therefore the same winding, which is
++	// what defect 1 above was about. Vertex order is clockwise in that basis, to
++	// match R_DrawParticlesFaces' own front-facing triangle.
+ 	for (seg = 0; seg < 4; seg++)
+ 	{
+-		static const float qx[6] = {-1, 1, 1, -1, 1, -1};
+-		static const float qy[6] = {-1, -1, 1, -1, 1, 1};
+-		const int		   horiz = (seg < 2);
+-		const float		   sign = (seg & 1) ? 1.0f : -1.0f;
++		static const float ax[4] = {1.0f, 0.0f, -1.0f, 0.0f};  // along, in (cr, cu)
++		static const float ay[4] = {0.0f, 1.0f, 0.0f, -1.0f};
++		static const float qa[6] = {0, 0, 1, 0, 1, 1};		 // clockwise quad
++		static const float qc[6] = {-1, 1, 1, -1, 1, -1};
++		vec3_t			   au, aw;
+ 		const float		   lo = gap, hi = gap + arm;
+-		for (i = 0; i < 6; i++)
++		// along = R(90*seg) . cr ; across = R(90*seg) . cu
++		for (i = 0; i < 3; i++)
+ 		{
+-			float  along = sign * (qx[i] < 0.0f ? lo : hi);
+-			float  across = qy[i] * half;
+-			vec3_t p;
+-			int	   k;
+-			VectorMA (ctr, horiz ? along : across, vright, p);
+-			VectorMA (p, horiz ? across : along, vup, p);
++			au[i] = ax[seg] * cr[i] + ay[seg] * cu[i];
++			aw[i] = -ay[seg] * cr[i] + ax[seg] * cu[i];
++		}
++		for (i = 0; i < 12; i++)
++		{
++			// 0-5 = one winding, 6-11 = the same two triangles reversed.
++			const int	j = (i < 6) ? i : (11 - i);
++			const float along = (qa[j] > 0.5f) ? hi : lo;
++			const float across = qc[j] * half;
++			vec3_t		p;
++			int			k;
++			VectorMA (ctr, along, au, p);
++			VectorMA (p, across, aw, p);
+ 			v[n].position[0] = p[0], v[n].position[1] = p[1], v[n].position[2] = p[2];
+-			v[n].texcoord[0] = 0.5f, v[n].texcoord[1] = 0.5f;
++			// ****** THE BUG. THREE ROUNDS. ONE TEXEL. ******
++			//
++			// R4 sampled uv (0.5, 0.5) and called it "the texture's white centre".
++			// It is not. R_ParticleTextureLookup subtracts 16 from x and y — its
++			// own comment says it generates a "32x32 circle" — but
++			// R_InitParticleTextures loops x,y over 0..63 and uploads the result as
++			// a 64x64 texture. So the disc sits in the TOP-LEFT QUADRANT, centred on
++			// texel (16,16) with a radius of 16, and the middle of the texture is
++			// past its edge:
++			//
++			//     lookup(32,32) -> r = 16*16 + 16*16 = 512, clamped to 255
++			//                   -> a = 8 * (255 - 255) = 0        <- ALPHA ZERO
++			//
++			// Every reticle this project has ever drawn has been geometrically
++			// perfect and completely transparent. That is why R4 was invisible on
++			// device, why R5's first build was invisible after the winding fix, and
++			// why the diagnostic could keep reporting drawn=1, 48 verts, onscreen=1,
++			// px=(3045,800), 172 px arms — all true, all of it invisible.
++			//
++			// Real particles never hit it because their quads span uv 0..1 (or
++			// 0..0.5) and therefore cover the disc where it actually lives.
++			//
++			// 16.5/64 is the centre of texel (16,16): the one texel that is fully
++			// opaque. It is also inside texel (0,0) of the 2x2 "Classic" particle
++			// texture, whose other three texels are transparent — so this single
++			// constant is correct for both, and the explicit particletexture1 bind
++			// below is belt-and-braces rather than the fix.
++			v[n].texcoord[0] = 16.5f / 64.0f, v[n].texcoord[1] = 16.5f / 64.0f;
+ 			for (k = 0; k < 4; k++)
+-				v[n].color[k] = hit ? hit_c[k] : sky_c[k];
++				v[n].color[k] = debug ? dbg_c[k] : (hit ? hit_c[k] : sky_c[k]);
+ 			n++;
+ 		}
+ 	}
+ 
+ 	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &vbuf, &voff);
+ 	vulkan_globals.vk_cmd_draw (cbx->cb, n, 1, 0, 0);
++
++	vkq_vr_xhair_drawn = 1;
++	vkq_vr_xhair_verts = n;
++	vkq_vr_xhair_hit = hit;
++	VectorCopy (ctr, vkq_vr_xhair_pos);
++	VectorCopy (eye, vkq_vr_xhair_eye);
++	vkq_vr_xhair_dist = dist;
++	vkq_vr_xhair_arm = arm;
++	vkq_vr_xhair_thick = half;
++	// Project the reticle's centre through the SAME matrix the draw used, so
++	// the diagnostic reports where on the screen it lands rather than where in
++	// the world it is. Column-major [col*4+row], w = -z_view.
++	{
++		const float *m = vulkan_globals.view_projection_matrix;
++		const float	 cx = m[0] * ctr[0] + m[4] * ctr[1] + m[8] * ctr[2] + m[12];
++		const float	 cy = m[1] * ctr[0] + m[5] * ctr[1] + m[9] * ctr[2] + m[13];
++		const float	 cw = m[3] * ctr[0] + m[7] * ctr[1] + m[11] * ctr[2] + m[15];
++		if (cw > 1e-4f)
++		{
++			vkq_vr_xhair_ndc[0] = cx / cw;
++			vkq_vr_xhair_ndc[1] = cy / cw;
++			vkq_vr_xhair_onscreen =
++				(vkq_vr_xhair_ndc[0] > -1.0f && vkq_vr_xhair_ndc[0] < 1.0f && vkq_vr_xhair_ndc[1] > -1.0f && vkq_vr_xhair_ndc[1] < 1.0f) ? 1 : 0;
++		}
++		else
++		{
++			vkq_vr_xhair_ndc[0] = vkq_vr_xhair_ndc[1] = 0.0f;
++			vkq_vr_xhair_onscreen = -1; // behind the eye
++		}
++	}
+ }
+ 
+ void R_DrawVRLaser (cb_context_t *cbx)
+@@ -1144,8 +1325,12 @@
+ 		R_PipelineForRenderPass (
+ 			cbx->render_pass_index, vulkan_globals.particle_pipeline, vulkan_globals.particle_oit_pipeline, vulkan_globals.particle_mboit_moment_pipeline,
+ 			vulkan_globals.particle_mboit_composite_pipeline));
++	// particletexture1 explicitly, NOT `particletexture`: the latter follows
++	// r_particles, and the "Classic" setting points it at a 2x2 texture whose
++	// centre texel is transparent (see the note above R_DrawVRCrosshairGeometry).
+ 	vulkan_globals.vk_cmd_bind_descriptor_sets (
+-		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &particletexture->descriptor_set, 0, NULL);
++		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1,
++		&(particletexture1 ? particletexture1 : particletexture)->descriptor_set, 0, NULL);
+ 	R_DrawVRCrosshairGeometry (cbx);
+ 	R_EndDebugUtilsLabel (cbx);
+ }
+--- a/Quake/gl_model.c
++++ b/Quake/gl_model.c
+@@ -3880,8 +3880,10 @@
+ typedef struct
+ {
+ 	int	   valid;		// 1 = mins/maxs/grip usable
+-	int	   nflash;		// parked-flash vertices found
+-	int	   nposes;		// poses in which they were parked (and collapsed)
++	int	   nflash;		// muzzle-flash vertices found (identified in the IDLE pose)
++	int	   nposes;		// poses in which they are collapsed (R5: all of them)
++	int	   nhidden;		// of those, how many had it PARKED behind the origin
++	float  firemax;		// furthest forward a firing pose threw the flash, model x
+ 	vec3_t mins, maxs;	// idle-pose bounds, flash excluded
+ 	vec3_t grip;		// (rear x, rear-slab y, rear-slab z)
+ } vkq_vm_result_t;
+@@ -3967,12 +3969,33 @@
+ 	}
+ 	out->nflash = ncand;
+ 
+-	// Which poses have it parked: entirely behind the origin AND behind every
+-	// retained vertex the model ever shows. Both, so a weapon whose own body
+-	// reaches behind the origin (the shotgun's does) still gets a correct
+-	// answer.
++	// overlay 0022 (VR R5, the user 2026-08-10) — EVERY POSE, not just the parked
++	// ones.
++	//
++	// R4 collapsed the flash only where the rule said it was hidden, on the
++	// reasoning that "the muzzle flash still comes out of the barrel" was the
++	// half worth keeping. On device it is not: firing the nailgun and the rocket
++	// launcher put two large orange flames DOWN BESIDE THE PLAYER'S BODY, well
++	// away from the weapon (the user's screenshot, 1.0.7.7). The reason is that
++	// these models' firing poses do not move the flash to the muzzle at all —
++	// they move it forward relative to the model, and the model is a 0.40-0.45
++	// scale weapon anchored by its GRIP, so "forward of the model origin" lands
++	// between the fist and the shoulder rather than at the barrel. Baked
++	// 1996 flash geometry has no defensible position once the weapon leaves the
++	// camera.
++	//
++	// the user's standing verdict — "these are unnecessary regardless, we don't
++	// need it at all" — so the identification set (which still comes only from
++	// the IDLE-pose rule above, unchanged and still exact against the MD5 joint
++	// names) is now applied unconditionally. The real muzzle-flash dlight and the
++	// real, barrel-true projectile entities provide the firing feedback; they
++	// always did, and they are the ones that are actually at the muzzle.
++	//
++	// `parked` keeps its name and its meaning for the log: it still records which
++	// poses HID the flash, so the notes can say where each model animated it to.
+ 	if (ncand)
+ 	{
++		float fwdmax = -1e30f;
+ 		for (p = 0; p < nposes; p++)
+ 			for (i = 0; i < nverts; i++)
+ 				if (!flash[i] && px[p * nverts + i] < lim)
+@@ -3986,11 +4009,13 @@
+ 				if (flash[i] && px[p * nverts + i] > fmax)
+ 					fmax = px[p * nverts + i];
+ 			if (fmax < lim)
+-			{
+-				parked[p] = 1;
+-				out->nposes++;
+-			}
++				out->nhidden++;
++			else if (fmax > fwdmax)
++				fwdmax = fmax; // how far forward a firing pose threw it
++			parked[p] = 1;	   // collapse in EVERY pose
++			out->nposes++;
+ 		}
++		out->firemax = (fwdmax > -1e29f) ? fwdmax : 0.0f;
+ 	}
+ 
+ 	// Bounds and grip axis from the idle pose, flash excluded.
+@@ -4054,10 +4079,15 @@
+ 	VectorCopy (r->mins, h->vr_min);
+ 	VectorCopy (r->maxs, h->vr_max);
+ 	VectorCopy (r->grip, h->vr_grip);
++	// Con_DPrintf: `developer 1` turns the whole eight-model audit into console
++	// lines the simulator harness can assert on, without spamming a player's
++	// console on every map load.
+ 	if (r->valid)
+ 		Con_DPrintf (
+-			"VR viewmodel %s: bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f) grip (%.1f %.1f %.1f) flash %d verts in %d poses\n", name, r->mins[0], r->mins[1],
+-			r->mins[2], r->maxs[0], r->maxs[1], r->maxs[2], r->grip[0], r->grip[1], r->grip[2], r->nflash, r->nposes);
++			"VR viewmodel %s: bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f) grip (%.1f %.1f %.1f) flash %d verts culled in %d/%d poses (%d parked, firing poses "
++			"reach x=%.1f)\n",
++			name, r->mins[0], r->mins[1], r->mins[2], r->maxs[0], r->maxs[1], r->maxs[2], r->grip[0], r->grip[1], r->grip[2], r->nflash, r->nposes, r->nposes,
++			r->nhidden, r->firemax);
+ }
+ #endif // VKQ_VISIONOS
+ 
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -464,6 +464,30 @@
+ 	int			   i;
+ 	const float	   stickthreshold = 0.9;
+ 	const float	   triggerthreshold = joy_deadzone_trigger.value;
++
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0022 (VR R5 item 1) — PSVR2 Sense controllers navigate
++	// everything a gamepad can, in every mode.
++	//
++	// This is the exact function ericw's comment below points at ("allow joysticks
++	// to add keys so they can be used to confirm SCR_ModalMessage"): it is called
++	// once per host frame AND once per iteration of the modal pump, which is the
++	// only place in the engine with both properties. Before R5 the Sense pair
++	// reached the engine solely through VKQ_VR_ApplyHandInput, i.e. only from
++	// CL_AccumulateCmd, i.e. only while a VR world frame was running — so the
++	// controllers were dead in 2D, dead in the 3D panel, and dead inside the modal
++	// that blocks CL_AccumulateCmd. That is the general gap behind the soft-lock,
++	// and it is closed here rather than at any of the three symptoms.
++	//
++	// ABOVE the joy_enable / joy_active_controller early-outs on purpose: the
++	// Sense pair is deliberately NOT an SDL gamepad (charter A10's SDL filter), so
++	// gating it on SDL's joystick state would make it depend on hardware it is
++	// defined not to be.
++	{
++		extern void VKQ_VR_UIInputPump (void);
++		VKQ_VR_UIInputPump ();
++	}
++#endif
+ 
+ 	if (!joy_enable.value)
+ 		return;

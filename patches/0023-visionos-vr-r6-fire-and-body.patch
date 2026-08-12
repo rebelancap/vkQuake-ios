@@ -1,0 +1,1326 @@
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -6121,6 +6121,30 @@
+ // slider that moved only the drawn model would re-create the bug it exists to
+ // work around.
+ cvar_t vkqvr_holfwd = {"vkqvr_holfwd", "0", CVAR_NONE};
++// overlay 0023 (R6 part A2) — per-WEAPON refire clocks. DEFAULT ON, and what
++// they actually buy is not what the brief predicted.
++//
++// The brief expected them to stop the rocket launcher's 0.8 s refire throttling
++// the other hand's nailgun. That is not what they do — the nailgun's repeat fire
++// is a QC think chain that never reads attack_finished, so its cadence is not
++// clock-bound at all. What they do is more fundamental: `W_WeaponFrame` returns
++// ABOVE ImpulseCommands while the refire clock is ahead, so with ONE shared
++// clock the other hand's weapon switch is not merely delayed, it is never READ —
++// and the off hand fires nothing whatsoever. Giving each weapon its own clock is
++// what lets a pending switch be seen while the previous weapon is still cooling.
++//
++// Measured, nailgun + rocket launcher, both triggers held:
++//     per-weapon clocks ON   both hands fire (nailgun ~3.5/s, RL ~2.3/s)
++//     shared clock (A1 only) the off hand fires ZERO rockets
++//
++// It disables itself automatically when a mod's progs has no attack_finished
++// field, so this cvar is the manual kill switch rather than the availability
++// test.
++cvar_t vkqvr_dualclock = {"vkqvr_dualclock", "1", CVAR_NONE};
++// overlay 0023 (R6 part B1) — how fast the holster body frame chases the head
++// yaw, and how far it lets the head turn before chasing at all.
++cvar_t vkqvr_torsorate = {"vkqvr_torsorate", "90", CVAR_NONE};
++cvar_t vkqvr_torsodead = {"vkqvr_torsodead", "10", CVAR_NONE};
+ 
+ void VKQ_VR_RegisterCvars (void)
+ {
+@@ -6146,6 +6170,9 @@
+ 	Cvar_RegisterVariable (&vkqvr_xhairthick);
+ 	Cvar_RegisterVariable (&vkqvr_holscale);
+ 	Cvar_RegisterVariable (&vkqvr_holfwd);
++	Cvar_RegisterVariable (&vkqvr_dualclock);
++	Cvar_RegisterVariable (&vkqvr_torsorate);
++	Cvar_RegisterVariable (&vkqvr_torsodead);
+ 	Cvar_RegisterVariable (&vkqvr_flick_y);
+ 	Cvar_RegisterVariable (&vkqvr_flick_x);
+ 	Cvar_RegisterVariable (&vkqvr_flick_off);
+@@ -6194,7 +6221,7 @@
+ float	 VKQ_VR_WeaponMuzzle (void);
+ qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
+ qboolean VKQ_VR_AimRay (vec3_t org, vec3_t dir);
+-void	 VKQ_VR_Haptic (int hand, float strength, float duration);
++void	 VKQ_VR_Haptic (int hand, float strength, float duration, const char *why);
+ // overlay 0020 — R3's grip machine, driven from VKQ_VR_ApplyHandInput below and
+ // defined at the end of the file with the rest of the holster geometry.
+ static void VKQ_VR_UpdateHolsters (double now);
+@@ -6212,13 +6239,419 @@
+ void			VKQ_VR_CycleWeapon (qboolean next);
+ int				VKQ_VR_HideViewent (void);
+ void			VKQ_VR_ImmersiveReset (const char *why);
++// overlay 0023 (R6 part A) — the fire scheduler drives the same button latch the
++// rest of the input path does, and is defined above it.
++static void vkq_vr_hold (kbutton_t *b, qboolean down);
+ 
+ // The hand a shot leaves from THIS frame. Normally the aim hand; in Immersive
+ // dual wield it is whichever trigger is firing, so aim, muzzle, crosshair and
+ // the barrel-true projectile origin all follow the hand that pulled. One
+ // accessor, so they cannot disagree.
+ static int vkq_vr_active_hand (void) { return (vkq_vr_shoot_hand >= 0) ? vkq_vr_shoot_hand : vkq_vr_aim_hand (); }
++
++// ============================================================================
++// overlay 0023 — R6 part A: THE FIRE SCHEDULER
++//
++// R4/R5 fired from a bare latch (`vkq_vr_shoot_hand`) that was recomputed from
++// scratch every frame: aim hand first, off hand only if the aim hand was idle.
++// the user reported both of the defects that shape implies.
++//
++// BUG 1 — "if I'm shooting the nail gun with my right hand it won't let me
++// shoot with my left". The aim hand wins the `if` every frame it is held, so the
++// off hand is never selected while the aim trigger is down. The off hand was not
++// starved by an arbitration policy; there was no arbitration.
++//
++// BUG 2 — the cross-fire: a nail out of the rocket launcher while only the LEFT
++// trigger was held. This one is a race, and it is worth writing down because the
++// shape recurs anywhere an impulse and a button share a usercmd.
++//
++//   * stock weapons.qc: W_WeaponFrame runs ImpulseCommands() and THEN tests
++//     self.button0, in that order, in one frame. A queued weapon switch is
++//     therefore consumed by the same frame that services a held trigger.
++//   * an unprocessed impulse PERSISTS: SV_ReadClientMove only writes
++//     ent->v.impulse when the incoming byte is nonzero, and QC clears it in
++//     ImpulseCommands. So an impulse we sent frames ago can still be sitting on
++//     the edict.
++//   * W_WeaponFrame's FIRST line is `if (time < self.attack_finished) return;`,
++//     so while a refire clock is running the impulse is not even read — it waits.
++//   * `cl.stats[STAT_ACTIVEWEAPON]` is a server round-trip stale, so the client
++//     cannot see a switch that is in flight.
++//
++// Put together: the idle "keep the server holding what the aim hand holds" sync
++// queues an impulse for the AIM hand's weapon; the player pulls the OFF hand's
++// trigger; the client sees ACTIVEWEAPON already equal to the off hand's weapon
++// (the stale value), sends no impulse, and holds +attack; QC then processes the
++// queued aim-hand switch first and fires THAT weapon. A nail leaves the rocket
++// launcher, exactly as reported.
++//
++// The scheduler below owns `in_impulse` and `in_attack` for firing, and both
++// bugs die structurally rather than by tuning:
++//
++//   THE WEAPON-MATCH GATE. `in_attack` is held only when the server's active
++//   weapon IS the owner hand's weapon and no switch is unresolved, or when the
++//   scheduler is itself issuing that exact weapon's select impulse in this same
++//   usercmd (which overwrites any stale one on the edict). A switch we could not
++//   send, or a foreign impulse we do not own, always means a skipped attack.
++//
++//   FAIR HANDOFF. Ownership passes on the DISCHARGE, not on a timer: the
++//   server-side barrel-true hook (overlay 0020, sv_phys.c) watches the player
++//   edict's attack_finished across the think that fires and reports the moment a
++//   shot actually left. A timer backstop exists only for the case a discharge
++//   can never come (an empty gun must not own the pipeline forever).
++// ============================================================================
++
++// Ownership. -1 = nobody is firing.
++static int	  vkq_vr_fire_owner = -1;
++static int	  vkq_vr_fire_last = -1;	 // whose shot went out most recently (handoff order)
++static double vkq_vr_fire_since = 0.0;	 // when the current owner took the pipeline
++static double vkq_vr_fire_yield_until = 0.0; // hold +attack RELEASED until this time
++static int	  vkq_vr_fire_pending = 0;	 // weapon we asked for and have not seen land (-1 = a foreign impulse)
++static double vkq_vr_fire_pending_t = 0.0;
++static int	  vkq_vr_fire_gate_block = 0; // frames the match gate suppressed a trigger (diagnostic)
++static int	  vkq_vr_fire_handoffs = 0;
++static int	  vkq_vr_fire_shots[2] = {0, 0};
++
++// A2's availability is decided in sv_phys.c (does this progs have an
++// attack_finished field?) and reported here, so one line answers both "is the
++// scheduler arbitrating" and "is each hand keeping its own refire clock".
++extern int	VKQ_VR_ClockAvailable (void);
++extern void VKQ_VR_ClockReset (void);
++extern int	VKQ_VR_ClockReady (int hand);
++
++// The discharge signal, written by the server hook (sv_phys.c) and read here.
++// `vkq_vr_fire_owner` is what it attributes the shot to, so the two agree by
++// construction rather than by a second guess about which hand was firing.
++int	   vkq_vr_fire_discharged = 0;
++double vkq_vr_fire_discharge_t = 0.0;
++static int vkq_vr_fire_crossfire = 0; // the invariant, CHECKED at every shot
++// The weapon the scheduler AUTHORISED +attack for, this frame and last frame.
++//
++// The first version of this check compared the server's fired weapon against
++// whatever hand owned the pipeline at the instant of the discharge, and counted
++// 44 "cross-fires" in 91 handoffs — one per handoff, because the server is
++// consuming a usercmd the client built a frame or two ago while the client has
++// already flipped ownership. That is frame skew in the INSTRUMENT, not a defect
++// in the thing measured, and a counter that fires once per handoff would have
++// been useless for the bug it exists to catch.
++//
++// Two frames of history make the check say exactly what the gate promises: a
++// shot may only ever leave a weapon the scheduler authorised a trigger for.
++// the user's bug fails it loudly — there, the weapon that fired was the AIM hand's
++// while only the OFF hand's trigger was held, so it was never authorised at all.
++static int vkq_vr_fire_auth[2] = {0, 0};
++// The HAND the current usercmd authorises a shot for, or -1. The server's clock
++// swap follows THIS, not the client's live owner: the client re-decides
++// ownership every rendered frame while the server consumes usercmds at the net
++// rate, so "who owns the pipeline right now" and "whose shot is in the packet
++// the server is about to run" are different questions. Answering the first one
++// let a rocket launcher's 0.8 s refire land on the NAILGUN's clock, which is
++// exactly the jam per-hand clocks exist to remove (measured: 3.50 nails/s
++// against 10.12 solo).
++int vkq_vr_fire_auth_hand = -1;
++// When each weapon (by impulse 1-8) was last authorised. A discharge of anything
++// not authorised inside VKQ_VR_FIRE_AUTH_WINDOW is a cross-fire.
++static double vkq_vr_fire_authtime[9] = {0};
++#define VKQ_VR_FIRE_AUTH_WINDOW 0.35
++
++// A hand that cannot discharge (out of ammo, a weapon whose refire is longer
++// than the other's whole cycle) must not own the pipeline forever, so ownership
++// times out as well. Long enough that it never pre-empts a legitimately slow
++// weapon's shot, short enough that a dry gun does not read as a jam.
++#define VKQ_VR_FIRE_YIELD_MAX	0.60
++// How long a select impulse may be unresolved before we assume it was refused
++// (no ammo, a mod that ignores it) and stop suppressing the trigger for it.
++#define VKQ_VR_FIRE_PENDING_MAX 0.50
++// How long +attack stays released at a handoff. Long enough that the release is
++// certain to reach the server at the net rate (~14 ms per usercmd at 72 Hz) and
++// that a chain-fire weapon leaves its think chain; short enough to be invisible.
++#define VKQ_VR_FIRE_YIELD_MS	0.06
++
++int VKQ_VR_FireOwner (void) { return vkq_vr_fire_owner; }
++void VKQ_VR_FireReset (void);
++
++/*
++==================
++VKQ_VR_NoteDischarge -- overlay 0023 (R6 part A1)
++
++Called from the server think hook at the exact moment a shot left, with the
++SERVER's own idea of which weapon fired (`self.weapon`, not the client's
++round-trip-stale STAT_ACTIVEWEAPON — comparing against that would false-alarm on
++the frame a switch is in flight, which is precisely the frame under suspicion).
++
++Two jobs: it is the handoff signal, and it is the cross-fire ASSERTION. The
++match gate is supposed to make "the weapon that fired is the owner hand's
++weapon" structurally true; this counts every time it was not. A number that
++stays 0 through a two-minute dual-fire soak is the evidence; a comment is not.
++==================
++*/
++void VKQ_VR_NoteDischarge (int serverWeapon)
++{
++	const int owner = vkq_vr_fire_owner;
++	vkq_vr_fire_discharge_t = Sys_DoubleTime ();
++	// Attributed to whoever owns the pipeline. Requiring the fired weapon to
++	// MATCH the owner's was tried, and it starves the incoming hand: a weapon
++	// mid-burst keeps firing for a frame or two after the handoff, so the new
++	// owner's turn never registers and it is handed back before it can shoot.
++	// The cross-fire check below does not rely on this attribution — it compares
++	// against what the triggers authorised, which is skew-proof.
++	vkq_vr_fire_discharged = 1;
++	if (owner >= 0)
++		vkq_vr_fire_shots[owner]++;
++	// Only meaningful while the scheduler is actually driving a trigger: a shot
++	// from the gamepad, the touch layer or a bind authorises nothing here and is
++	// not a cross-fire.
++	{
++		const int	 imp = vkq_vr_weapon_impulse (serverWeapon);
++		const double now = Sys_DoubleTime ();
++		int			 anyRecent = 0, i;
++		for (i = 1; i <= 8; i++)
++			if (vkq_vr_fire_authtime[i] > 0.0 && now - vkq_vr_fire_authtime[i] <= VKQ_VR_FIRE_AUTH_WINDOW)
++				anyRecent = 1;
++		// Only meaningful while the scheduler is actually driving a trigger: a
++		// shot from the gamepad, the touch layer or a bind authorises nothing
++		// here and is not a cross-fire.
++		if (anyRecent && (imp < 1 || imp > 8 || now - vkq_vr_fire_authtime[imp] > VKQ_VR_FIRE_AUTH_WINDOW))
++		{
++			vkq_vr_fire_crossfire++;
++			Con_DPrintf ("VR CROSS-FIRE: the server fired imp%d, which no trigger authorised in the last %.2f s\n", imp, VKQ_VR_FIRE_AUTH_WINDOW);
++		}
++	}
++}
+ 
++// Anything OUTSIDE the scheduler that sends a weapon-select impulse says so
++// here, so the match gate can see the switch it would otherwise be blind to.
++static void vkq_vr_fire_note_pending (int itembit)
++{
++	vkq_vr_fire_pending = itembit;
++	vkq_vr_fire_pending_t = Sys_DoubleTime ();
++}
++
++void VKQ_VR_FireReset (void)
++{
++	vkq_vr_fire_owner = vkq_vr_fire_last = -1;
++	vkq_vr_fire_since = vkq_vr_fire_discharge_t = vkq_vr_fire_pending_t = 0.0;
++	vkq_vr_fire_pending = vkq_vr_fire_discharged = 0;
++	vkq_vr_fire_yield_until = 0.0;
++	vkq_vr_fire_auth[0] = vkq_vr_fire_auth[1] = 0;
++	vkq_vr_fire_auth_hand = -1;
++	memset (vkq_vr_fire_authtime, 0, sizeof (vkq_vr_fire_authtime));
++	// NOT the counters: gateblocked / handoffs / shots / crossfire are session
++	// totals a harness and a device log read, and zeroing them on every mode
++	// change would hide exactly the runs worth looking at.
++	VKQ_VR_ClockReset ();
++}
++
++/*
++==================
++vkq_vr_fire_schedule -- overlay 0023 (R6 part A1)
++
++Runs once per input frame in Immersive, from VKQ_VR_ApplyHandInput, and is the
++ONLY writer of in_attack and of in_impulse-for-firing while a trigger is down.
++Returns the weapon the owner hand is firing (0 = nobody).
++
++`want[hand]` is "this trigger is down on a hand that is holding something". The
++policy is small on purpose:
++  - nobody wants it            -> release, forget the owner
++  - one hand wants it          -> that hand owns it continuously (SOLO: identical
++                                  to 1.0.7.8, full rate, no handoff, no gate
++                                  churn — the other hand is not in the picture)
++  - both want it               -> alternate on each discharge
++==================
++*/
++static int vkq_vr_fire_schedule (double now, int aim, int off, unsigned bAim, unsigned bOff)
++{
++	const int wantA = ((bAim & VKQ_VRB_TRIGGER) != 0) && vkq_vr_held_item_get (aim) != 0;
++	const int wantO = ((bOff & VKQ_VRB_TRIGGER) != 0) && vkq_vr_held_item_get (off) != 0;
++	const int activeW = cl.stats[STAT_ACTIVEWEAPON];
++	int		  ownerW, issued = 0, fire = 0;
++
++	// --- resolve the pending switch ------------------------------------------
++	// A pending impulse is one we cannot see the result of yet. It clears when
++	// the server confirms it, and it EXPIRES so that an impulse the progs
++	// refused (no ammo for that weapon, a mod that ignores it) cannot suppress
++	// firing forever. Failing open here is safe because the match gate below
++	// still requires activeW to equal the owner's weapon.
++	if (vkq_vr_fire_pending > 0 && activeW == vkq_vr_fire_pending)
++		vkq_vr_fire_pending = 0;
++	if (vkq_vr_fire_pending != 0 && (now - vkq_vr_fire_pending_t) > VKQ_VR_FIRE_PENDING_MAX)
++		vkq_vr_fire_pending = 0;
++
++	// AN ACTIVE WEAPON WE DID NOT ASK FOR is somebody else changing it under us —
++	// `impulse 9` (the All Weapons cheat) force-sets the server's weapon, and so
++	// does a mod, a bind or the console. Treat it as an unresolved switch so the
++	// match gate stops firing until things settle; without this the frames still
++	// in flight put shots through a gun no trigger is holding. (Measured: three
++	// lightning-gun shots in a two-minute soak that pressed All Weapons every 20 s
++	// while both triggers were down. The residual is pure round-trip lag and
++	// cannot be closed from the client.)
++	if (vkq_vr_fire_owner >= 0 && activeW && activeW != vkq_vr_held_item_get (vkq_vr_fire_owner) && vkq_vr_fire_pending == 0)
++	{
++		vkq_vr_fire_pending = -1;
++		vkq_vr_fire_pending_t = now;
++	}
++
++	// --- ownership ------------------------------------------------------------
++	if (vkq_vr_fire_owner >= 0)
++	{
++		const int stillWants = (vkq_vr_fire_owner == aim) ? wantA : wantO;
++		const int otherWants = (vkq_vr_fire_owner == aim) ? wantO : wantA;
++		if (!stillWants)
++			vkq_vr_fire_owner = -1;
++		else
++		{
++			// A discharge means this owner is doing its job, so the starvation
++			// timeout below measures "how long since this hand last managed a
++			// shot" rather than "how long it has held the pipeline". Without
++			// this the timeout fires mid-burst and hands the pipeline to a
++			// weapon that is still reloading — the stall again, on a clock.
++			if (vkq_vr_fire_discharged)
++				vkq_vr_fire_since = now;
++		}
++		if (vkq_vr_fire_owner >= 0 && otherWants)
++		{
++			// HANDOFF, on two conditions and never on a guess.
++			//
++			// The discharge is the signal: the server hook reports the exact
++			// think in which a shot left, so the pipeline changes hands on a real
++			// shot rather than on an estimate of how long one takes. But it hands
++			// over only to a hand that can ACTUALLY SHOOT — parking the pipeline
++			// on a weapon whose refire clock is still running would stall the
++			// hand that was firing for exactly the interval per-hand clocks exist
++			// to remove, and plain alternation would therefore throttle a nailgun
++			// to the rocket launcher's 0.8 s. (With no per-hand clocks available
++			// ClockReady answers 1 and this degrades to strict alternation, which
++			// is the documented fallback.)
++			//
++			// The timeout is the second door, and it is for the hand that can
++			// never discharge at all — dry, or holding something the progs will
++			// not fire. It must not be able to starve a hand that can.
++			const int other = vkq_vr_fire_owner ^ 1;
++			if ((vkq_vr_fire_discharged && VKQ_VR_ClockReady (other)) || (now - vkq_vr_fire_since) > VKQ_VR_FIRE_YIELD_MAX)
++			{
++				vkq_vr_fire_last = vkq_vr_fire_owner;
++				vkq_vr_fire_owner = -1;
++				// +attack RELEASED for a fixed WALL-CLOCK interval, not one frame.
++				//
++				// One frame is not enough and the reason is not obvious: usercmds
++				// go out at the net rate while this runs per rendered frame, so a
++				// single frame's release can be overwritten before any packet
++				// carries it — the server never sees the button clear. It has to
++				// see it, because stock QC's chain-fire weapons only leave their
++				// think chain on a frame where button0 is clear, and until the
++				// chain leaves, `W_WeaponFrame` returns above ImpulseCommands and
++				// the other hand's weapon switch is never read at all.
++				vkq_vr_fire_yield_until = now + VKQ_VR_FIRE_YIELD_MS;
++				vkq_vr_fire_handoffs++;
++			}
++		}
++	}
++	vkq_vr_fire_discharged = 0;
++
++	if (vkq_vr_fire_owner < 0 && (wantA || wantO) && now >= vkq_vr_fire_yield_until)
++	{
++		if (wantA && wantO)
++			vkq_vr_fire_owner = (vkq_vr_fire_last == aim) ? off : aim; // alternate
++		else
++			vkq_vr_fire_owner = wantA ? aim : off;
++		vkq_vr_fire_since = now;
++	}
++
++	if (vkq_vr_fire_owner < 0)
++	{
++		vkq_vr_hold (&in_attack, false);
++		vkq_vr_shoot_hand = -1;
++		vkq_vr_fire_auth[1] = vkq_vr_fire_auth[0];
++		vkq_vr_fire_auth[0] = 0;
++		vkq_vr_fire_auth_hand = -1;
++		return 0;
++	}
++
++	ownerW = vkq_vr_held_item_get (vkq_vr_fire_owner);
++	vkq_vr_shoot_hand = vkq_vr_fire_owner;
++
++	// --- the weapon-match gate -------------------------------------------------
++	if (activeW != ownerW || (vkq_vr_fire_pending != 0 && vkq_vr_fire_pending != ownerW))
++	{
++		// A switch is needed. We may only take in_impulse if nothing else has it
++		// this frame — the cycle path, a holster select and the console all write
++		// the same latch, and quietly stomping one of those is how a gesture goes
++		// missing. Our impulse overwrites any STALE one already on the edict
++		// (SV_ReadClientMove writes every nonzero byte), which is what makes a
++		// same-frame switch-and-fire safe.
++		const int imp = vkq_vr_weapon_impulse (ownerW);
++		if (imp > 0 && (in_impulse == 0 || in_impulse == imp))
++		{
++			in_impulse = imp;
++			vkq_vr_fire_pending = ownerW;
++			vkq_vr_fire_pending_t = now;
++			issued = 1;
++		}
++		else if (in_impulse != 0)
++		{
++			// Somebody else's impulse is going out this frame. It may well change
++			// the weapon, so this frame CANNOT fire: an attack that rides out
++			// beside a foreign switch is precisely the cross-fire.
++			vkq_vr_fire_pending = -1;
++			vkq_vr_fire_pending_t = now;
++		}
++	}
++
++	// The impulse and the attack may ride the SAME usercmd (weapons.qc runs
++	// ImpulseCommands and then tests button0 inside one frame), but only when the
++	// scheduler issued that impulse itself — which is the weapon-match gate.
++	//
++	// Requiring the switch to LAND first was tried and is much worse: it costs a
++	// round trip at every handoff, and because stock QC's chain-fire weapons
++	// re-arm attack_finished on every nail, the waiting hand's switch then sits
++	// behind the OTHER weapon's refire. Measured, that configuration ran the
++	// nailgun at 0.12 nails/s against 10.12 solo.
++	fire = (ownerW != 0) && ((activeW == ownerW && vkq_vr_fire_pending == 0) || issued);
++	// Record what this usercmd authorises, keeping one frame of history: the
++	// server consumes the cmd a frame or two later and the check at the discharge
++	// compares against both (see vkq_vr_fire_auth).
++	vkq_vr_fire_auth[1] = vkq_vr_fire_auth[0];
++	vkq_vr_fire_auth[0] = fire ? ownerW : 0;
++	vkq_vr_fire_auth_hand = fire ? vkq_vr_fire_owner : -1;
++	// A weapon is AUTHORISED while a trigger is down on the hand holding it —
++	// both hands, every frame, not only the hand the gate let through. That is
++	// the invariant the user cares about ("nothing leaves a gun whose trigger I am
++	// not holding"), and stamping only the firing hand made the OTHER held
++	// weapon's in-flight shots read as cross-fire during a two-minute soak in
++	// which both triggers were down the whole time.
++	{
++		int h;
++		for (h = 0; h < 2; h++)
++		{
++			const int down = (h == aim) ? ((bAim & VKQ_VRB_TRIGGER) != 0) : ((bOff & VKQ_VRB_TRIGGER) != 0);
++			const int imp = vkq_vr_weapon_impulse (vkq_vr_held_item_get (h));
++			if (down && imp >= 1 && imp <= 8)
++				vkq_vr_fire_authtime[imp] = now;
++		}
++	}
++	if (!fire)
++		vkq_vr_fire_gate_block++;
++	vkq_vr_hold (&in_attack, fire != 0);
++	if (!fire)
++		vkq_vr_shoot_hand = -1; // nothing is leaving a barrel this frame
++	return fire ? ownerW : 0;
++}
++
++void VKQ_VR_FireDebugString (char *out, int len)
++{
++	if (!out || len <= 0)
++		return;
++	q_snprintf (
++		out, len,
++		"owner=%s last=%s activeW=imp%d ownerW=imp%d pending=%d gateblocked=%d handoffs=%d shots=L%d/R%d crossfire=%d dualclock=%s | ammo shells=%d "
++		"nails=%d rockets=%d cells=%d",
++		vkq_vr_fire_owner < 0 ? "-" : (vkq_vr_fire_owner ? "right" : "left"), vkq_vr_fire_last < 0 ? "-" : (vkq_vr_fire_last ? "right" : "left"),
++		vkq_vr_weapon_impulse (cl.stats[STAT_ACTIVEWEAPON]),
++		vkq_vr_fire_owner < 0 ? 0 : vkq_vr_weapon_impulse (vkq_vr_held_item_get (vkq_vr_fire_owner)), vkq_vr_fire_pending, vkq_vr_fire_gate_block,
++		vkq_vr_fire_handoffs, vkq_vr_fire_shots[0], vkq_vr_fire_shots[1], vkq_vr_fire_crossfire,
++		vkqvr_dualclock.value < 0.5f ? "off (cvar)" : (VKQ_VR_ClockAvailable () ? "on" : "unavailable (this progs has no attack_finished)"),
++		cl.stats[STAT_SHELLS], cl.stats[STAT_NAILS], cl.stats[STAT_ROCKETS], cl.stats[STAT_CELLS]);
++}
++
+ // How far the wish vector was rotated this frame (charter A6's movement
+ // direction). Published for the diagnostics line the simulator asserts on —
+ // "the movement rotated" is otherwise invisible in a screenshot.
+@@ -6368,6 +6801,117 @@
+ // yaw is what the base view matrix rotates by; the head angles are what the SENT
+ // viewangles carry, so the server aims where the player is actually looking.
+ void  VKQ_VR_SetHeadAngles (float pitch, float yaw) { vkq_vr_head_pitch = pitch, vkq_vr_head_yaw = yaw; }
++
++// ============================================================================
++// overlay 0023 — R6 part B1: THE HOLSTER BODY FRAME FOLLOWS THE BODY
++//
++// the user: physically stepping or turning leaves the holsters behind — both the
++// rendered guns and the places his hands have to reach.
++//
++// Root cause. The holster frame was the PLAYER ENTITY's origin plus the
++// stick-driven body yaw, and neither of those moves when the player does. A
++// hand's player-frame position DOES contain the physical offset (it is
++// inverse(align) x the tracked pose), so every real-world step moved his hands
++// relative to a belt that was pinned to wherever he last recentred. The R5 note
++// that the zone and the model "cannot disagree" stayed true throughout — they
++// were both wrong, together, by exactly the distance he had walked.
++//
++// The frame is anchored to the HEAD instead:
++//   origin — the head's position in the player frame with its height dropped
++//            (ground-projected). Instant: a step takes the holsters with you.
++//            It is 0 at the moment of a recentre, so nothing moves for a player
++//            who never leaves the spot they calibrated at.
++//   yaw    — a TORSO ESTIMATE, not the head yaw. A rate-limited chase with a
++//            deadzone, which is the cheapest model that gets both halves right:
++//            glancing over your shoulder leaves your hips where they are, and an
++//            actual turn brings them round within a beat.
++// ============================================================================
++static float vkq_vr_head_pos[3] = {0.0f, 0.0f, 0.0f}; // player frame, UNITS
++static float vkq_vr_torso_yaw = 0.0f;				  // relative to the player frame, like the head yaw
++static int	 vkq_vr_torso_init = 0;
++static double vkq_vr_torso_time = 0.0;
++
++void VKQ_VR_SetHeadPos (float x, float y, float z) { vkq_vr_head_pos[0] = x, vkq_vr_head_pos[1] = y, vkq_vr_head_pos[2] = z; }
++
++// Snap the torso to the head. A recentre redefines the player frame under both
++// of them, so chasing across that discontinuity would swing the belt around the
++// player for a second for no reason.
++void VKQ_VR_TorsoSnap (void)
++{
++	vkq_vr_torso_yaw = vkq_vr_head_yaw;
++	vkq_vr_torso_init = 1;
++	vkq_vr_torso_time = 0.0;
++}
++
++static void vkq_vr_torso_update (double now)
++{
++	float diff, dead, rate, step, dt;
++	if (!vkq_vr_active)
++	{
++		vkq_vr_torso_init = 0;
++		vkq_vr_torso_time = 0.0;
++		return;
++	}
++	if (!vkq_vr_torso_init)
++	{
++		VKQ_VR_TorsoSnap ();
++		vkq_vr_torso_time = now;
++		return;
++	}
++	dt = (vkq_vr_torso_time > 0.0) ? (float)(now - vkq_vr_torso_time) : 0.0f;
++	vkq_vr_torso_time = now;
++	if (dt > 0.25f)
++		dt = 0.25f;
++	diff = vkq_vr_head_yaw - vkq_vr_torso_yaw;
++	while (diff > 180.0f)
++		diff -= 360.0f;
++	while (diff < -180.0f)
++		diff += 360.0f;
++	// A discontinuity is a recentre or a teleport, not a turn of the neck: no
++	// human takes the head 100 degrees off the shoulders between two frames.
++	if (fabsf (diff) > 100.0f)
++	{
++		VKQ_VR_TorsoSnap ();
++		vkq_vr_torso_time = now;
++		return;
++	}
++	dead = CLAMP (0.0f, vkqvr_torsodead.value, 45.0f);
++	rate = CLAMP (10.0f, vkqvr_torsorate.value, 360.0f);
++	if (fabsf (diff) <= dead || dt <= 0.0f)
++		return; // inside the deadzone: this is a glance, the hips stay put
++	diff -= (diff > 0.0f) ? dead : -dead;
++	step = rate * dt;
++	if (diff > step)
++		diff = step;
++	else if (diff < -step)
++		diff = -step;
++	vkq_vr_torso_yaw = anglemod (vkq_vr_torso_yaw + diff);
++}
++
++// Rotate a HOLSTER-FRAME vector (x right, y up, z back) into the player frame,
++// i.e. apply the torso yaw. Quake's +yaw is left, and this is the same rotation
++// vkq_vr_player_to_world_dir would apply if the body yaw were (body + torso) —
++// which is exactly what the drawn model's angles use, so the two cannot drift.
++static void vkq_vr_torso_to_player (const float *v, float out[3])
++{
++	const float t = VKQ_VR_DEG2RAD (vkq_vr_torso_yaw);
++	const float c = cosf (t), s = sinf (t);
++	out[0] = v[0] * c + v[2] * s;
++	out[1] = v[1];
++	out[2] = -v[0] * s + v[2] * c;
++}
++
++float VKQ_VR_TorsoYaw (void) { return vkq_vr_torso_yaw; }
++
++void VKQ_VR_BodyFrameString (char *out, int len)
++{
++	if (!out || len <= 0)
++		return;
++	q_snprintf (
++		out, len, "head=(%.1f,%.1f,%.1f)u headyaw=%.1f torsoyaw=%.1f lag=%.1f dead=%.0f rate=%.0f bodyyaw=%.1f", vkq_vr_head_pos[0], vkq_vr_head_pos[1],
++		vkq_vr_head_pos[2], anglemod (vkq_vr_head_yaw), anglemod (vkq_vr_torso_yaw), anglemod (vkq_vr_head_yaw - vkq_vr_torso_yaw),
++		CLAMP (0.0f, vkqvr_torsodead.value, 45.0f), CLAMP (10.0f, vkqvr_torsorate.value, 360.0f), anglemod (vkq_vr_body_yaw));
++}
+ void  VKQ_VR_SetBodyYaw (float yaw) { vkq_vr_body_yaw = anglemod (yaw); }
+ float VKQ_VR_GetBodyYaw (void) { return vkq_vr_body_yaw; }
+ void  VKQ_VR_SetHeightOffset (float units) { vkq_vr_height_ofs = units; }
+@@ -7076,41 +7620,37 @@
+ 	// hand. An empty hand's trigger is SUPPRESSED — never fire an invisible
+ 	// weapon — and the off-hand trigger falls back to jump when that hand is
+ 	// empty, so the layout does not lose a button just because you are carrying
+-	// one gun. The impulse and +attack go out in the SAME usercmd because stock
+-	// weapons.qc's W_WeaponFrame calls ImpulseCommands() and then tests
+-	// self.button0 inside one frame, so the weapon changes and then fires; a
+-	// mod that defers weapon switching will fire the previous weapon for one
+-	// frame, which is the documented caveat for per-trigger switching.
++	// one gun.
++	//
++	// overlay 0023 (R6 part A1): WHICH hand gets the pipeline, and whether the
++	// attack may go out at all, is the fire scheduler's decision now — see
++	// vkq_vr_fire_schedule. R4's comment here said the impulse and the attack ride
++	// the same usercmd deliberately; they still may, but only when the scheduler
++	// itself issued that impulse, which is what makes the pairing safe.
+ 	vkq_vr_shoot_hand = -1;
+ 	if (vkq_vr_immersive ())
+ 	{
+ 		const int aimW = vkq_vr_held_item_get (aim), offW = vkq_vr_held_item_get (off);
+-		int		  fireW = 0;
+-		if ((bAim & VKQ_VRB_TRIGGER) && aimW)
+-		{
+-			vkq_vr_shoot_hand = aim;
+-			fireW = aimW;
+-		}
+-		else if ((bOff & VKQ_VRB_TRIGGER) && offW)
+-		{
+-			vkq_vr_shoot_hand = off;
+-			fireW = offW;
+-		}
+-		if (fireW && cl.stats[STAT_ACTIVEWEAPON] != fireW)
+-			in_impulse = vkq_vr_weapon_impulse (fireW);
+-		vkq_vr_hold (&in_attack, fireW != 0);
++		// The scheduler owns in_attack and the firing impulse, and it sets
++		// vkq_vr_shoot_hand — so the muzzle, the crosshair and the barrel-true
++		// origin all follow the hand that actually discharges. It is the ONLY
++		// writer: the two bugs the old latch had cannot come back by somebody
++		// adding a second `if` here.
++		vkq_vr_fire_schedule (now, aim, off, bAim, bOff);
+ 		vkq_vr_hold (&in_jump, (((bOff & VKQ_VRB_TRIGGER) && !offW) || (bAim & VKQ_VRB_A) || (bOff & VKQ_VRB_A)) != 0);
++		// The trigger-press tick is the PRESS, not the shot: it confirms the pull
++		// in the hand that pulled even on a frame the gate defers.
+ 		if ((pAim & VKQ_VRB_TRIGGER) && aimW)
+-			VKQ_VR_Haptic (aim, 0.7f, 0.04f);
++			VKQ_VR_Haptic (aim, 0.7f, 0.04f, "trigger");
+ 		if ((pOff & VKQ_VRB_TRIGGER) && offW)
+-			VKQ_VR_Haptic (off, 0.7f, 0.04f);
++			VKQ_VR_Haptic (off, 0.7f, 0.04f, "trigger");
+ 	}
+ 	else
+ 	{
+ 		vkq_vr_hold (&in_attack, (bAim & VKQ_VRB_TRIGGER) != 0);
+ 		vkq_vr_hold (&in_jump, ((bOff & VKQ_VRB_TRIGGER) || (bAim & VKQ_VRB_A) || (bOff & VKQ_VRB_A)) != 0);
+ 		if (pAim & VKQ_VRB_TRIGGER)
+-			VKQ_VR_Haptic (aim, 0.7f, 0.04f); // the shot you feel in the hand that fired it
++			VKQ_VR_Haptic (aim, 0.7f, 0.04f, "trigger"); // the shot you feel in the hand that fired it
+ 	}
+ 
+ 	// Right stick click = recenter (hold-free: nothing else is on that click).
+@@ -7118,7 +7658,7 @@
+ 	{
+ 		extern void VKQ_VR_Recenter (void);
+ 		VKQ_VR_Recenter ();
+-		VKQ_VR_Haptic (aim, 0.5f, 0.05f);
++		VKQ_VR_Haptic (aim, 0.5f, 0.05f, "recenter");
+ 	}
+ 
+ 	// MOVE — same units and speed rule as IN_JoyMove, so a Sense stick and a
+@@ -7153,7 +7693,7 @@
+ 			{
+ 				cl.viewangles[YAW] -= (rs[0] > 0.0f ? 1.0f : -1.0f) * vkqvr_snapturn.value;
+ 				snapArmed = 0;
+-				VKQ_VR_Haptic (aim, 0.4f, 0.03f);
++				VKQ_VR_Haptic (aim, 0.4f, 0.03f, "snapturn");
+ 			}
+ 			if (fabsf (rs[0]) < 0.4f)
+ 				snapArmed = 1;
+@@ -7196,7 +7736,7 @@
+ 		{
+ 			VKQ_VR_CycleWeapon (rs[1] > 0.0f);
+ 			cycleArmed = 0;
+-			VKQ_VR_Haptic (aim, 0.3f, 0.02f);
++			VKQ_VR_Haptic (aim, 0.35f, 0.03f, "cycle");
+ 		}
+ 		if (ay < (emptyHand ? 0.30f : fo))
+ 			cycleArmed = 1;
+@@ -7811,6 +8351,12 @@
+ // and stature stays correct on the way.
+ // ---------------------------------------------------------------------------
+ #define VKQ_VR_QUAKE_EYE_UNITS 46.0f // 24 hull mins + 22 view_ofs, above the floor
++// overlay 0023 (R6 part C3) — the world scale the 46-unit eye was authored
++// against (1 unit = 1 inch), and therefore the real-world height Quake's own
++// eye stands at. The rise measures a player's deviation from THIS, so a change
++// of world scale no longer changes how tall the player is in the map.
++#define VKQ_VR_REF_SCALE	   39.37f
++#define VKQ_VR_REF_EYE_M	   (VKQ_VR_QUAKE_EYE_UNITS / VKQ_VR_REF_SCALE) // 1.168 m
+ 
+ static float vkq_vr_standing_eye_m = 0.0f; // published by the shell each frame
+ 
+@@ -7840,14 +8386,42 @@
+ {
+ 	float  want, limit, dt;
+ 	double now;
++	// R6 part B1: the torso estimate is a per-frame integration and this is the
++	// one function that runs exactly once per frame while VR is up, whether or
++	// not hands are tracked.
++	vkq_vr_torso_update (Sys_DoubleTime ());
+ 	if (!vkq_vr_active)
+ 	{
+ 		vkq_vr_eye_rise = vkq_vr_eye_rise_raw = vkq_vr_eye_rise_limit = 0.0f;
+ 		vkq_vr_eye_rise_time = 0.0;
+ 		return;
+ 	}
++	// ------------------------------------------------------------------------
++	// overlay 0023 (R6 part C3) — THE SCALE-DEPENDENCE BUG, and the user's 9 inches.
++	//
++	// R2.1's derivation was `standing_eye_m * ws - 46`, i.e. the camera sits at
++	// the player's real eye height converted through the world scale. That is
++	// exactly right at ws = 39.37 and quietly wrong everywhere else, because it
++	// ties the camera's height IN UNITS — its stature relative to every door,
++	// monster and ledge in the map — to a slider whose job is to change the size
++	// of the world, not the size of the player. Dropping the scale to 34 u/m
++	// shortens a 1.679 m player from 66.1 to 57.1 units: nine units nearer the
++	// floor than the same person at the default scale, in a world that just got
++	// bigger around them. Both effects push the same way and it reads as sinking.
++	//
++	// The fix keeps Quake's own 46-unit eye as the anchor and converts only the
++	// player's DEVIATION from the reference stature:
++	//
++	//     rise = (standing_eye_m - 46/39.37) * ws
++	//
++	// It is algebraically identical to the old formula at ws = 39.37 (46/39.37 is
++	// 1.168 m, so the reference cancels), so no default-scale build changes by a
++	// single unit; and at 34 u/m it restores 6.3 units — 0.185 m, 7.3 inches — of
++	// the 9 inches the user had dialled into Eye Height Trim to put himself back
++	// where he wanted to be. His trim was compensating for this term.
++	// ------------------------------------------------------------------------
+ 	if (vkq_vr_standing_eye_m > 0.0f)
+-		want = vkq_vr_standing_eye_m * vkq_vr_worldscale - VKQ_VR_QUAKE_EYE_UNITS;
++		want = (vkq_vr_standing_eye_m - VKQ_VR_REF_EYE_M) * vkq_vr_worldscale;
+ 	else
+ 		want = vkqvr_eyerise.value; // no tracked height yet: the measured default
+ 	want = CLAMP (-16.0f, want, 48.0f);
+@@ -7891,8 +8465,8 @@
+ 	total = VKQ_VR_QUAKE_EYE_UNITS + vkq_vr_eye_rise + vkq_vr_height_ofs;
+ 	q_snprintf (
+ 		out, len,
+-		"standing HMD %.3f m x %.2f u/m = %.1f u | Quake eye %.0f u above the floor, VR eye %.1f u (%.2f m) | rise %+.1f (want %+.1f, ceiling allows %+.1f) trim %+.1f",
+-		vkq_vr_standing_eye_m, vkq_vr_worldscale, vkq_vr_standing_eye_m * vkq_vr_worldscale, VKQ_VR_QUAKE_EYE_UNITS, total,
++		"standing HMD %.3f m (ref %.3f m) x %.2f u/m | Quake eye %.0f u above the floor, VR eye %.1f u (%.2f m) | rise %+.1f (want %+.1f, ceiling allows %+.1f) trim %+.1f",
++		vkq_vr_standing_eye_m, VKQ_VR_REF_EYE_M, vkq_vr_worldscale, VKQ_VR_QUAKE_EYE_UNITS, total,
+ 		total / (vkq_vr_worldscale > 1.0f ? vkq_vr_worldscale : 39.37f), vkq_vr_eye_rise, vkq_vr_eye_rise_raw, vkq_vr_eye_rise_limit, vkq_vr_height_ofs);
+ }
+ 
+@@ -7986,35 +8560,15 @@
+ static int	  vkq_vr_hol_live[2];
+ 
+ static qboolean vkq_vr_immersive (void) { return vkqvr_style.value >= 0.5f; }
++// The server-side fire hook (sv_phys.c) has to know whether Immersive is on:
++// per-hand refire clocks belong to dual wield and nothing else.
++int VKQ_VR_ImmersiveActive (void) { return (vkq_vr_active && vkq_vr_have && vkq_vr_immersive ()) ? 1 : 0; }
+ static int		vkq_vr_held_item_get (int hand) { return (hand >= 0 && hand < 2) ? vkq_vr_held_item[hand] : 0; }
+ 
+-// The item bit a given impulse selects, and its model. Stock progs' 1-8; a mod
+-// that reorders them reorders this with it, which is why Convenience remains the
+-// mods-safe path (VR-R4-NOTES).
+-static int vkq_vr_impulse_item (int imp)
+-{
+-	switch (imp)
+-	{
+-	case 1:
+-		return IT_AXE;
+-	case 2:
+-		return IT_SHOTGUN;
+-	case 3:
+-		return IT_SUPER_SHOTGUN;
+-	case 4:
+-		return IT_NAILGUN;
+-	case 5:
+-		return IT_SUPER_NAILGUN;
+-	case 6:
+-		return IT_GRENADE_LAUNCHER;
+-	case 7:
+-		return IT_ROCKET_LAUNCHER;
+-	case 8:
+-		return IT_LIGHTNING;
+-	default:
+-		return 0;
+-	}
+-}
++// R6: `vkq_vr_impulse_item` lived here, unreferenced since R4 wrote it — the
++// inverse map (impulse -> item bit) that nothing ever needed, because every
++// caller has the item bit already and wants the impulse. Removed rather than
++// left to rot; `vkq_vr_weapon_impulse` is the direction this code actually uses.
+ 
+ static const char *vkq_vr_weapon_modelname (int itembit)
+ {
+@@ -8285,6 +8839,10 @@
+ }
+ 
+ int VKQ_VR_HeldItem (int hand) { return vkq_vr_held_item_get (hand); }
++// The impulse that selects an item bit, for the server-side per-weapon refire
++// clocks (sv_phys.c). Same table the scheduler selects with, so the two cannot
++// disagree about which weapon an impulse means.
++int VKQ_VR_WeaponImpulse (int itembit) { return vkq_vr_weapon_impulse (itembit); }
+ int VKQ_VR_HolsterItem (int zone) { return (zone >= 0 && zone < 2) ? vkq_vr_holster_item[zone] : 0; }
+ 
+ /*
+@@ -8307,6 +8865,9 @@
+ 	if (!vkq_vr_immersive ())
+ 	{
+ 		in_impulse = next ? 10 : 12;
++		// Which weapon a cycle lands on is the SERVER's decision, so the switch is
++		// pending-unknown: the gate blocks firing until the active weapon settles.
++		vkq_vr_fire_note_pending (-1);
+ 		return;
+ 	}
+ 	for (i = 0; i < 8; i++)
+@@ -8322,6 +8883,7 @@
+ 			continue;
+ 		vkq_vr_held_item[hand] = cand;
+ 		in_impulse = vkq_vr_weapon_impulse (cand);
++		vkq_vr_fire_note_pending (cand);
+ 		vkq_vr_holster_note ("cycle -> imp%d (%s hand)", in_impulse, hand ? "right" : "left");
+ 		return;
+ 	}
+@@ -8344,7 +8906,7 @@
+ */
+ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
+ {
+-	const int aim = vkq_vr_aim_hand (), off = vkq_vr_off_hand ();
++	const int off = vkq_vr_off_hand ();
+ 	int		  n = 0, z;
+ 	vkq_vr_hol_live[0] = vkq_vr_hol_live[1] = 0;
+ 	if (!vkq_vr_active || !vkq_vr_have || !vkq_vr_immersive () || max <= 0)
+@@ -8404,7 +8966,15 @@
+ 		// Muzzle DOWN: the model's +x faces the floor and its up faces the way
+ 		// the body does, so the weapon hangs the way one hangs on a belt.
+ 		fwd[0] = 0.0f, fwd[1] = 0.0f, fwd[2] = -1.0f;
+-		vkq_vr_player_to_world_dir (kRightAxis, right);
++		// overlay 0023 (R6 part B1): the model's right axis is the TORSO's right,
++		// through the same rotation the zone centre above went through — one
++		// transform, two consumers, which is the invariant R5 established and this
++		// round has to keep while the frame itself starts moving.
++		{
++			vec3_t torsoRight;
++			vkq_vr_torso_to_player (kRightAxis, torsoRight);
++			vkq_vr_player_to_world_dir (torsoRight, right);
++		}
+ 		right[2] = 0.0f;
+ 		if (VectorLength (right) < 0.01f)
+ 			right[0] = 1.0f, right[1] = 0.0f, right[2] = 0.0f;
+@@ -8420,7 +8990,7 @@
+ 		// exact here and need no inference: pitch 90 (barrel down), yaw = the
+ 		// body yaw, roll 0 — which reproduces this basis by construction.
+ 		ang[PITCH] = 90.0f;
+-		ang[YAW] = anglemod (vkq_vr_body_yaw);
++		ang[YAW] = anglemod (vkq_vr_body_yaw + VKQ_VR_TorsoYaw ()); // + R6's torso estimate
+ 		ang[ROLL] = 0.0f;
+ 		// Holster scale: smaller than in the hand, so a stowed weapon reads as
+ 		// stowed and two of them do not collide with the player's own legs — but
+@@ -8538,25 +9108,35 @@
+ 	// the same amount, because both read this function. +Z is BACK in the player
+ 	// frame, so a positive (forward) setting subtracts.
+ 	const float fwd = -CLAMP (-0.4f, vkqvr_holfwd.value, 0.4f) * ws;
++	float		body[3], rot[3];
+ 	switch (z)
+ 	{
+ 	case VKQ_VR_ZONE_RHIP:
+-		out[0] = vkqvr_hip_x.value * ws, out[1] = vkqvr_hip_y.value * ws, out[2] = vkqvr_hip_z.value * ws;
++		body[0] = vkqvr_hip_x.value * ws, body[1] = vkqvr_hip_y.value * ws, body[2] = vkqvr_hip_z.value * ws;
+ 		break;
+ 	case VKQ_VR_ZONE_LHIP:
+-		out[0] = -vkqvr_hip_x.value * ws, out[1] = vkqvr_hip_y.value * ws, out[2] = vkqvr_hip_z.value * ws;
++		body[0] = -vkqvr_hip_x.value * ws, body[1] = vkqvr_hip_y.value * ws, body[2] = vkqvr_hip_z.value * ws;
+ 		break;
+ 	case VKQ_VR_ZONE_RSH:
+-		out[0] = vkqvr_sh_x.value * ws, out[1] = vkqvr_sh_y.value * ws, out[2] = vkqvr_sh_z.value * ws;
++		body[0] = vkqvr_sh_x.value * ws, body[1] = vkqvr_sh_y.value * ws, body[2] = vkqvr_sh_z.value * ws;
+ 		break;
+ 	case VKQ_VR_ZONE_LSH:
+-		out[0] = -vkqvr_sh_x.value * ws, out[1] = vkqvr_sh_y.value * ws, out[2] = vkqvr_sh_z.value * ws;
++		body[0] = -vkqvr_sh_x.value * ws, body[1] = vkqvr_sh_y.value * ws, body[2] = vkqvr_sh_z.value * ws;
+ 		break;
+ 	default:
+-		out[0] = vkqvr_chest_x.value * ws, out[1] = vkqvr_chest_y.value * ws, out[2] = vkqvr_chest_z.value * ws;
++		body[0] = vkqvr_chest_x.value * ws, body[1] = vkqvr_chest_y.value * ws, body[2] = vkqvr_chest_z.value * ws;
+ 		break;
+ 	}
+-	out[2] += fwd;
++	body[2] += fwd;
++	// overlay 0023 (R6 part B1) — the body frame is the HEAD's, not the player
++	// entity's. Turn the offset by the torso estimate, then plant it under the
++	// head's ground-projected position. The height stays measured from the eye
++	// baseline (the offsets are all relative to it), so this moves the belt with
++	// the player without making it bob as they nod.
++	vkq_vr_torso_to_player (body, rot);
++	out[0] = rot[0] + vkq_vr_head_pos[0];
++	out[1] = rot[1];
++	out[2] = rot[2] + vkq_vr_head_pos[2];
+ }
+ 
+ static float vkq_vr_zone_radius (int z)
+@@ -8653,6 +9233,7 @@
+ 		if (vkq_vr_stowed)
+ 		{
+ 			in_impulse = vkq_vr_stowed;
++			vkq_vr_fire_note_pending (-1);
+ 			handedBack = vkq_vr_stowed;
+ 		}
+ 		vkq_vr_out = 1;
+@@ -8670,6 +9251,10 @@
+ 
+ void VKQ_VR_HolsterReset (void)
+ {
++	// R6: the fire scheduler is session state too — ownership, the pending
++	// switch and both per-hand refire clocks go with the grips, so entering VR
++	// never inherits a half-finished handoff from the last session.
++	VKQ_VR_FireReset ();
+ 	memset (vkq_vr_grip, 0, sizeof (vkq_vr_grip));
+ 	vkq_vr_grip[0].zoneAt = vkq_vr_grip[0].zoneNow = -1;
+ 	vkq_vr_grip[1].zoneAt = vkq_vr_grip[1].zoneNow = -1;
+@@ -8754,7 +9339,7 @@
+ 		{
+ 			if (zone >= 0)
+ 			{
+-				VKQ_VR_Haptic (hand, 0.35f, 0.02f);
++				VKQ_VR_Haptic (hand, 0.55f, 0.05f, "zone-entry");
+ 				vkq_vr_holster_note ("%s hand at %s (%s)", hand ? "right" : "left", vkq_vr_zone_names[zone],
+ 					vkq_vr_holster_item[zone] ? "occupied" : "empty");
+ 			}
+@@ -8775,14 +9360,14 @@
+ 				// TAKE — unless the other hand already has that weapon out.
+ 				if (*slot == vkq_vr_held_item[hand ^ 1])
+ 				{
+-					VKQ_VR_Haptic (hand, 0.2f, 0.02f);
++					VKQ_VR_Haptic (hand, 0.25f, 0.03f, "take-refused");
+ 					vkq_vr_holster_note ("take refused: imp%d already in the other hand", vkq_vr_weapon_impulse (*slot));
+ 				}
+ 				else
+ 				{
+ 					vkq_vr_held_item[hand] = *slot;
+ 					*slot = 0;
+-					VKQ_VR_Haptic (hand, 0.7f, 0.04f);
++					VKQ_VR_Haptic (hand, 0.7f, 0.04f, "take");
+ 					vkq_vr_holster_note ("TAKE imp%d from %s -> %s hand", vkq_vr_weapon_impulse (vkq_vr_held_item[hand]), vkq_vr_zone_names[zone],
+ 						hand ? "right" : "left");
+ 				}
+@@ -8791,7 +9376,7 @@
+ 			{
+ 				*slot = held;
+ 				vkq_vr_held_item[hand] = 0;
+-				VKQ_VR_Haptic (hand, 0.5f, 0.04f);
++				VKQ_VR_Haptic (hand, 0.5f, 0.04f, "stow");
+ 				vkq_vr_holster_note ("STOW imp%d into %s", vkq_vr_weapon_impulse (*slot), vkq_vr_zone_names[zone]);
+ 			}
+ 			else if (held && *slot)
+@@ -8799,7 +9384,7 @@
+ 				// SWAP (our addition to the user's spec — see VR-R4-NOTES).
+ 				if (*slot == vkq_vr_held_item[hand ^ 1])
+ 				{
+-					VKQ_VR_Haptic (hand, 0.2f, 0.02f);
++					VKQ_VR_Haptic (hand, 0.25f, 0.03f, "swap-refused");
+ 					vkq_vr_holster_note ("swap refused: imp%d already in the other hand", vkq_vr_weapon_impulse (*slot));
+ 				}
+ 				else
+@@ -8807,7 +9392,7 @@
+ 					int t = *slot;
+ 					*slot = held;
+ 					vkq_vr_held_item[hand] = t;
+-					VKQ_VR_Haptic (hand, 0.8f, 0.05f);
++					VKQ_VR_Haptic (hand, 0.8f, 0.05f, "swap");
+ 					vkq_vr_holster_note ("SWAP %s: imp%d out, imp%d in", vkq_vr_zone_names[zone], vkq_vr_weapon_impulse (*slot),
+ 						vkq_vr_weapon_impulse (t));
+ 				}
+@@ -8823,10 +9408,27 @@
+ 	// Keep the server consistent, silently. It always has an active weapon; if
+ 	// nothing is in the aim hand we simply do not draw one, and if the aim hand
+ 	// holds something the server does not, we ask for it.
++	//
++	// overlay 0023 (R6 part A1) — THIS IS WHERE THE CROSS-FIRE CAME FROM, and the
++	// two changes here are the structural half of the fix.
++	//
++	// (1) It only runs while the fire scheduler owns NOTHING. `vkq_vr_shoot_hand`
++	//     was the old test and it is not enough: the scheduler can legitimately
++	//     hold ownership on a frame where the gate suppressed the shot (so
++	//     shoot_hand reads -1), and queueing an aim-hand switch on exactly those
++	//     frames is what put a nail through the rocket launcher.
++	// (2) It goes through the SAME pending record the scheduler uses, so a switch
++	//     this line queued is visible to the gate. QC consumes self.impulse inside
++	//     W_WeaponFrame BEFORE it tests button0, so an impulse queued here and
++	//     serviced two frames later would otherwise be indistinguishable — to the
++	//     client — from no impulse at all.
+ 	{
+ 		const int aimW = vkq_vr_held_item[vkq_vr_aim_hand ()];
+-		if (aimW && cl.stats[STAT_ACTIVEWEAPON] != aimW && !in_impulse && vkq_vr_shoot_hand < 0)
++		if (aimW && cl.stats[STAT_ACTIVEWEAPON] != aimW && !in_impulse && VKQ_VR_FireOwner () < 0 && vkq_vr_shoot_hand < 0)
++		{
+ 			in_impulse = vkq_vr_weapon_impulse (aimW);
++			vkq_vr_fire_note_pending (aimW);
++		}
+ 	}
+ }
+ 
+@@ -8883,7 +9485,7 @@
+ 		{
+ 			if (zone >= 0)
+ 			{
+-				VKQ_VR_Haptic (hand, 0.35f, 0.02f); // you can feel the holster
++				VKQ_VR_Haptic (hand, 0.55f, 0.05f, "zone-entry"); // you can feel the holster
+ 				vkq_vr_holster_note ("%s hand entered %s", hand == aim ? "aim" : "off", vkq_vr_zone_names[zone]);
+ 			}
+ 			g->zoneNow = zone;
+@@ -8910,7 +9512,8 @@
+ 				// there is no reason for a gap.
+ 				const int imp = vkq_vr_zone_impulse (g->zoneAt);
+ 				in_impulse = imp;
+-				VKQ_VR_Haptic (hand, 0.5f, 0.03f);
++				vkq_vr_fire_note_pending (-1);
++				VKQ_VR_Haptic (hand, 0.5f, 0.04f, "quickselect");
+ 				vkq_vr_holster_note ("select imp%d from %s (%.2fs)", imp, vkq_vr_zone_names[g->zoneAt], held);
+ 			}
+ 			g->zoneAt = -1;
+@@ -8923,7 +9526,7 @@
+ 			{
+ 				vkq_vr_zone_set_impulse (g->zoneAt, imp);
+ 				g->assigned = 1;
+-				VKQ_VR_Haptic (hand, 0.8f, 0.05f);
++				VKQ_VR_Haptic (hand, 0.8f, 0.05f, "assign");
+ 				vkq_vr_holster_note ("ASSIGNED imp%d to %s", imp, vkq_vr_zone_names[g->zoneAt]);
+ 			}
+ 		}
+--- a/Quake/sv_phys.c
++++ b/Quake/sv_phys.c
+@@ -1105,7 +1105,211 @@
+ 		return;
+ 	VectorCopy (vkq_vr_origin_backup, ent->v.origin);
+ 	vkq_vr_origin_shifted = 0;
++}
++
++/*
++================
++vkquake-ios overlay 0023 — R6 part A: THE DISCHARGE SIGNAL, and per-hand refire
++clocks (A1's handoff and A2).
++
++`attack_finished` is a QuakeC field, not an entvars_t member, so it is reached
++the same way host_cmd.c already reaches `ammo_shells1`: ED_FindFieldOffset by
++name, resolved once per loaded progs. A mod whose progs lacks it (none in the
++id lineage, but the guarantee is the point) simply turns both features off.
++
++WHY IT IS THE RIGHT FIELD FOR BOTH JOBS. Stock weapons.qc:
++
++    void() W_WeaponFrame =
++    {
++        if (time < self.attack_finished)  return;      <- (a)
++        ImpulseCommands ();                            <- (b)
++        if (self.button0) { SuperDamageSound(); W_Attack(); }
++    };
++
++and every W_Fire* sets `self.attack_finished = time + <refire>`. So:
++
++  * a shot LEAVING is exactly the moment that field steps forward, inside the
++    think — which is the handoff signal A1 wants, with no timer to tune (the
++    timeout in the scheduler exists for shots that can never come, not for
++    normal fire);
++  * line (a) is ALSO why one shared clock jams the other hand: while it is in
++    the future W_WeaponFrame returns before (b), so the other hand's weapon
++    switch is not merely delayed in firing, it is not even READ. Virtualising
++    the field per hand is therefore not a nicety — without it, alternating a
++    rocket launcher with a nailgun runs the nailgun at the ROCKET's rate.
++
++The edict carries exactly one hand's clock at a time; the other hand's lives in
++`vkq_vr_af_saved` and they are exchanged when the scheduler hands the pipeline
++over — the same mechanism, and the same think window, that the barrel-true
++origin shift above already uses.
++================
++*/
++extern cvar_t vkqvr_dualclock;
++extern int	  VKQ_VR_FireOwner (void);
++extern int	  vkq_vr_fire_auth_hand; // whose shot THIS usercmd authorised, or -1
++extern void	  VKQ_VR_NoteDischarge (int serverWeapon);
++extern int	  VKQ_VR_ImmersiveActive (void);
++
++static int		vkq_vr_af_ofs = -1;	 // field offset, or -1 = absent
++static unsigned vkq_vr_af_progs = 0; // which progs that offset was resolved against
++static float	vkq_vr_af_before = 0.0f;
++static int		vkq_vr_af_watch = 0;
++// A shot also spends ammo, and for some weapons that is the ONLY signal.
++static float vkq_vr_ammo_before = 0.0f;
++static float vkq_vr_weap_before = 0.0f;
++
++// PER-WEAPON refire clocks, by impulse 1-8, and which weapon's clock the edict
++// is currently carrying.
++//
++// R6 KEYED THESE BY HAND FIRST, AND THAT WAS WRONG TWICE OVER. A refire clock
++// belongs to the WEAPON, not to the hand holding it — and keying by hand meant
++// asking the client "who owns the pipeline?", whose answer has already moved on
++// by the time the server runs the usercmd (the client re-decides every rendered
++// frame; usercmds go out at the net rate). The rocket launcher's 0.8 s therefore
++// landed on the NAILGUN's slot, and the measured cadence under dual fire was
++// 3.50 nails/s against 10.12 solo — 35 %, the very jam A2 exists to remove, in a
++// new place. Keying by weapon is derived entirely from the SERVER's own state
++// (the pending impulse, else self.weapon) and cannot skew.
++static float vkq_vr_af_wclock[9];
++static int	 vkq_vr_af_cur = 0;
++
++extern int VKQ_VR_WeaponImpulse (int itembit); // gl_vidsdl.c
++extern int VKQ_VR_HeldItem (int hand);
++
++// Per-weapon clocks apply to DUAL WIELD and nothing else. With one weapon in
++// play the shared clock is stock behaviour — switching weapons carries the
++// cooldown with you, exactly as every Quake ever — and this must not change it.
++static int vkq_vr_dual_wield (void) { return VKQ_VR_ImmersiveActive () && VKQ_VR_HeldItem (0) && VKQ_VR_HeldItem (1); }
++
++// Resolve (once per progs) and return the pointer, or NULL when unavailable.
++static float *vkq_vr_attack_finished (edict_t *ent)
++{
++	if (!ent || !qcvm || !qcvm->progs)
++		return NULL;
++	// Re-resolve whenever the loaded progs changes (a `game` switch, a mod), so
++	// the offset can never belong to a different progs than the edict does.
++	if (vkq_vr_af_progs != qcvm->progshash)
++	{
++		vkq_vr_af_progs = qcvm->progshash;
++		vkq_vr_af_ofs = ED_FindFieldOffset ("attack_finished");
++		memset (vkq_vr_af_wclock, 0, sizeof (vkq_vr_af_wclock));
++		vkq_vr_af_cur = 0;
++		Con_DPrintf (
++			"VR dual clock: attack_finished %s in this progs (%s)\n", vkq_vr_af_ofs >= 0 ? "found" : "ABSENT",
++			vkq_vr_af_ofs >= 0 ? "per-weapon refire clocks available" : "falling back to the shared clock");
++	}
++	if (vkq_vr_af_ofs < 0)
++		return NULL;
++	return &GetEdictFieldValue (ent, vkq_vr_af_ofs)->_float;
++}
++
++void VKQ_VR_ClockReset (void)
++{
++	memset (vkq_vr_af_wclock, 0, sizeof (vkq_vr_af_wclock));
++	vkq_vr_af_cur = 0;
++}
++
++int VKQ_VR_ClockAvailable (void) { return vkq_vr_af_ofs >= 0; }
++
++/*
++================
++VKQ_VR_ClockReady -- overlay 0023 (R6 part A2)
++
++Can this hand's weapon fire RIGHT NOW? The scheduler asks before handing the
++pipeline over, and the answer is what stops the fair-handoff rule from becoming
++the very jam it exists to prevent: "alternate on every discharge" would hand the
++pipeline to a rocket launcher whose clock is 0.8 s out, park it there doing
++nothing until the starvation timeout expired, and throttle the nailgun to the
++rocket's rate.
++
++NAMES THE SERVER VM EXPLICITLY, and touches the ambient `qcvm` nowhere: the
++scheduler calls this from CL_AccumulateCmd, which host.c runs BEFORE the
++`PR_SwitchQCVM (&sv.qcvm)` block, so `qcvm` is NULL (or the CSQC vm) right here
++and reading `qcvm->time` would be a null dereference on the first handoff of
++every session.
++
++Returns 1 when there is nothing to consult — failing open means "alternate as A1
++alone would", which is the documented fallback rather than a stall.
++================
++*/
++int VKQ_VR_ClockReady (int hand)
++{
++	edict_t *ent;
++	eval_t	*val;
++	float	 t;
++	int		 imp;
++	if (hand < 0 || hand > 1 || vkq_vr_af_ofs < 0 || vkqvr_dualclock.value < 0.5f)
++		return 1;
++	if (!sv.active || !svs.clients || svs.maxclients < 1 || !svs.clients[0].active)
++		return 1;
++	if (vkq_vr_af_progs != sv.qcvm.progshash)
++		return 1; // resolved against a different progs: fail open until the next think
++	imp = VKQ_VR_WeaponImpulse (VKQ_VR_HeldItem (hand));
++	if (imp < 1 || imp > 8)
++		return 1;
++	t = (float)sv.qcvm.time;
++	if (imp != vkq_vr_af_cur)
++		return (vkq_vr_af_wclock[imp] <= t) ? 1 : 0;
++	ent = svs.clients[0].edict;
++	val = GetEdictFieldValue (ent, vkq_vr_af_ofs);
++	return (!val || val->_float <= t) ? 1 : 0;
+ }
++
++// Before the think: put the clock belonging to the weapon that is about to act
++// onto the edict, and remember the value so "a shot left" is a comparison.
++static void VKQ_VR_PreThink (edict_t *ent, int num)
++{
++	float *af;
++	vkq_vr_af_watch = 0;
++	VKQ_VR_ShiftToMuzzle (ent, num);
++	if (!vkq_vr_active || num != cl.viewentity || !VKQ_VR_ImmersiveActive ())
++		return;
++	af = vkq_vr_attack_finished (ent);
++	if (!af)
++		return;
++	if (vkqvr_dualclock.value >= 0.5f && vkq_vr_dual_wield ())
++	{
++		// WHICH weapon is about to act, from the server's own state only: the
++		// impulse QC has not consumed yet if there is one (W_WeaponFrame runs
++		// ImpulseCommands before it tests button0), otherwise the weapon it is
++		// already holding.
++		const int pend = (int)ent->v.impulse;
++		const int imp = (pend >= 1 && pend <= 8) ? pend : VKQ_VR_WeaponImpulse ((int)ent->v.weapon);
++		if (imp >= 1 && imp <= 8 && imp != vkq_vr_af_cur)
++		{
++			if (vkq_vr_af_cur >= 1 && vkq_vr_af_cur <= 8)
++				vkq_vr_af_wclock[vkq_vr_af_cur] = *af;
++			*af = vkq_vr_af_wclock[imp];
++			vkq_vr_af_cur = imp;
++		}
++	}
++	vkq_vr_af_before = *af;
++	vkq_vr_ammo_before = ent->v.currentammo;
++	vkq_vr_weap_before = ent->v.weapon;
++	vkq_vr_af_watch = 1;
++}
++
++// After the think: the field stepping forward IS the shot. Attributed to the
++// scheduler's owner, which is by construction the hand whose weapon was active
++// and whose trigger the gate let through.
++static void VKQ_VR_PostThink (edict_t *ent, int num)
++{
++	VKQ_VR_RestoreOrigin (ent);
++	if (vkq_vr_af_watch)
++	{
++		float *af = vkq_vr_attack_finished (ent);
++		const int fired = (af && *af > vkq_vr_af_before + 0.0001f);
++		// AMMO WAS TRIED AS A SECOND SIGNAL and is deliberately not used. The
++		// nailgun family's think chain spends ammo per link without touching
++		// attack_finished, so watching ammo makes every link a "discharge" — and
++		// the pipeline then changes hands faster than a weapon switch can land,
++		// which measured as the rocket launcher firing ZERO shots in six seconds.
++		// One shot per W_Attack is the signal that matches what a handoff means.
++		if (fired)
++			VKQ_VR_NoteDischarge ((int)ent->v.weapon); // the SERVER's weapon, not the client's stale stat
++		vkq_vr_af_watch = 0;
++	}
++}
+ #endif
+ 
+ static void SV_Physics_Client (edict_t *ent, int num)
+@@ -1144,13 +1348,13 @@
+ 		// overlay 0020: the nailgun's repeat fire runs off the PLAYER's own
+ 		// .think, so the muzzle has to be standing in for the body here too
+ 		// (QuakeQuest makes the same second wrap, for the same reason).
+-		VKQ_VR_ShiftToMuzzle (ent, num);
++		VKQ_VR_PreThink (ent, num);
+ 		if (!SV_RunThink (ent))
+ 		{
+-			VKQ_VR_RestoreOrigin (ent);
++			VKQ_VR_PostThink (ent, num);
+ 			return;
+ 		}
+-		VKQ_VR_RestoreOrigin (ent);
++		VKQ_VR_PostThink (ent, num);
+ #else
+ 		if (!SV_RunThink (ent))
+ 			return;
+@@ -1198,9 +1402,9 @@
+ 	// this is THE window in which the player edict stands at the muzzle. Note it
+ 	// is AFTER SV_LinkEdict above — the shifted origin is never linked, never
+ 	// collided against and never networked.
+-	VKQ_VR_ShiftToMuzzle (ent, num);
++	VKQ_VR_PreThink (ent, num);
+ 	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
+-	VKQ_VR_RestoreOrigin (ent);
++	VKQ_VR_PostThink (ent, num);
+ #else
+ 	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
+ #endif
+--- a/Quake/host_cmd.c
++++ b/Quake/host_cmd.c
+@@ -676,8 +676,57 @@
+ Host_God_f
+ 
+ Sets client to godmode
++==================
++*/
++#ifdef VKQ_IOS
++/*
++==================
++vkquake-ios overlay 0023 — R6 part C6: the Cheats rows read GROUND TRUTH.
++
++A settings switch that only remembers what it last sent is a lie the first time
++anything else changes the state — a fresh level clears FL_GODMODE, an old save
++restores it, and the console `god` command exists. The local server is always
++in-process on this platform, so the flag on the player edict is readable
++directly and the switch shows what the game IS rather than what the UI asked
++for. The setter uses `god 1`/`god 0` (johnfitz's explicit form, right below)
++rather than the bare toggle, so re-asserting can never invert the state.
+ ==================
+ */
++static edict_t *VKQ_iOS_LocalPlayerEdict (void)
++{
++	if (!sv.active || !svs.clients || svs.maxclients < 1 || !svs.clients[0].active)
++		return NULL;
++	return svs.clients[0].edict;
++}
++
++int VKQ_iOS_CheatsAvailable (void)
++{
++	// Cheats are refused in deathmatch by the engine itself; saying so up front
++	// keeps the row from looking broken.
++	return (VKQ_iOS_LocalPlayerEdict () != NULL && !deathmatch.value) ? 1 : 0;
++}
++
++int VKQ_iOS_GodModeActive (void)
++{
++	edict_t *e = VKQ_iOS_LocalPlayerEdict ();
++	return (e && ((int)e->v.flags & FL_GODMODE)) ? 1 : 0;
++}
++
++void VKQ_iOS_SetGodMode (int on)
++{
++	if (!VKQ_iOS_CheatsAvailable ())
++		return;
++	Cbuf_AddText (on ? "god 1\n" : "god 0\n");
++}
++
++// Which level is loaded, for the once-per-spawn re-assert. A fresh spawn clears
++// FL_GODMODE, so a switch left ON has to say so again — but ONLY on a level
++// change, never continuously: a player who types `god` in the console mid-level
++// means it, and a tick that argued with them every frame would be a bug wearing
++// a feature's clothes.
++const char *VKQ_iOS_LevelName (void) { return sv.active ? sv.name : ""; }
++#endif
++
+ static void Host_God_f (void)
+ {
+ 	if (cmd_source != src_client)

@@ -30,6 +30,7 @@ extern int  VKQ_TouchInGame (void);                      // real game (not demo/
 extern int  VKQ_TouchIsDemo (void);                      // attract/demo playback
 extern int  VKQ_HasActiveController (void);              // engine has an open gamepad
 extern void VKQ_iOS_EngineFrame (void);                  // engine frame (driven by our CADisplayLink)
+extern void VKQ_iOS_CheatsTick (void);                   // R6: re-assert God Mode on a new level
 extern void VKQ_iOS_ConsoleBridgeStart (void);           // TCP remote console (opt-in via env)
 extern void VKQ_iOS_ConsoleBridgeDrain (void);           // per-frame: feed commands / stream output
 extern void VKQ_iOS_OnboardingDismiss (void);            // hide the onboarding "Loading…" once the game draws
@@ -836,6 +837,7 @@ static VKQKeyboard *g_keyboard;
 	static int firstframes = 0;
 	VKQ_iOS_ConsoleBridgeDrain ();
 	VKQ_iOS_EngineFrame ();
+	VKQ_iOS_CheatsTick (); // R6 C6: God Mode survives a changelevel (once per level)
 	if (firstframes < 3 && ++firstframes == 2)
 		VKQ_iOS_OnboardingDismiss (); // reveal the game once it has actually drawn
 }
@@ -981,7 +983,23 @@ static UIButton *vkq_modal_button (NSString *title, CGPoint center, SEL action, 
 void VKQ_iOS_ModalBegin (const char *text)
 {
 	(void)text; // the engine has already drawn the prompt text into the framebuffer
-	UIWindow *win = vkq_key_window ();
+	// VR R5 item 1 — LAND ON THE GAME WINDOW, not "the key window".
+	//
+	// `connectedScenes` is an unordered SET and vkq_key_window() returns from the
+	// FIRST scene it happens to look at, so on visionOS — where a SwiftUI
+	// ornament, the settings sheet and the immersive space all bring their own
+	// hosting windows — the Yes/No buttons could be added to a window nobody can
+	// see. This is the identical defect VKQ_SetCurtain was already fixed for
+	// ("the key window can be a SwiftUI ornament/sheet hosting window right after
+	// a button tap"), and it is half of why the user's modal was unanswerable: the
+	// prompt composited into the game's framebuffer while its buttons went
+	// somewhere else entirely.
+	//
+	// The other half is that the game window is PARKED behind the curtain during
+	// VR and the 3D panel, which no UIKit view can fix — that is what the
+	// engine-drawn YES/NO in SCR_DrawNotifyString is for. These buttons remain
+	// the 2D answer.
+	UIWindow *win = VKQ_iOS_GameWindow () ?: vkq_key_window ();
 	if (!win || g_modal)
 		return;
 	g_modal = [[UIView alloc] initWithFrame:win.bounds];
@@ -994,6 +1012,10 @@ void VKQ_iOS_ModalBegin (const char *text)
 	[g_modal addSubview:vkq_modal_button (@"NO", CGPointMake (cx + 105, cy), @selector (no),
 										  [UIColor colorWithRed:0.55 green:0.16 blue:0.16 alpha:0.92])];
 	[win addSubview:g_modal];
+	// Above the "Playing in 3D/VR" curtain, which is a sibling on this same
+	// window and would otherwise be a black sheet over the answer.
+	[win bringSubviewToFront:g_modal];
+	NSLog (@"[vkquake] modal: Yes/No overlay on window %p (%.0fx%.0f)", win, win.bounds.size.width, win.bounds.size.height);
 }
 
 void VKQ_iOS_ModalPump (void)

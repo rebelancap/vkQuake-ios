@@ -1,0 +1,878 @@
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -284,7 +284,67 @@
+ 	}
+ }
+ 
++#ifdef VKQ_VISIONOS
+ /*
++===============
++R_SetVRFrustum -- vkquake-ios overlay 0018
++
++Cull planes for the immersive VR eye. The stock R_SetFrustum turns the game's
++fov around the game's view vectors; in VR neither is what the eye sees. Take the
++basis and origin straight out of the composed VR view matrix (world -> eye,
++right-up-back, so row 0 is the eye's right axis in world space and row 2 its
++back axis), and the half-angles straight out of the drawable's asymmetric
++tangents.
++
++In eye space a visible point satisfies  tL*d <= x <= tR*d  and  tD*d <= y <= tU*d
++with d = -z the distance along the eye's forward axis, so each inward plane
++normal is a plain combination of the basis vectors — e.g. the left plane is
++right - tL*forward. Asymmetric and canted frustums fall out for free, which is
++exactly what the Vision Pro vends.
++===============
++*/
++void R_SetVRFrustum (void)
++{
++	extern void VKQ_VR_ComposeView (int eye, float out[16]);
++	extern void VKQ_VR_GetTangents (int eye, float *l, float *r, float *u, float *d);
++	extern int	vkq_stereo3d_eye;
++
++	float	v[16];
++	vec3_t	right, up, fwd, eye_org;
++	float	tl, tr, tu, td;
++	int		i;
++	const int e = (vkq_stereo3d_eye == 2) ? 1 : 0;
++
++	VKQ_VR_ComposeView (e, v);
++	VKQ_VR_GetTangents (e, &tl, &tr, &tu, &td);
++
++	// Rows of the rotation part = the eye's world-space axes (column-major [col*4+row]).
++	right[0] = v[0 * 4 + 0], right[1] = v[1 * 4 + 0], right[2] = v[2 * 4 + 0];
++	up[0] = v[0 * 4 + 1], up[1] = v[1 * 4 + 1], up[2] = v[2 * 4 + 1];
++	fwd[0] = -v[0 * 4 + 2], fwd[1] = -v[1 * 4 + 2], fwd[2] = -v[2 * 4 + 2];
++	// Eye origin in world space: p = -R^T * t (R orthonormal, t = column 3).
++	eye_org[0] = -(right[0] * v[3 * 4 + 0] + up[0] * v[3 * 4 + 1] - fwd[0] * v[3 * 4 + 2]);
++	eye_org[1] = -(right[1] * v[3 * 4 + 0] + up[1] * v[3 * 4 + 1] - fwd[1] * v[3 * 4 + 2]);
++	eye_org[2] = -(right[2] * v[3 * 4 + 0] + up[2] * v[3 * 4 + 1] - fwd[2] * v[3 * 4 + 2]);
++
++	for (i = 0; i < 3; i++)
++	{
++		frustum[0].normal[i] = tr * fwd[i] - right[i]; // right plane
++		frustum[1].normal[i] = right[i] - tl * fwd[i]; // left plane
++		frustum[2].normal[i] = up[i] - td * fwd[i];	   // bottom plane
++		frustum[3].normal[i] = tu * fwd[i] - up[i];	   // top plane
++	}
++	for (i = 0; i < 4; i++)
++	{
++		VectorNormalize (frustum[i].normal);
++		frustum[i].type = PLANE_ANYZ;
++		frustum[i].dist = DotProduct (eye_org, frustum[i].normal);
++		frustum[i].signbits = SignbitsForPlane (&frustum[i]);
++	}
++}
++#endif
++
++/*
+ =============
+ GL_FrustumMatrix
+ =============
+@@ -352,8 +412,21 @@
+ 	{
+ 		extern int	 vkq_stereo3d_active, vkq_stereo3d_eye;
+ 		extern float vkq_stereo3d_sep, vkq_stereo3d_conv;
+-		if (vkq_stereo3d_active && vkq_stereo3d_eye)
++		// overlay 0018 (VR): in the immersive world mode the panel's ±sep/2 skew is
++		// replaced WHOLESALE by the compositor's per-eye view+projection (charter
++		// A2/A3) — the head owns the camera, so nothing here derives from the game's
++		// fov or view angles.
++		extern int vkq_vr_use;
++		if (vkq_vr_use && vkq_stereo3d_eye)
+ 		{
++			extern void VKQ_VR_ComposeView (int eye, float out[16]);
++			extern void VKQ_VR_GetProjection (int eye, float out[16]);
++			const int	e = (vkq_stereo3d_eye == 2) ? 1 : 0;
++			VKQ_VR_ComposeView (e, vulkan_globals.view_matrix);
++			VKQ_VR_GetProjection (e, vulkan_globals.projection_matrix);
++		}
++		else if (vkq_stereo3d_active && vkq_stereo3d_eye)
++		{
+ 			const float e = (vkq_stereo3d_eye == 2 ? 1.0f : -1.0f) * 0.5f * vkq_stereo3d_sep;
+ 			vulkan_globals.view_matrix[3 * 4 + 0] -= e;
+ 			vulkan_globals.projection_matrix[2 * 4 + 0] = -vulkan_globals.projection_matrix[0 * 4 + 0] * e / vkq_stereo3d_conv;
+@@ -425,7 +498,23 @@
+ 	}
+ 	// johnfitz
+ 
++#ifdef VKQ_VISIONOS
++	// overlay 0018 (VR): the stock cull frustum is built from the GAME's fov and
++	// the GAME's view angles — both wrong in VR, where the eye looks where the
++	// HEAD looks through the COMPOSITOR's asymmetric frustum. Rendering with one
++	// frustum and culling with another is visible, not theoretical: R0 measured a
++	// hard black wedge past ~85° of head yaw. Build the planes from the published
++	// VR view basis and this eye's tangents instead (charter A3 "Culling").
++	{
++		extern int vkq_vr_use;
++		if (vkq_vr_use)
++			R_SetVRFrustum ();
++		else
++			R_SetFrustum (r_fovx, r_fovy);
++	}
++#else
+ 	R_SetFrustum (r_fovx, r_fovy); // johnfitz -- use r_fov* vars
++#endif
+ 	R_SetupMatrices ();
+ 
+ 	// johnfitz -- cheat-protect some draw modes
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -139,6 +139,26 @@
+ SDL_Mutex	  *draw_qcvm_mutex;
+ 
+ void SCR_ScreenShot_f (void);
++
++#ifdef VKQ_VISIONOS
++// overlay 0018 R1.1 — why this VR frame is on the panel instead of in the eyes.
++// Kept next to nothing else on purpose: SCR_VRPresentMode (which sets it), the
++// in-headset hint (which reads it) and the shell's diagnostics (which report it)
++// are the only users, and all three must agree on the numbering.
++#define VKQ_VR_REASON_WORLD		   0
++#define VKQ_VR_REASON_NOGAME	   1
++#define VKQ_VR_REASON_CONNECTING   2
++#define VKQ_VR_REASON_NOMAP		   3
++#define VKQ_VR_REASON_LOADING	   4
++#define VKQ_VR_REASON_DEMO		   5
++#define VKQ_VR_REASON_INTERMISSION 6
++#define VKQ_VR_REASON_MENU		   7
++#define VKQ_VR_REASON_CONSOLE	   8
++#define VKQ_VR_REASON_TYPING	   9
++// Reasons 1..5 mean NO GAME IS IN PROGRESS — the only case where the player
++// needs telling what the panel is waiting for.
++#define VKQ_VR_REASON_NO_GAME_IN_PROGRESS(r) ((r) >= VKQ_VR_REASON_NOGAME && (r) <= VKQ_VR_REASON_DEMO)
++#endif
+ 
+ /*
+ ===============================================================================
+@@ -1614,6 +1634,43 @@
+ 	}
+ }
+ #endif // VKQ_IOS
++
++#ifdef VKQ_VISIONOS
++/*
++==================
++SCR_DrawVRHint -- vkquake-ios overlay 0018 (R1.1)
++
++Says out loud, in the headset, what the panel is. R1's device round came back
++"VR looks like the 3D panel, just a screen with stereo depth, I don't see a
++difference": VR was entered at the title screen, where the attract demo is not
++gameplay, so charter A9 correctly put the whole composite on the world-locked
++panel — and correctly is indistinguishable from broken if nothing says so.
++
++Shown ONLY while no game is in progress (reasons 1..5). A menu or console over a
++live game explains itself — the player pressed Escape — and a nag there would be
++worse than nothing. Never drawn in world mode: the world path suppresses the
++whole 2D composite before this is reached.
++==================
++*/
++static void SCR_DrawVRHint (cb_context_t *cbx)
++{
++	extern int		  vkq_vr_active, vkq_vr_present_mode, vkq_vr_present_reason;
++	static const char l1[] = "VR: this is the menu screen";
++	static const char l2[] = "Start a game to enter the world";
++	const int		  w = (int)(sizeof (l2) - 1) * CHARACTER_SIZE;
++	const int		  y = 200 - 30;
++
++	if (!vkq_vr_active || vkq_vr_present_mode)
++		return;
++	if (!VKQ_VR_REASON_NO_GAME_IN_PROGRESS (vkq_vr_present_reason))
++		return;
++
++	GL_SetCanvas (cbx, CANVAS_MENU); // johnfitz's 320x200 virtual canvas
++	Draw_Fill (cbx, (320 - w) / 2 - 6, y - 6, w + 12, CHARACTER_SIZE * 2 + 12, 0, 0.55f);
++	Draw_String (cbx, (320 - (int)(sizeof (l1) - 1) * CHARACTER_SIZE) / 2, y, l1);
++	Draw_String (cbx, (320 - w) / 2, y + CHARACTER_SIZE, l2);
++}
++#endif
+ 
+ /*
+ ==================
+@@ -1631,6 +1688,21 @@
+ 	R_BeginDebugUtilsLabel (cbx, "2D");
+ 	SCR_TileClear (cbx);
+ 
++#ifdef VKQ_VISIONOS
++	// overlay 0018 (VR): in immersive world mode the eyes carry the WORLD only —
++	// status bar, crosshair, console and menus all belong on the in-space panel
++	// (charter A9). Without this the whole flat composite is painted across both
++	// eyes at arm's length (R0 finding 7).
++	{
++		extern int vkq_vr_suppress_2d;
++		if (vkq_vr_suppress_2d)
++		{
++			R_EndDebugUtilsLabel (cbx);
++			return;
++		}
++	}
++#endif
++
+ 	const qboolean cscqhud = (scr_style.value < 1.0f) && cl.qcvm.extfuncs.CSQC_DrawHud;
+ 	qboolean	   use_mutex = r_showbboxes.value && cscqhud;
+ 
+@@ -1681,6 +1753,11 @@
+ 		M_Draw (cbx);
+ 	}
+ 
++#ifdef VKQ_VISIONOS
++	// overlay 0018 (R1.1): LAST, so the menu can never hide it.
++	SCR_DrawVRHint (cbx);
++#endif
++
+ 	if (use_mutex)
+ 		SDL_UnlockMutex (draw_qcvm_mutex);
+ 
+@@ -1730,9 +1807,141 @@
+ // disparity, which shows as judder while moving. The eye global is set
+ // synchronously between renders: the tasks path joins draw_done inside each
+ // render, so frame N's matrices are computed before eye N+1 is selected.
++
++// overlay 0018 (VR): which surface this frame belongs on. Gameplay goes to the
++// eyes through the VR matrix chain; EVERY non-gameplay context — menus, console,
++// intermission, demo playback, loading, not-yet-connected — goes to the flat
++// world-locked panel that 3D mode already ships (charter A9). That is why menus
++// and save/load work in VR on day one with no new UI code.
++//
++// overlay 0018 R1.1: the predicate now RECORDS WHICH TERM FAILED. R1's device
++// round spent a whole session in panel mode and the file could not distinguish
++// "the predicate is wrong" from "the predicate was never exercised" — the log
++// said mode=panel and nothing else. One reason code turns the next diagnostics
++// file into evidence (charter §11 wants a mechanism, not a guess), and it is
++// also what the in-headset hint and the settings status row read.
++int		   vkq_vr_present_reason = VKQ_VR_REASON_WORLD;
++int		   vkq_vr_present_evals = 0; // reset by VKQ_VR_SetActive (gl_vidsdl.c)
++static int vkq_vr_dbg_state, vkq_vr_dbg_signon, vkq_vr_dbg_keydest;
++static int vkq_vr_dbg_intermission, vkq_vr_dbg_demo, vkq_vr_dbg_loading, vkq_vr_dbg_world;
++
++// How many times the predicate has actually run. The shell must not report a
++// reason it has not measured — "in the world" printed before the engine's first
++// VR frame would be a fabrication, and this round exists because a fabricated-
++// looking log is worthless.
++int VKQ_VR_PresentEvalCount (void) { return vkq_vr_present_evals; }
++
++static int SCR_VRPresentMode (void)
++{
++	int reason;
++
++	vkq_vr_present_evals++;
++
++	// The raw terms, exported verbatim alongside the verdict: if the predicate
++	// itself is ever wrong on device, these are what prove it in one line.
++	vkq_vr_dbg_state = (int)cls.state;
++	vkq_vr_dbg_signon = cls.signon;
++	vkq_vr_dbg_keydest = (int)key_dest;
++	vkq_vr_dbg_intermission = cl.intermission;
++	vkq_vr_dbg_demo = cls.demoplayback ? 1 : 0;
++	vkq_vr_dbg_loading = (scr_drawloading ? 1 : 0) | (scr_disabled_for_loading ? 2 : 0);
++	vkq_vr_dbg_world = cl.worldmodel ? 1 : 0;
++
++	// Ordered most-fundamental first, so the reported reason is the one a player
++	// would actually name ("I'm at the title screen", not "key_dest is 1").
++	if (cls.state != ca_connected)
++		reason = VKQ_VR_REASON_NOGAME;
++	else if (cls.signon != SIGNONS)
++		reason = VKQ_VR_REASON_CONNECTING;
++	else if (!cl.worldmodel)
++		reason = VKQ_VR_REASON_NOMAP;
++	else if (scr_drawloading || scr_disabled_for_loading)
++		reason = VKQ_VR_REASON_LOADING;
++	else if (cls.demoplayback)
++		reason = VKQ_VR_REASON_DEMO;
++	else if (cl.intermission)
++		reason = VKQ_VR_REASON_INTERMISSION;
++	else if (key_dest == key_menu)
++		reason = VKQ_VR_REASON_MENU;
++	else if (key_dest == key_console)
++		reason = VKQ_VR_REASON_CONSOLE;
++	else if (key_dest != key_game)
++		reason = VKQ_VR_REASON_TYPING;
++	else
++		reason = VKQ_VR_REASON_WORLD;
++
++	vkq_vr_present_reason = reason;
++	return reason == VKQ_VR_REASON_WORLD;
++}
++
++// Short human phrase for the diagnostics file, the PACING line and the settings
++// status row — a non-engineer must be able to read why the world is not up.
++const char *VKQ_VR_PresentReasonString (void)
++{
++	switch (vkq_vr_present_reason)
++	{
++	case VKQ_VR_REASON_WORLD:
++		return "in the world";
++	case VKQ_VR_REASON_NOGAME:
++		return "no game running";
++	case VKQ_VR_REASON_CONNECTING:
++		return "connecting";
++	case VKQ_VR_REASON_NOMAP:
++		return "no map loaded";
++	case VKQ_VR_REASON_LOADING:
++		return "loading";
++	case VKQ_VR_REASON_DEMO:
++		return "demo playing";
++	case VKQ_VR_REASON_INTERMISSION:
++		return "intermission";
++	case VKQ_VR_REASON_MENU:
++		return "in menu";
++	case VKQ_VR_REASON_CONSOLE:
++		return "console open";
++	case VKQ_VR_REASON_TYPING:
++		return "typing";
++	default:
++		return "unknown";
++	}
++}
++
++// Every term of the predicate, as numbers, for the pinned diagnostics section.
++void VKQ_VR_PresentDebugString (char *out, int len)
++{
++	if (!out || len <= 0)
++		return;
++	q_snprintf (
++		out, len, "cls.state=%d signon=%d/%d key_dest=%d intermission=%d demoplayback=%d loading=%d worldmodel=%d", vkq_vr_dbg_state, vkq_vr_dbg_signon,
++		SIGNONS, vkq_vr_dbg_keydest, vkq_vr_dbg_intermission, vkq_vr_dbg_demo, vkq_vr_dbg_loading, vkq_vr_dbg_world);
++}
++
+ void SCR_UpdateScreen (qboolean use_tasks)
+ {
+ 	extern int vkq_stereo3d_active, vkq_stereo3d_eye, vkq_stereo3d_both;
++	extern int vkq_vr_active, vkq_vr_use, vkq_vr_suppress_2d, vkq_vr_present_mode;
++	if (vkq_vr_active)
++	{
++		// The A4 rendezvous: take the pose the compositor is about to present
++		// against, render BOTH eyes with exactly it, then hand the id back. The
++		// wait is bounded — a miss renders the previous pose again, which the
++		// compositor reprojects, rather than stalling the game loop.
++		extern unsigned long long VKQ_VR_EngineAcquire (int timeout_ms);
++		extern void				  VKQ_VR_EngineRelease (unsigned long long id);
++		unsigned long long		  id;
++		const int				  world = SCR_VRPresentMode ();
++		id = VKQ_VR_EngineAcquire (20);
++		vkq_vr_present_mode = world;
++		vkq_vr_use = world && (id != 0);
++		vkq_vr_suppress_2d = vkq_vr_use;
++		vkq_stereo3d_eye = 1;
++		SCR_UpdateScreenOnce (use_tasks);
++		vkq_stereo3d_eye = 2;
++		SCR_UpdateScreenOnce (use_tasks);
++		vkq_vr_use = 0;
++		vkq_vr_suppress_2d = 0;
++		VKQ_VR_EngineRelease (id);
++		return;
++	}
+ 	if (vkq_stereo3d_active && vkq_stereo3d_both)
+ 	{
+ 		vkq_stereo3d_eye = 1;
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -179,6 +179,15 @@
+ static VkImageView	   vkq_stereo_present_view[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+ static VkFramebuffer   vkq_stereo_present_fb[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+ static int			   vkq_stereo_present_w = 0, vkq_stereo_present_h = 0; // actual image extent
++// overlay 0018 (VR, charter A5): per-eye SCENE DEPTH snapshots. The engine has a
++// single depth buffer shared by both eye passes, so the compositor cannot simply
++// sample it — by blit time it holds whichever eye rendered last. Each eye's pass
++// therefore copies it here, shader-readable, immediately after that eye's frame.
++// vkQuake is already reverse-Z with the near plane the compositor's own (charter
++// A3), so the values need no conversion: depth = n/-z is dimensionless.
++static VkImage		   vkq_vr_depth_image[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
++static vulkan_memory_t vkq_vr_depth_memory[2];
++static int			   vkq_vr_depth_ready[2] = {0, 0};
+ #endif
+ static vulkan_memory_t	oit_accum_buffer_memory;
+ static vulkan_memory_t	oit_reveal_buffer_memory;
+@@ -1616,7 +1625,14 @@
+ 			attachment_descriptions[1].samples = vulkan_globals.sample_count;
+ 			attachment_descriptions[1].format = vulkan_globals.depth_format;
+ 			attachment_descriptions[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++#ifdef VKQ_VISIONOS
++			// overlay 0018 (VR, charter A5): DONT_CARE lets a tile-based GPU throw
++			// the depth away at end-of-pass, so the per-eye depth snapshot would
++			// read garbage. Keep it resident on visionOS.
++			attachment_descriptions[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++#else
+ 			attachment_descriptions[1].storeOp = use_oit ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
++#endif
+ 			attachment_descriptions[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+ 			attachment_descriptions[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+ 
+@@ -2036,6 +2052,12 @@
+ 	image_create_info.samples = vulkan_globals.sample_count;
+ 	image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+ 	image_create_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
++#ifdef VKQ_VISIONOS
++	// overlay 0018 (VR, charter A5): the compositor reprojects on DEPTH, so each
++	// eye's scene depth is snapshotted into a shader-readable per-eye image after
++	// its render (below). That snapshot is a transfer read of this buffer.
++	image_create_info.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++#endif
+ 
+ 	assert (depth_buffer == VK_NULL_HANDLE);
+ 	err = vkCreateImage (vulkan_globals.device, &image_create_info, NULL, &depth_buffer);
+@@ -3205,6 +3227,49 @@
+ 
+ 		vkq_stereo_present_w = (int)vid.width;
+ 		vkq_stereo_present_h = (int)vid.height;
++
++		// overlay 0018 (VR): this eye's scene-depth snapshot. Same format as the
++		// depth buffer (vkCmdCopyImage demands it for depth/stencil) with TRANSFER_DST
++		// + SAMPLED, so MoltenVK's backing MTLTexture can be bound as depth2d in the
++		// compositor's blit and written straight into the drawable's depth attachment.
++		ZEROED_STRUCT (VkImageCreateInfo, vkq_depth_ci);
++		vkq_depth_ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++		vkq_depth_ci.imageType = VK_IMAGE_TYPE_2D;
++		vkq_depth_ci.format = vulkan_globals.depth_format;
++		vkq_depth_ci.extent.width = vid.width;
++		vkq_depth_ci.extent.height = vid.height;
++		vkq_depth_ci.extent.depth = 1;
++		vkq_depth_ci.mipLevels = 1;
++		vkq_depth_ci.arrayLayers = 1;
++		vkq_depth_ci.samples = VK_SAMPLE_COUNT_1_BIT;
++		vkq_depth_ci.tiling = VK_IMAGE_TILING_OPTIMAL;
++		vkq_depth_ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++
++		assert (vkq_vr_depth_image[vkq_eye_i] == VK_NULL_HANDLE);
++		err = vkCreateImage (vulkan_globals.device, &vkq_depth_ci, NULL, &vkq_vr_depth_image[vkq_eye_i]);
++		if (err != VK_SUCCESS)
++			Sys_Error ("vkCreateImage failed with code %i", (int)err);
++		GL_SetObjectName ((uint64_t)vkq_vr_depth_image[vkq_eye_i], VK_OBJECT_TYPE_IMAGE, va ("VR Depth %d", vkq_eye_i));
++
++		VkMemoryRequirements vkq_depth_req;
++		vkGetImageMemoryRequirements (vulkan_globals.device, vkq_vr_depth_image[vkq_eye_i], &vkq_depth_req);
++
++		ZEROED_STRUCT (VkMemoryDedicatedAllocateInfoKHR, vkq_depth_dedicated);
++		vkq_depth_dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR;
++		vkq_depth_dedicated.image = vkq_vr_depth_image[vkq_eye_i];
++
++		ZEROED_STRUCT (VkMemoryAllocateInfo, vkq_depth_alloc);
++		vkq_depth_alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++		vkq_depth_alloc.allocationSize = vkq_depth_req.size;
++		vkq_depth_alloc.memoryTypeIndex = GL_MemoryTypeFromProperties (vkq_depth_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
++		if (vulkan_globals.dedicated_allocation)
++			vkq_depth_alloc.pNext = &vkq_depth_dedicated;
++
++		R_AllocateVulkanMemory (&vkq_vr_depth_memory[vkq_eye_i], &vkq_depth_alloc, VULKAN_MEMORY_TYPE_DEVICE, &num_vulkan_misc_allocations);
++		err = vkBindImageMemory (vulkan_globals.device, vkq_vr_depth_image[vkq_eye_i], vkq_vr_depth_memory[vkq_eye_i].handle, 0);
++		if (err != VK_SUCCESS)
++			Sys_Error ("vkBindImageMemory failed with code %i", (int)err);
++		vkq_vr_depth_ready[vkq_eye_i] = 0;
+ 	}
+ #endif
+ }
+@@ -3361,6 +3426,19 @@
+ 			vkDestroyImageView (vulkan_globals.device, stereo_view, NULL);
+ 		vkDestroyImage (vulkan_globals.device, stereo_image, NULL);
+ 		R_FreeVulkanMemory (&vkq_stereo_present_memory[vkq_eye_i], &num_vulkan_misc_allocations);
++	}
++	// overlay 0018 (VR): the per-eye depth snapshots ride the same lifetime. NULL
++	// the handle BEFORE destroying so the compositor thread can never be handed a
++	// texture that is going away (a mid-space vid restart races its blit).
++	for (int vkq_eye_i = 0; vkq_eye_i < 2; vkq_eye_i++)
++	{
++		VkImage vkq_depth_img = vkq_vr_depth_image[vkq_eye_i];
++		vkq_vr_depth_image[vkq_eye_i] = VK_NULL_HANDLE;
++		vkq_vr_depth_ready[vkq_eye_i] = 0;
++		if (vkq_depth_img == VK_NULL_HANDLE)
++			continue;
++		vkDestroyImage (vulkan_globals.device, vkq_depth_img, NULL);
++		R_FreeVulkanMemory (&vkq_vr_depth_memory[vkq_eye_i], &num_vulkan_misc_allocations);
+ 	}
+ #endif
+ 
+@@ -3715,6 +3793,7 @@
+ #ifdef VKQ_VISIONOS
+ 	uint32_t	 stereo3d	   : 1; // overlay 0010: route GUI+postprocess to the present image
+ 	uint32_t	 stereo3d_eye  : 2; // eye this frame rendered (latched for the compositor)
++	uint32_t	 vr			   : 1; // overlay 0018: this frame is a VR world eye (snapshot depth)
+ #endif
+ 	float		 time;
+ 	VkClearValue color_clear_value;
+@@ -4230,7 +4309,69 @@
+ 		vkCmdNextSubpass (render_passes_cb, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
+ 		vkCmdExecuteCommands (render_passes_cb, 1, &vulkan_globals.secondary_cb_contexts[SCBX_POST_PROCESS]->cb);
+ 		vkCmdEndRenderPass (render_passes_cb);
++	}
++
++#ifdef VKQ_VISIONOS
++	// overlay 0018 (VR, charter A5): snapshot THIS eye's scene depth so the
++	// compositor's per-view blit can write real per-pixel depth and reproject
++	// properly. The engine keeps ONE depth buffer across both eye passes, so the
++	// copy has to happen here, inside the eye's own submission, rather than the
++	// compositor sampling the buffer directly (it would get whichever eye ran
++	// last). Values need no conversion: the VR projection is built infinite-far
++	// reverse-Z with the compositor's own near plane, so depth = n/-z already
++	// matches numerically (charter A3, confirmed against the drawable contract).
++	if (parms->vr && vkq_stereo_present && vkq_vr_depth_image[vkq_stereo_eye_idx] != VK_NULL_HANDLE && depth_buffer != VK_NULL_HANDLE &&
++		vulkan_globals.sample_count == VK_SAMPLE_COUNT_1_BIT)
++	{
++		const VkImageAspectFlags vkq_depth_aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
++		ZEROED_STRUCT_ARRAY (VkImageMemoryBarrier, vkq_depth_barrier, 2);
++		vkq_depth_barrier[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++		vkq_depth_barrier[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
++		vkq_depth_barrier[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++		vkq_depth_barrier[0].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
++		vkq_depth_barrier[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++		vkq_depth_barrier[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++		vkq_depth_barrier[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++		vkq_depth_barrier[0].image = depth_buffer;
++		vkq_depth_barrier[0].subresourceRange.aspectMask = vkq_depth_aspect;
++		vkq_depth_barrier[0].subresourceRange.levelCount = 1;
++		vkq_depth_barrier[0].subresourceRange.layerCount = 1;
++		vkq_depth_barrier[1] = vkq_depth_barrier[0];
++		vkq_depth_barrier[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
++		vkq_depth_barrier[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++		vkq_depth_barrier[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++		vkq_depth_barrier[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++		vkq_depth_barrier[1].image = vkq_vr_depth_image[vkq_stereo_eye_idx];
++		vkCmdPipelineBarrier (
++			render_passes_cb, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
++			NULL, 0, NULL, 2, vkq_depth_barrier);
++
++		ZEROED_STRUCT (VkImageCopy, vkq_depth_copy);
++		vkq_depth_copy.srcSubresource.aspectMask = vkq_depth_aspect;
++		vkq_depth_copy.srcSubresource.layerCount = 1;
++		vkq_depth_copy.dstSubresource.aspectMask = vkq_depth_aspect;
++		vkq_depth_copy.dstSubresource.layerCount = 1;
++		vkq_depth_copy.extent.width = vid.width;
++		vkq_depth_copy.extent.height = vid.height;
++		vkq_depth_copy.extent.depth = 1;
++		vkCmdCopyImage (
++			render_passes_cb, depth_buffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vkq_vr_depth_image[vkq_stereo_eye_idx],
++			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &vkq_depth_copy);
++
++		vkq_depth_barrier[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++		vkq_depth_barrier[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
++		vkq_depth_barrier[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++		vkq_depth_barrier[0].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
++		vkq_depth_barrier[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++		vkq_depth_barrier[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
++		vkq_depth_barrier[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++		vkq_depth_barrier[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++		vkCmdPipelineBarrier (
++			render_passes_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
++			NULL, 0, NULL, 2, vkq_depth_barrier);
++		vkq_vr_depth_ready[vkq_stereo_eye_idx] = 1;
+ 	}
++#endif
+ 
+ 	VkBuffer screenshot_buffer = VK_NULL_HANDLE;
+ 	ZEROED_STRUCT (vulkan_memory_t, screenshot_memory);
+@@ -4389,6 +4530,12 @@
+ 	// actually rendered even if the shell has already advanced to the next eye.
+ 	parms.stereo3d = vkq_stereo3d_active ? 1u : 0u;
+ 	parms.stereo3d_eye = (uint32_t)(vkq_stereo3d_eye & 3);
++	// overlay 0018: same reason — the shell may already have moved on by the time
++	// the async end-rendering task runs, so latch "this was a VR world eye" here.
++	{
++		extern int vkq_vr_use;
++		parms.vr = vkq_vr_use ? 1u : 0u;
++	}
+ #endif
+ 	task_handle_t end_rendering_task = INVALID_TASK_HANDLE;
+ 	if (use_tasks)
+@@ -5735,5 +5882,282 @@
+ {
+ 	if (w >= 320 && h >= 240)
+ 		SDL_SetWindowSize (draw_context, w, h);
++}
++
++// ============================================================================
++// vkquake-ios overlay 0018 — first-person VR (docs/VR-CHARTER.md R1).
++//
++// The 3D panel (0010) lets the compositor free-run and sample whatever the
++// engine last rendered. VR cannot: the pose the engine RENDERS with must be the
++// pose the compositor REPROJECTS against, or the world shakes with head sway
++// (charter A4, trap ledger). So the two loops rendezvous once per compositor
++// frame:
++//
++//   compositor: query drawable -> device anchor at PRESENTATION time -> compose
++//               both eyes' view+projection -> VKQ_VR_PublishPose() (id N)
++//   engine:     SCR_UpdateScreen -> VKQ_VR_EngineAcquire() blocks for id > last
++//               -> renders L then R with EXACTLY those matrices
++//               -> VKQ_VR_EngineRelease(N)
++//   compositor: VKQ_VR_WaitRendered(N) -> blit both eyes -> encode_present
++//
++// Both waits are bounded. A timeout on either side re-presents the previous
++// pair against the anchor THAT pair was rendered with (the shell keeps it), so
++// a dropped frame costs reprojection latency, never a jolt.
++//
++// Nothing here smooths or damps a pose: damping belongs in the base placement,
++// never in the submitted anchor.
++// ============================================================================
++#include <pthread.h>
++
++#define VKQ_VR_DEG2RAD(a) ((float)((a) * M_PI / 180.0))
++
++int	  vkq_vr_active = 0;	  // VR space open: the eye matrices below own the camera
++int	  vkq_vr_have = 0;		  // a pose pair has actually been published
++int	  vkq_vr_use = 0;		  // THIS frame renders through the VR chain (world mode)
++int	  vkq_vr_suppress_2d = 0; // world mode: eyes show the world, panel shows the UI
++int	  vkq_vr_present_mode = 0; // 0 = flat composite on the panel, 1 = world in the eyes
++float vkq_vr_body_yaw = 0.0f;	// tracking-space alignment yaw, in Quake degrees
++float vkq_vr_head_yaw = 0.0f;	// head yaw relative to that alignment (degrees)
++float vkq_vr_head_pitch = 0.0f; // head pitch (degrees, Quake sign: + = look down)
++float vkq_vr_height_ofs = 0.0f; // eye-height calibration, Quake units (+ = taller)
++
++// Published per eye. eye_from_player maps the Quake PLAYER frame (units,
++// right-up-back, origin at the body's eye point, looking down -Z) into this
++// eye's space; projection is the drawable's asymmetric frustum rebuilt in the
++// engine's own infinite-far reverse-Z convention; tangents drive the cull planes.
++typedef struct
++{
++	float eye_from_player[16];
++	float projection[16];
++	float tan_l, tan_r, tan_u, tan_d;
++} vkq_vr_eye_t;
++
++static pthread_mutex_t	  vkq_vr_mtx = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t	  vkq_vr_cv = PTHREAD_COND_INITIALIZER;
++static unsigned long long vkq_vr_pub_id = 0;	  // last pose published by the shell
++static unsigned long long vkq_vr_rendered_id = 0; // last id the engine finished
++static unsigned long long vkq_vr_frame_id = 0;	  // id of the frame being rendered
++static vkq_vr_eye_t		  vkq_vr_pub[2];		  // guarded by vkq_vr_mtx
++static vkq_vr_eye_t		  vkq_vr_cur[2];		  // engine's private copy (render thread)
++static int				  vkq_vr_timeouts_engine = 0, vkq_vr_timeouts_shell = 0;
++static int				  vkq_vr_rendezvous = 0; // frames where both sides met in time
++static int				  vkq_vr_yaw_init = 0;	 // adopt the player's facing on the first VR frame
++
++static void vkq_vr_deadline (struct timespec *ts, int ms)
++{
++	struct timespec now;
++	clock_gettime (CLOCK_REALTIME, &now);
++	long long ns = (long long)now.tv_nsec + (long long)ms * 1000000ll;
++	ts->tv_sec = now.tv_sec + (time_t) (ns / 1000000000ll);
++	ts->tv_nsec = (long)(ns % 1000000000ll);
+ }
++
++// --- shell side --------------------------------------------------------------
++
++// Publish one frame's eye pair. Returns the frame id the engine must render.
++unsigned long long VKQ_VR_PublishPose (
++	const float *efp_l, const float *proj_l, const float *tan_l, const float *efp_r, const float *proj_r, const float *tan_r)
++{
++	unsigned long long id;
++	pthread_mutex_lock (&vkq_vr_mtx);
++	memcpy (vkq_vr_pub[0].eye_from_player, efp_l, 16 * sizeof (float));
++	memcpy (vkq_vr_pub[0].projection, proj_l, 16 * sizeof (float));
++	vkq_vr_pub[0].tan_l = tan_l[0], vkq_vr_pub[0].tan_r = tan_l[1], vkq_vr_pub[0].tan_u = tan_l[2], vkq_vr_pub[0].tan_d = tan_l[3];
++	memcpy (vkq_vr_pub[1].eye_from_player, efp_r, 16 * sizeof (float));
++	memcpy (vkq_vr_pub[1].projection, proj_r, 16 * sizeof (float));
++	vkq_vr_pub[1].tan_l = tan_r[0], vkq_vr_pub[1].tan_r = tan_r[1], vkq_vr_pub[1].tan_u = tan_r[2], vkq_vr_pub[1].tan_d = tan_r[3];
++	id = ++vkq_vr_pub_id;
++	vkq_vr_have = 1;
++	pthread_cond_broadcast (&vkq_vr_cv);
++	pthread_mutex_unlock (&vkq_vr_mtx);
++	return id;
++}
++
++// Block (bounded) until the engine has finished both eyes for `id`. 1 = the
++// present images match that pose; 0 = timed out, and the shell re-presents the
++// previous pair against the anchor that pair was rendered with.
++int VKQ_VR_WaitRendered (unsigned long long id, int timeout_ms)
++{
++	int				ok;
++	struct timespec ts;
++	vkq_vr_deadline (&ts, timeout_ms);
++	pthread_mutex_lock (&vkq_vr_mtx);
++	while (vkq_vr_rendered_id < id && vkq_vr_active)
++		if (pthread_cond_timedwait (&vkq_vr_cv, &vkq_vr_mtx, &ts) != 0)
++			break;
++	ok = (vkq_vr_rendered_id >= id);
++	if (ok)
++		vkq_vr_rendezvous++;
++	else
++		vkq_vr_timeouts_shell++;
++	pthread_mutex_unlock (&vkq_vr_mtx);
++	return ok;
++}
++
++void VKQ_VR_SetActive (int on)
++{
++	pthread_mutex_lock (&vkq_vr_mtx);
++	vkq_vr_active = on ? 1 : 0;
++	// Entering VR must not spin the player round: the tracking alignment adopts
++	// whatever direction they were already facing (the first head-aim frame seeds
++	// the body yaw from cl.viewangles). Forcing yaw 0 here would drop the player
++	// into e1m1 staring at a wall.
++	vkq_vr_yaw_init = on ? 1 : 0;
++	{
++		// overlay 0018 R1.1: the present-mode reason is only meaningful once the
++		// predicate has run inside THIS session — the shell refuses to report one
++		// it has not measured, so the count restarts with the session.
++		extern int vkq_vr_present_evals;
++		vkq_vr_present_evals = 0;
++	}
++	if (!on)
++	{
++		vkq_vr_have = 0;
++		vkq_vr_use = 0;
++		vkq_vr_suppress_2d = 0;
++		vkq_vr_present_mode = 0;
++		vkq_vr_pub_id = vkq_vr_rendered_id = vkq_vr_frame_id = 0;
++		vkq_vr_rendezvous = vkq_vr_timeouts_engine = vkq_vr_timeouts_shell = 0;
++	}
++	pthread_cond_broadcast (&vkq_vr_cv); // never leave either side blocked on exit
++	pthread_mutex_unlock (&vkq_vr_mtx);
++}
++
++int VKQ_VR_GetActive (void) { return vkq_vr_active; }
++
++// This eye's scene-depth snapshot as a MTLTexture (NULL until the eye has
++// rendered at least once in VR, and NULL again across a vid restart). The
++// compositor binds it as depth2d and writes the value through unchanged.
++void *VKQ_VR_GetDepthMTLTextureForEye (int eye) // 1 = left, 2 = right
++{
++	const int idx = (eye == 2) ? 1 : 0;
++	void	 *mtlTexture = NULL;
++	if (vkq_vr_depth_image[idx] == VK_NULL_HANDLE || !vkq_vr_depth_ready[idx])
++		return NULL;
++	vkGetMTLTextureMVK (vkq_vr_depth_image[idx], &mtlTexture);
++	return mtlTexture;
++}
++
++// What the shell should draw THIS frame: 1 = the world in the eyes, 0 = the flat
++// composite on the world-locked panel (charter A9). The engine owns the decision
++// because only it knows key_dest / intermission / demo / loading.
++int VKQ_VR_GetPresentMode (void) { return vkq_vr_present_mode; }
++
++// Rendezvous health for the diagnostics file (charter: no console-only numbers).
++void VKQ_VR_GetStats (int *met, int *engine_timeouts, int *shell_timeouts)
++{
++	*met = vkq_vr_rendezvous;
++	*engine_timeouts = vkq_vr_timeouts_engine;
++	*shell_timeouts = vkq_vr_timeouts_shell;
++}
++
++// Tracking-space alignment (recenter) + head angles, in QUAKE degrees. The body
++// yaw is what the base view matrix rotates by; the head angles are what the SENT
++// viewangles carry, so the server aims where the player is actually looking.
++void  VKQ_VR_SetHeadAngles (float pitch, float yaw) { vkq_vr_head_pitch = pitch, vkq_vr_head_yaw = yaw; }
++void  VKQ_VR_SetBodyYaw (float yaw) { vkq_vr_body_yaw = anglemod (yaw); }
++float VKQ_VR_GetBodyYaw (void) { return vkq_vr_body_yaw; }
++void  VKQ_VR_SetHeightOffset (float units) { vkq_vr_height_ofs = units; }
++
++// --- engine side -------------------------------------------------------------
++
++// Block (bounded) for a pose newer than the one just rendered, then take a
++// private copy so a render can never read a pair being rewritten. Returns the id
++// to render — on timeout the PREVIOUS id, i.e. render again rather than stall the
++// game loop (the compositor reprojects a repeat far better than it survives a
++// hitch).
++unsigned long long VKQ_VR_EngineAcquire (int timeout_ms)
++{
++	struct timespec ts;
++	vkq_vr_deadline (&ts, timeout_ms);
++	pthread_mutex_lock (&vkq_vr_mtx);
++	while (vkq_vr_active && vkq_vr_pub_id <= vkq_vr_frame_id)
++		if (pthread_cond_timedwait (&vkq_vr_cv, &vkq_vr_mtx, &ts) != 0)
++		{
++			vkq_vr_timeouts_engine++;
++			break;
++		}
++	if (vkq_vr_have)
++	{
++		memcpy (vkq_vr_cur, vkq_vr_pub, sizeof (vkq_vr_cur));
++		vkq_vr_frame_id = vkq_vr_pub_id;
++	}
++	pthread_mutex_unlock (&vkq_vr_mtx);
++	return vkq_vr_frame_id;
++}
++
++void VKQ_VR_EngineRelease (unsigned long long id)
++{
++	pthread_mutex_lock (&vkq_vr_mtx);
++	if (id > vkq_vr_rendered_id)
++		vkq_vr_rendered_id = id;
++	pthread_cond_broadcast (&vkq_vr_cv);
++	pthread_mutex_unlock (&vkq_vr_mtx);
++}
++
++// The engine's OWN axis bridge is reused deliberately: R_SetupMatrices builds
++// Rx(-90).Rz(90) before the view angles, which maps Quake world (X fwd, Y left,
++// Z up) onto right-up-back — the exact convention ARKit poses and
++// cp_view_get_transform use. No hand-written Quake<->ARKit axis matrix exists
++// anywhere in the VR path, and none should be added (R0 finding 3).
++//
++// Base = Rx(-90).Rz(90).Rz(-bodyYaw).T(-vieworg - heightOfs). Pitch and roll are
++// deliberately absent: the head owns them.
++void VKQ_VR_ComposeView (int eye, float out[16])
++{
++	float base[16], rot[16], trans[16];
++	RotationMatrix (base, -M_PI / 2.0f, 1.0f, 0.0f, 0.0f);
++	RotationMatrix (rot, M_PI / 2.0f, 0.0f, 0.0f, 1.0f);
++	MatrixMultiply (base, rot);
++	RotationMatrix (rot, VKQ_VR_DEG2RAD (-vkq_vr_body_yaw), 0.0f, 0.0f, 1.0f);
++	MatrixMultiply (base, rot);
++	TranslationMatrix (trans, -r_refdef.vieworg[0], -r_refdef.vieworg[1], -(r_refdef.vieworg[2] + vkq_vr_height_ofs));
++	MatrixMultiply (base, trans);
++
++	memcpy (out, vkq_vr_cur[eye & 1].eye_from_player, 16 * sizeof (float));
++	MatrixMultiply (out, base); // out = eyeFromPlayer * base
++}
++
++void VKQ_VR_GetProjection (int eye, float out[16]) { memcpy (out, vkq_vr_cur[eye & 1].projection, 16 * sizeof (float)); }
++
++void VKQ_VR_GetTangents (int eye, float *l, float *r, float *u, float *d)
++{
++	*l = vkq_vr_cur[eye & 1].tan_l, *r = vkq_vr_cur[eye & 1].tan_r;
++	*u = vkq_vr_cur[eye & 1].tan_u, *d = vkq_vr_cur[eye & 1].tan_d;
++}
++
++// Head aim (charter A6, gamepad path): whatever this frame's input did to the
++// yaw is absorbed into the BODY yaw — so a stick turn rotates render, aim and
++// movement together — and the sent angles become body + head. Pitch and roll
++// come from the head alone. Reading the delta instead of hooking each input
++// device keeps stick, touch and gyro all working with no input-path edits.
++void VKQ_VR_ApplyHeadAim (void)
++{
++	static float last_sent = 0.0f;
++	float		 delta;
++	if (!vkq_vr_active || !vkq_vr_have)
++	{
++		last_sent = cl.viewangles[YAW];
++		return;
++	}
++	if (vkq_vr_yaw_init)
++	{
++		// First VR frame: the body adopts the direction the player is already
++		// facing, minus wherever the head happens to be pointing, so entering VR
++		// changes nothing about where they are looking.
++		vkq_vr_yaw_init = 0;
++		vkq_vr_body_yaw = anglemod (cl.viewangles[YAW] - vkq_vr_head_yaw);
++		last_sent = cl.viewangles[YAW];
++	}
++	delta = cl.viewangles[YAW] - last_sent;
++	while (delta > 180.0f)
++		delta -= 360.0f;
++	while (delta < -180.0f)
++		delta += 360.0f;
++	vkq_vr_body_yaw = anglemod (vkq_vr_body_yaw + delta);
++	cl.viewangles[PITCH] = vkq_vr_head_pitch;
++	cl.viewangles[YAW] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
++	cl.viewangles[ROLL] = 0.0f;
++	last_sent = cl.viewangles[YAW];
++}
+ #endif
+--- a/Quake/cl_main.c
++++ b/Quake/cl_main.c
+@@ -1040,7 +1040,19 @@
+ 
+ 		// accumulate movement from other devices
+ 		IN_Move (&cl.pendingcmd);
++	}
++
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0018 (VR, charter A6): the SENT view angles become the
++	// head's. Runs AFTER every input path so a stick/touch/gyro turn is folded
++	// into the tracking-space body yaw instead of fighting the head — the server
++	// then sees ordinary view angles and stock progs, mods and multiplayer all
++	// aim where the player is looking. No-op outside VR.
++	{
++		extern void VKQ_VR_ApplyHeadAim (void);
++		VKQ_VR_ApplyHeadAim ();
+ 	}
++#endif
+ 
+ 	cl.pendingcmd.seconds = cl.mtime[0] - cl.pendingcmd.servertime;
+ }

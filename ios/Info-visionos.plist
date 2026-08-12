@@ -17,7 +17,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.7</string>
+	<string>1.1.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -30,11 +30,20 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>23</string>
+	<string>34</string>
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>SpatialGamepad</string>
+		</dict>
+	</array>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.games</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSAccessoryTrackingUsageDescription</key>
+	<string>vkQuake uses your PSVR2 Sense controllers to aim and hold your weapon in VR.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -45,7 +54,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>vkQuake uses the local network to find and join multiplayer games on your LAN.</string>
 	<key>NSWorldSensingUsageDescription</key>
-	<string>Head position is used to place the floating 3D game screen.</string>
+	<string>Head position is used to place the floating 3D game screen and to render the VR world around you.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationPreferredDefaultSceneSessionRole</key>

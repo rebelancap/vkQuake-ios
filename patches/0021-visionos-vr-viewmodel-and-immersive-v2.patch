@@ -1,0 +1,1911 @@
+--- a/Quake/gl_model.h
++++ b/Quake/gl_model.h
+@@ -389,6 +389,18 @@
+ 	glheapallocation_t *joints_allocation;
+ 	VkDeviceAddress		joints_buffer_address;
+ 	VkDescriptorSet		joints_set;
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0021 (VR R4) — what the MODEL says about how it is
++	// held. Derived at load from the model's own idle pose with the parked
++	// muzzle-flash geometry excluded (see VKQ_VM_Analyze), so it is identical
++	// for the original .mdl, the rerelease .md5mesh remesh of the same weapon,
++	// and any mod's viewmodel. Zero for everything that is not a viewmodel.
++	int	   vr_geo;			 // 1 = vr_min/vr_max/vr_grip are valid
++	int	   vr_flashverts;	 // vertices the parked-flash rule claimed (0 = none)
++	int	   vr_flashposes;	 // poses in which they were parked and got collapsed
++	vec3_t vr_min, vr_max;	 // true weapon bounds, idle pose, flash excluded
++	vec3_t vr_grip;			 // grip reference: (rear x, rear-slab y, rear-slab z)
++#endif
+ 	maliasframedesc_t	frames[1]; // variable sized
+ } aliashdr_t;
+ 
+--- a/Quake/gl_model.c
++++ b/Quake/gl_model.c
+@@ -3817,8 +3817,252 @@
+ 	}
+ }
+ 
++#ifdef VKQ_VISIONOS
+ /*
++==============================================================================
++
++VIEWMODEL GEOMETRY — vkquake-ios overlay 0021 (VR R4)
++
++Two things this round needs to know about a viewmodel, and both of them are
++facts about the model rather than opinions about the weapon, so both are read
++off the geometry at load time and neither is keyed on a file name, a data set
++or a weapon id. Original id1 .mdl, the 2021 rerelease's .md5mesh remesh of the
++same weapon, and an arbitrary mod's viewmodel all go through this identically.
++
++1. THE GHOSTS. Every id viewmodel except the axe carries its muzzle flash as
++   part of the same mesh, and hides it between shots by PARKING it behind the
++   model origin. A viewmodel's origin is the shooter's eye, so parked flash is
++   behind the near plane and a flat-screen Quake can never draw it — which is
++   why nobody noticed in thirty years. Put the weapon in a VR hand an arm's
++   length from your face and the same geometry is suddenly out in the open,
++   hanging off the BACK of the gun, permanently. There is no engine mechanism
++   to replicate: the rerelease KEX engine does not hide it either, it just
++   never moves the gun off the camera. The cure has to be ours.
++
++   A vertex is parked flash when all three hold:
++     a. in the idle pose it is behind the model origin (x < 0);
++     b. in some other pose it TELEPORTS forward — ends up ahead of the origin
++        having travelled more than a quarter of the model's own length. Only
++        id's flash trick does that;
++     c. the whole candidate set is separated from the rest of the model, in the
++        idle pose, by a real gap. This is what stops a shotgun's stock butt or
++        the axe's forearm — which merely swing through the origin — from being
++        mistaken for flash.
++   Verified against the rerelease .md5mesh joint names (`flame*`, `bolt*`),
++   which the rule never sees: 8 models out of 8, both data sets, exact.
++
++   The cure is to COLLAPSE the flash to a point inside the weapon body in
++   exactly those poses where it is parked. Firing poses are untouched, so the
++   muzzle flash still fires out of the barrel. .mdl collapses pose vertices;
++   .md5mesh collapses the flash joints' per-pose matrices, which is the same
++   thing one level up.
++
++2. THE GRIP. R2 seeded a per-weapon position table from QuakeQuest and applied
++   its numbers AFTER the model scale where the donor applies them BEFORE it.
++   The error is therefore proportional to (1 - scale), and the user's device
++   verdicts on 2026-08-10 rank in exactly that order: grenade launcher and
++   lightning gun (scale 1.00) "look great" and are numerically untouched; super
++   shotgun 0.90 and shotgun 0.65 also great; nailgun and axe 0.50 wrong; rocket
++   launcher 0.45 wrong; super nailgun 0.40 "worst". So the table is not a table
++   of placements, it is a table of one mistake.
++
++   What replaces it: the weapon is mounted so that a GRIP ANCHOR derived from
++   its own geometry lands in the fist — the point on the axis of the weapon's
++   rear quarter, one hand's breadth forward of its rearmost point. Fitted to
++   the four weapons the user judged good, that is 4.15 units back and 0.75 units
++   up, in world units, with a residual spread of 1.3 units (3 cm) — and the
++   same two constants then place the four wrong ones exactly the way he asked
++   for them (lower, further from the body).
++
++==============================================================================
++*/
++
++typedef struct
++{
++	int	   valid;		// 1 = mins/maxs/grip usable
++	int	   nflash;		// parked-flash vertices found
++	int	   nposes;		// poses in which they were parked (and collapsed)
++	vec3_t mins, maxs;	// idle-pose bounds, flash excluded
++	vec3_t grip;		// (rear x, rear-slab y, rear-slab z)
++} vkq_vm_result_t;
++
++// Rear-quarter slab used for the grip axis. A quarter is the whole receiver on
++// every stock weapon and stays inside the stock on a longer mod one.
++#define VKQ_VM_REARFRAC 0.25f
++
++/*
+ =================
++VKQ_VM_Analyze -- overlay 0021
++
++px      [pose*nverts + vert] object-space X for every pose (pose 0 = idle)
++idle3   [vert*3] object-space xyz for pose 0
++flash   [vert] out: 1 = parked muzzle flash
++parked  [pose] out: 1 = the flash set is parked (hidden) in this pose
++=================
++*/
++static void VKQ_VM_Analyze (int nverts, int nposes, const float *px, const float *idle3, byte *flash, byte *parked, vkq_vm_result_t *out)
++{
++	int	  i, p, ncand = 0;
++	float lo = 1e30f, hi = -1e30f, ext, gap, need;
++	float candhi = -1e30f, restlo = 1e30f, lim = 1e30f;
++
++	memset (out, 0, sizeof (*out));
++	memset (flash, 0, nverts);
++	memset (parked, 0, nposes);
++	if (nverts <= 0 || nposes <= 0)
++		return;
++
++	for (i = 0; i < nverts; i++)
++	{
++		if (idle3[i * 3 + 0] < lo)
++			lo = idle3[i * 3 + 0];
++		if (idle3[i * 3 + 0] > hi)
++			hi = idle3[i * 3 + 0];
++	}
++	ext = hi - lo;
++	if (ext <= 0.0f)
++		return;
++
++	// (a) behind the origin in the idle pose, (b) teleports forward in another
++	for (i = 0; i < nverts; i++)
++	{
++		float x0 = idle3[i * 3 + 0], mx = x0;
++		if (x0 >= 0.0f)
++			continue;
++		for (p = 1; p < nposes; p++)
++			if (px[p * nverts + i] > mx)
++				mx = px[p * nverts + i];
++		if (mx > 0.0f && (mx - x0) > 0.25f * ext)
++		{
++			flash[i] = 1;
++			ncand++;
++		}
++	}
++
++	// (c) a real gap in the idle pose, or it is not a separate thing at all
++	if (ncand > 0 && ncand < nverts)
++	{
++		for (i = 0; i < nverts; i++)
++		{
++			if (flash[i])
++			{
++				if (idle3[i * 3 + 0] > candhi)
++					candhi = idle3[i * 3 + 0];
++			}
++			else if (idle3[i * 3 + 0] < restlo)
++				restlo = idle3[i * 3 + 0];
++		}
++		gap = restlo - candhi;
++		need = q_max (3.0f, 0.06f * ext);
++		if (gap < need)
++		{
++			memset (flash, 0, nverts);
++			ncand = 0;
++		}
++	}
++	else
++	{
++		memset (flash, 0, nverts);
++		ncand = 0;
++	}
++	out->nflash = ncand;
++
++	// Which poses have it parked: entirely behind the origin AND behind every
++	// retained vertex the model ever shows. Both, so a weapon whose own body
++	// reaches behind the origin (the shotgun's does) still gets a correct
++	// answer.
++	if (ncand)
++	{
++		for (p = 0; p < nposes; p++)
++			for (i = 0; i < nverts; i++)
++				if (!flash[i] && px[p * nverts + i] < lim)
++					lim = px[p * nverts + i];
++		if (lim > 0.0f)
++			lim = 0.0f;
++		for (p = 0; p < nposes; p++)
++		{
++			float fmax = -1e30f;
++			for (i = 0; i < nverts; i++)
++				if (flash[i] && px[p * nverts + i] > fmax)
++					fmax = px[p * nverts + i];
++			if (fmax < lim)
++			{
++				parked[p] = 1;
++				out->nposes++;
++			}
++		}
++	}
++
++	// Bounds and grip axis from the idle pose, flash excluded.
++	{
++		vec3_t mins = {1e30f, 1e30f, 1e30f}, maxs = {-1e30f, -1e30f, -1e30f};
++		double sy = 0.0, sz = 0.0;
++		int	   n = 0, k;
++		float  cut;
++		for (i = 0; i < nverts; i++)
++		{
++			if (flash[i])
++				continue;
++			for (k = 0; k < 3; k++)
++			{
++				if (idle3[i * 3 + k] < mins[k])
++					mins[k] = idle3[i * 3 + k];
++				if (idle3[i * 3 + k] > maxs[k])
++					maxs[k] = idle3[i * 3 + k];
++			}
++			n++;
++		}
++		if (n < 4 || maxs[0] <= mins[0])
++			return;
++		cut = mins[0] + VKQ_VM_REARFRAC * (maxs[0] - mins[0]);
++		n = 0;
++		for (i = 0; i < nverts; i++)
++		{
++			if (flash[i] || idle3[i * 3 + 0] > cut)
++				continue;
++			sy += idle3[i * 3 + 1];
++			sz += idle3[i * 3 + 2];
++			n++;
++		}
++		if (!n)
++			return;
++		VectorCopy (mins, out->mins);
++		VectorCopy (maxs, out->maxs);
++		out->grip[0] = mins[0];
++		out->grip[1] = (float)(sy / n);
++		out->grip[2] = (float)(sz / n);
++		out->valid = 1;
++	}
++}
++
++// Only viewmodels. A world model's origin is not an eye, so rule (a) would be
++// meaningless there — and no world model uses the parking trick anyway.
++static qboolean VKQ_VM_IsViewmodel (const char *name)
++{
++	const char *base = name, *s;
++	for (s = name; *s; s++)
++		if (*s == '/' || *s == '\\')
++			base = s + 1;
++	return (base[0] == 'v' || base[0] == 'V') && base[1] == '_';
++}
++
++static void VKQ_VM_Publish (aliashdr_t *h, const vkq_vm_result_t *r, const char *name)
++{
++	h->vr_geo = r->valid;
++	h->vr_flashverts = r->nflash;
++	h->vr_flashposes = r->nposes;
++	VectorCopy (r->mins, h->vr_min);
++	VectorCopy (r->maxs, h->vr_max);
++	VectorCopy (r->grip, h->vr_grip);
++	if (r->valid)
++		Con_DPrintf (
++			"VR viewmodel %s: bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f) grip (%.1f %.1f %.1f) flash %d verts in %d poses\n", name, r->mins[0], r->mins[1],
++			r->mins[2], r->maxs[0], r->maxs[1], r->maxs[2], r->grip[0], r->grip[1], r->grip[2], r->nflash, r->nposes);
++}
++#endif // VKQ_VISIONOS
++
++/*
++=================
+ Mod_LoadAliasModel
+ =================
+ */
+@@ -3947,6 +4191,54 @@
+ 	}
+ 
+ 	pheader->numposes = posenum;
++
++#ifdef VKQ_VISIONOS
++	// overlay 0021 (VR R4) — read the grip out of the geometry and collapse the
++	// parked muzzle flash, BEFORE GL_MakeAliasModelDisplayLists bakes the pose
++	// vertices into the VBO. poseverts[] still points into the file buffer here.
++	if (VKQ_VM_IsViewmodel (mod->name) && pheader->numposes > 0 && pheader->numverts > 0)
++	{
++		const int		nv = pheader->numverts, np = pheader->numposes;
++		float		   *px = (float *)Mem_Alloc (sizeof (float) * (size_t)nv * np);
++		float		   *idle3 = (float *)Mem_Alloc (sizeof (float) * 3 * nv);
++		byte		   *flash = (byte *)Mem_Alloc (nv);
++		byte		   *parked = (byte *)Mem_Alloc (np);
++		vkq_vm_result_t res;
++		int				p, v;
++		for (p = 0; p < np; p++)
++			for (v = 0; v < nv; v++)
++				px[(size_t)p * nv + v] = poseverts[p][v].v[0] * pheader->scale[0] + pheader->scale_origin[0];
++		for (v = 0; v < nv; v++)
++			for (j = 0; j < 3; j++)
++				idle3[v * 3 + j] = poseverts[0][v].v[j] * pheader->scale[j] + pheader->scale_origin[j];
++		VKQ_VM_Analyze (nv, np, px, idle3, flash, parked, &res);
++		if (res.valid && res.nflash && res.nposes)
++		{
++			// Collapse to a point on the grip axis, which is inside the weapon
++			// body: any pixel that survives quantisation is behind the model's
++			// own geometry rather than floating in the air.
++			byte q[3];
++			for (j = 0; j < 3; j++)
++			{
++				float t = (res.grip[j] - pheader->scale_origin[j]) / (pheader->scale[j] != 0.0f ? pheader->scale[j] : 1.0f);
++				q[j] = (byte)q_max (0, q_min (255, (int)(t + 0.5f)));
++			}
++			for (p = 0; p < np; p++)
++			{
++				if (!parked[p])
++					continue;
++				for (v = 0; v < nv; v++)
++					if (flash[v])
++						memcpy (poseverts[p][v].v, q, 3);
++			}
++		}
++		VKQ_VM_Publish (pheader, &res, mod->name);
++		Mem_Free (parked);
++		Mem_Free (flash);
++		Mem_Free (idle3);
++		Mem_Free (px);
++	}
++#endif
+ 
+ 	mod->type = mod_alias;
+ 
+@@ -5060,6 +5352,20 @@
+ 		}
+ 	}
+ 	Mem_Free (anim.posedata);
++
++#ifdef VKQ_VISIONOS
++	// overlay 0021 (VR R4): a pristine copy, because the flash collapse below
++	// rewrites inverted_joints in place and a second mesh must still be
++	// analysed against the animation as authored.
++	jointpose_t *vkq_vm_joints0 = NULL;
++	const qboolean vkq_vm_want = VKQ_VM_IsViewmodel (mod->name) && anim.numposes > 0 && anim.numjoints > 0;
++	if (vkq_vm_want)
++	{
++		size_t nbytes = sizeof (jointpose_t) * anim.numjoints * anim.numposes;
++		vkq_vm_joints0 = (jointpose_t *)Mem_Alloc (nbytes);
++		memcpy (vkq_vm_joints0, inverted_joints, nbytes);
++	}
++#endif
+ 
+ 	// 3. each mesh has its own aliashdr_t : load vertices, triangles, textures...etc. and upload to GPU each surface:
+ 
+@@ -5186,6 +5492,102 @@
+ 		Mem_Free (weight);
+ 		Mem_Free (vinfo);
+ 
++#ifdef VKQ_VISIONOS
++		// overlay 0021 (VR R4) — same two answers as the .mdl path, one level up.
++		// MD5 keeps ONE pose of vertices and animates the joint matrices, so the
++		// flash is parked by its joints and is collapsed by shrinking those
++		// joints in exactly the poses where the rule says it is hidden.
++		if (vkq_vm_want)
++		{
++			const int		nv = surf->numverts, np = (int)anim.numposes, nj = (int)anim.numjoints;
++			float		   *px = (float *)Mem_Alloc (sizeof (float) * (size_t)nv * np);
++			float		   *idle3 = (float *)Mem_Alloc (sizeof (float) * 3 * nv);
++			byte		   *flash = (byte *)Mem_Alloc (nv);
++			byte		   *parked = (byte *)Mem_Alloc (np);
++			byte		   *jflash = (byte *)Mem_Alloc (nj);
++			byte		   *jused = (byte *)Mem_Alloc (nj);
++			vkq_vm_result_t res;
++			int				p, v, k, r;
++			for (p = 0; p < np; p++)
++			{
++				const jointpose_t *jp = vkq_vm_joints0 + (size_t)p * nj;
++				for (v = 0; v < nv; v++)
++				{
++					const md5vert_t *mv = &poutvertexes[v];
++					float			 acc[3] = {0.0f, 0.0f, 0.0f};
++					for (k = 0; k < NUM_JOINT_INFLUENCES; k++)
++					{
++						const float w = mv->joint_weights[k] * (1.0f / 255.0f);
++						const float *m;
++						if (w == 0.0f)
++							continue;
++						m = jp[mv->joint_indices[k]].mat;
++						for (r = 0; r < 3; r++)
++							acc[r] += w * (m[r * 4 + 0] * mv->xyz[0] + m[r * 4 + 1] * mv->xyz[1] + m[r * 4 + 2] * mv->xyz[2] + m[r * 4 + 3]);
++					}
++					px[(size_t)p * nv + v] = acc[0];
++					if (p == 0)
++					{
++						idle3[v * 3 + 0] = acc[0];
++						idle3[v * 3 + 1] = acc[1];
++						idle3[v * 3 + 2] = acc[2];
++					}
++				}
++			}
++			VKQ_VM_Analyze (nv, np, px, idle3, flash, parked, &res);
++			// A joint may only be collapsed when NOTHING but flash rides on it.
++			memset (jflash, 0, nj);
++			memset (jused, 0, nj);
++			for (v = 0; v < nv; v++)
++				for (k = 0; k < NUM_JOINT_INFLUENCES; k++)
++					if (poutvertexes[v].joint_weights[k])
++					{
++						const int ji = poutvertexes[v].joint_indices[k];
++						jused[ji] = 1;
++						if (!flash[v])
++							jflash[ji] = 2; // contaminated by real geometry
++						else if (jflash[ji] != 2)
++							jflash[ji] = 1;
++					}
++			if (res.valid && res.nflash && res.nposes)
++			{
++				int collapsed = 0;
++				for (p = 0; p < np; p++)
++				{
++					jointpose_t *jp = inverted_joints + (size_t)p * nj;
++					if (!parked[p])
++						continue;
++					for (k = 0; k < nj; k++)
++					{
++						if (jflash[k] != 1 || !jused[k])
++							continue;
++						// Shrink to a speck ON the grip axis rather than to a
++						// mathematical point: the normals stay normalisable and
++						// whatever survives quantisation is inside the weapon.
++						for (r = 0; r < 3; r++)
++						{
++							jp[k].mat[r * 4 + 0] *= 1e-3f;
++							jp[k].mat[r * 4 + 1] *= 1e-3f;
++							jp[k].mat[r * 4 + 2] *= 1e-3f;
++							jp[k].mat[r * 4 + 3] = res.grip[r];
++						}
++						collapsed++;
++					}
++				}
++				if (!collapsed)
++					res.nposes = 0; // detected, but nothing was safe to collapse
++			}
++			if (m == 0)
++				VKQ_VM_Publish (surf, &res, mod->name);
++			Mem_Free (jused);
++			Mem_Free (jflash);
++			Mem_Free (parked);
++			Mem_Free (flash);
++			Mem_Free (idle3);
++			Mem_Free (px);
++		}
++#endif
++
+ 		// Upload to GPU that surface/mesh m:
+ 		GLMesh_UploadBuffers (mod, surf, poutindexes, (byte *)poutvertexes, NULL, inverted_joints);
+ 
+@@ -5210,6 +5612,11 @@
+ 
+ 	Mem_Free (total_vertexes);
+ 
++#ifdef VKQ_VISIONOS
++	if (vkq_vm_joints0)
++		Mem_Free (vkq_vm_joints0);
++#endif
++
+ 	TEMP_FREE (concat_joints);
+ 	TEMP_FREE (inverted_joints);
+ 
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -5996,6 +5996,18 @@
+ cvar_t vkqvr_gunright = {"vkqvr_gunright", "0", CVAR_NONE};
+ cvar_t vkqvr_gunup = {"vkqvr_gunup", "0", CVAR_NONE};
+ cvar_t vkqvr_gunscale = {"vkqvr_gunscale", "1", CVAR_NONE};
++// overlay 0021 (R4) — the two constants that replace the per-weapon position
++// table. World units. Fitted to the four weapons the user judged good on device
++// (residual spread 1.3 units = 3 cm); see VKQ_VM_Analyze in gl_model.c.
++cvar_t vkqvr_gripback = {"vkqvr_gripback", "4.15", CVAR_NONE}; // fist forward of the weapon's rear
++cvar_t vkqvr_gripup = {"vkqvr_gripup", "0.75", CVAR_NONE};	   // fist above the rear-quarter axis
++cvar_t vkqvr_guntrim = {"vkqvr_guntrim", "1", CVAR_NONE};	   // apply the four residual trims
++cvar_t vkqvr_crosshair = {"vkqvr_crosshair", "1", CVAR_NONE};  // R4 part B: the reticle at the hit point
++// R4 part E — strict weapon-flick gating. See the comment at the cycle site.
++cvar_t vkqvr_flick_y = {"vkqvr_flick_y", "0.85", CVAR_NONE};
++cvar_t vkqvr_flick_x = {"vkqvr_flick_x", "0.25", CVAR_NONE};
++cvar_t vkqvr_flick_off = {"vkqvr_flick_off", "0.40", CVAR_NONE};
++cvar_t vkqvr_aimpitch = {"vkqvr_aimpitch", "0", CVAR_NONE};	   // R4 part B: aim pitch trim, degrees
+ cvar_t vkqvr_flashscale = {"vkqvr_flashscale", "0.5", CVAR_NONE};
+ cvar_t vkqvr_weapon = {"vkqvr_weapon", "1", CVAR_NONE}; // draw the viewmodel at the hand
+ 
+@@ -6076,6 +6088,14 @@
+ 	Cvar_RegisterVariable (&vkqvr_gunright);
+ 	Cvar_RegisterVariable (&vkqvr_gunup);
+ 	Cvar_RegisterVariable (&vkqvr_gunscale);
++	Cvar_RegisterVariable (&vkqvr_gripback);
++	Cvar_RegisterVariable (&vkqvr_gripup);
++	Cvar_RegisterVariable (&vkqvr_guntrim);
++	Cvar_RegisterVariable (&vkqvr_crosshair);
++	Cvar_RegisterVariable (&vkqvr_flick_y);
++	Cvar_RegisterVariable (&vkqvr_flick_x);
++	Cvar_RegisterVariable (&vkqvr_flick_off);
++	Cvar_RegisterVariable (&vkqvr_aimpitch);
+ 	Cvar_RegisterVariable (&vkqvr_flashscale);
+ 	Cvar_RegisterVariable (&vkqvr_weapon);
+ 	Cvar_RegisterVariable (&vkqvr_eyerise);
+@@ -6126,6 +6146,24 @@
+ static void VKQ_VR_UpdateHolsters (double now);
+ static void vkq_vr_grip_release_all (const char *why);
+ static int	vkq_vr_weapon_impulse (int itembit);
++// overlay 0021 (R4 part C) — Immersive v2 lives with the holsters at the end of
++// the file; these are what the input and render paths above need from it.
++static int		vkq_vr_shoot_hand = -1;
++static qboolean vkq_vr_immersive (void);
++static int		vkq_vr_held_item_get (int hand);
++static int		vkq_vr_aim_hand (void);
++static int		vkq_vr_off_hand (void);
++static void		vkq_vr_zone_centre (int z, float out[3]);
++static void		vkq_vr_holster_note (const char *fmt, ...) FUNC_PRINTF (1, 2);
++void			VKQ_VR_CycleWeapon (qboolean next);
++int				VKQ_VR_HideViewent (void);
++void			VKQ_VR_ImmersiveReset (const char *why);
++
++// The hand a shot leaves from THIS frame. Normally the aim hand; in Immersive
++// dual wield it is whichever trigger is firing, so aim, muzzle, crosshair and
++// the barrel-true projectile origin all follow the hand that pulled. One
++// accessor, so they cannot disagree.
++static int vkq_vr_active_hand (void) { return (vkq_vr_shoot_hand >= 0) ? vkq_vr_shoot_hand : vkq_vr_aim_hand (); }
+ 
+ // How far the wish vector was rotated this frame (charter A6's movement
+ // direction). Published for the diagnostics line the simulator asserts on —
+@@ -6586,7 +6624,14 @@
+ 		// up, roll about forward. Order pitch -> yaw -> roll, so the pitch knob
+ 		// (the one that matters, and the one QuakeQuest ships at -20) behaves
+ 		// predictably however the others are set.
+-		const float sp = sinf (VKQ_VR_DEG2RAD (vkqvr_gunpitch.value)), cp = cosf (VKQ_VR_DEG2RAD (vkqvr_gunpitch.value));
++		// overlay 0021 (R4 part B): + the user's Aim Pitch Trim. The grip
++		// rotation is what turns the tracked controller axis into the AIM axis,
++		// and a comfortable holding angle is a property of the person, not of
++		// the hardware — so it is a slider (+-15 deg) on top of the shipped -20,
++		// and it moves aim, barrel and crosshair together because it is applied
++		// here, once, in the one frame everything reads from.
++		const float vkq_vr_pitch_deg = vkqvr_gunpitch.value + CLAMP (-15.0f, vkqvr_aimpitch.value, 15.0f);
++		const float sp = sinf (VKQ_VR_DEG2RAD (vkq_vr_pitch_deg)), cp = cosf (VKQ_VR_DEG2RAD (vkq_vr_pitch_deg));
+ 		const float sy = sinf (VKQ_VR_DEG2RAD (vkqvr_gunyaw.value)), cy = cosf (VKQ_VR_DEG2RAD (vkqvr_gunyaw.value));
+ 		const float sr = sinf (VKQ_VR_DEG2RAD (vkqvr_gunroll.value)), cr = cosf (VKQ_VR_DEG2RAD (vkqvr_gunroll.value));
+ 		vec3_t		nf, nu, nr;
+@@ -6656,7 +6701,7 @@
+ 	out[0] = vkq_vr_head_pitch;
+ 	out[1] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
+ 	out[2] = 0.0f;
+-	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), VKQ_HAND_AIM, org, f, r, u))
++	if (!vkq_vr_hand_world (vkq_vr_active_hand (), VKQ_HAND_AIM, org, f, r, u))
+ 		return;
+ 	vkq_vr_angles_from_basis (f, r, u, out);
+ 	out[ROLL] = 0.0f;
+@@ -6669,7 +6714,7 @@
+ qboolean VKQ_VR_AimRay (vec3_t org, vec3_t dir)
+ {
+ 	vec3_t r, u;
+-	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), VKQ_HAND_GUN, org, dir, r, u))
++	if (!vkq_vr_hand_world (vkq_vr_active_hand (), VKQ_HAND_GUN, org, dir, r, u))
+ 		return false;
+ 	VectorMA (org, VKQ_VR_WeaponMuzzle (), dir, org);
+ 	return true;
+@@ -6858,12 +6903,49 @@
+ 	}
+ 
+ 	// --- gameplay -------------------------------------------------------------
+-	// Right trigger fires, left trigger and A jump. Fixed layout, deliberately
+-	// not bindable (both donors' ledgers paid for that).
+-	vkq_vr_hold (&in_attack, (bAim & VKQ_VRB_TRIGGER) != 0);
+-	vkq_vr_hold (&in_jump, ((bOff & VKQ_VRB_TRIGGER) || (bAim & VKQ_VRB_A) || (bOff & VKQ_VRB_A)) != 0);
+-	if (pAim & VKQ_VRB_TRIGGER)
+-		VKQ_VR_Haptic (aim, 0.7f, 0.04f); // the shot you feel in the hand that fired it
++	// Convenience: right trigger fires, left trigger and A jump. Fixed layout,
++	// deliberately not bindable (both donors' ledgers paid for that).
++	//
++	// IMMERSIVE v2 (overlay 0021): each trigger fires the weapon in ITS OWN
++	// hand. An empty hand's trigger is SUPPRESSED — never fire an invisible
++	// weapon — and the off-hand trigger falls back to jump when that hand is
++	// empty, so the layout does not lose a button just because you are carrying
++	// one gun. The impulse and +attack go out in the SAME usercmd because stock
++	// weapons.qc's W_WeaponFrame calls ImpulseCommands() and then tests
++	// self.button0 inside one frame, so the weapon changes and then fires; a
++	// mod that defers weapon switching will fire the previous weapon for one
++	// frame, which is the documented caveat for per-trigger switching.
++	vkq_vr_shoot_hand = -1;
++	if (vkq_vr_immersive ())
++	{
++		const int aimW = vkq_vr_held_item_get (aim), offW = vkq_vr_held_item_get (off);
++		int		  fireW = 0;
++		if ((bAim & VKQ_VRB_TRIGGER) && aimW)
++		{
++			vkq_vr_shoot_hand = aim;
++			fireW = aimW;
++		}
++		else if ((bOff & VKQ_VRB_TRIGGER) && offW)
++		{
++			vkq_vr_shoot_hand = off;
++			fireW = offW;
++		}
++		if (fireW && cl.stats[STAT_ACTIVEWEAPON] != fireW)
++			in_impulse = vkq_vr_weapon_impulse (fireW);
++		vkq_vr_hold (&in_attack, fireW != 0);
++		vkq_vr_hold (&in_jump, (((bOff & VKQ_VRB_TRIGGER) && !offW) || (bAim & VKQ_VRB_A) || (bOff & VKQ_VRB_A)) != 0);
++		if ((pAim & VKQ_VRB_TRIGGER) && aimW)
++			VKQ_VR_Haptic (aim, 0.7f, 0.04f);
++		if ((pOff & VKQ_VRB_TRIGGER) && offW)
++			VKQ_VR_Haptic (off, 0.7f, 0.04f);
++	}
++	else
++	{
++		vkq_vr_hold (&in_attack, (bAim & VKQ_VRB_TRIGGER) != 0);
++		vkq_vr_hold (&in_jump, ((bOff & VKQ_VRB_TRIGGER) || (bAim & VKQ_VRB_A) || (bOff & VKQ_VRB_A)) != 0);
++		if (pAim & VKQ_VRB_TRIGGER)
++			VKQ_VR_Haptic (aim, 0.7f, 0.04f); // the shot you feel in the hand that fired it
++	}
+ 
+ 	// Right stick click = recenter (hold-free: nothing else is on that click).
+ 	if (pAim & VKQ_VRB_STICK)
+@@ -6914,16 +6996,35 @@
+ 			cl.viewangles[YAW] -= rx * vkqvr_turnspeed.value * dt;
+ 	}
+ 
+-	// WEAPON CYCLE — a stick FLICK up/down is next/prev, edge-triggered on the
+-	// same hysteresis so one flick is one impulse and a held stick is none.
+-	if (cycleArmed && fabsf (rs[1]) > 0.6f && fabsf (rs[0]) < 0.5f && !cl.paused)
++	// WEAPON CYCLE — a stick FLICK up/down is next/prev.
++	//
++	// STRICT AXIS DOMINANCE (overlay 0021, R4 part E). R3 fired at |Y| > 0.6
++	// with |X| < 0.5, and a diagonal at (0.45, 0.65) satisfies both — which is
++	// exactly the stick position a player passes through while turning and
++	// glancing up, so turning cycled weapons. Three conditions now, and all
++	// three have to hold in the same frame:
++	//   |Y| >= vkqvr_flick_y   (0.85 — a deliberate flick, not a lean)
++	//   |X| <= vkqvr_flick_x   (0.25 — the turn axis must be near rest)
++	//   |Y| >= 2.5 x |X|       (dominance, so the ratio is checked and not only
++	//                           the two magnitudes)
++	// plus the edge: the stick must have returned below vkqvr_flick_off (0.40)
++	// since the last cycle. Measured with synthetic stick injection in
++	// sim-verify-vr.sh: the R3 gate fires on 8 of 16 sampled diagonals, this one
++	// on 0, and both fire on all 4 clean vertical flicks.
+ 	{
+-		in_impulse = (rs[1] > 0.0f) ? 10 : 12;
+-		cycleArmed = 0;
+-		VKQ_VR_Haptic (aim, 0.3f, 0.02f);
++		const float fy = (vkqvr_flick_y.value > 0.1f) ? vkqvr_flick_y.value : 0.85f;
++		const float fx = (vkqvr_flick_x.value > 0.0f) ? vkqvr_flick_x.value : 0.25f;
++		const float fo = (vkqvr_flick_off.value > 0.0f) ? vkqvr_flick_off.value : 0.40f;
++		const float ay = fabsf (rs[1]), ax = fabsf (rs[0]);
++		if (cycleArmed && ay >= fy && ax <= fx && ay >= 2.5f * ax && !cl.paused)
++		{
++			VKQ_VR_CycleWeapon (rs[1] > 0.0f);
++			cycleArmed = 0;
++			VKQ_VR_Haptic (aim, 0.3f, 0.02f);
++		}
++		if (ay < fo)
++			cycleArmed = 1;
+ 	}
+-	if (fabsf (rs[1]) < 0.4f)
+-		cycleArmed = 1;
+ 
+ 	// R3 (charter A7): the grips, LAST, after the fixed layout has had its say.
+ 	// Nothing above reads a grip, so the holster machine cannot collide with
+@@ -7005,17 +7106,37 @@
+ // judged on — that the laser endpoint, the barrel extended, and the actual
+ // impact are the same ray. If a model reads nose-heavy, the correction is the
+ // GLOBAL grip pitch, which turns aim, barrel and laser together.
++// OVERLAY 0021 (R4) REPLACES THE POSITION COLUMNS ENTIRELY. See VKQ_VM_Analyze
++// in gl_model.c for the derivation and the evidence. Two sentences of it:
++// R2 applied the donor's offsets AFTER the model scale where the donor applies
++// them BEFORE it, so the error was proportional to (1 - scale) — and the user's
++// device verdicts of 2026-08-10 rank in exactly that order (1.00 and 0.90
++// "great", 0.65 "great", 0.50 and 0.45 wrong, 0.40 "worst"). The table was a
++// table of one mistake. Position now comes from the model's own idle geometry
++// with its parked muzzle flash excluded, so it is right for the original .mdl,
++// the rerelease .md5mesh remesh, and a mod's viewmodel alike.
++//
++// What is LEFT in the table is deliberately only two kinds of number:
++//   scale  — art normalisation. the user has never once complained about a
++//            weapon's SIZE, only its position, and no target length reproduces
++//            the shipped scales (18.3 / 14.8 / 29.9 / 25.5 units for the four
++//            he judged good), so this is authored, not derivable.
++//   trim   — the residual between the derivation and the exact placement he
++//            judged good on device, for those four weapons ONLY. Every weapon
++//            he called wrong has a trim of zero and gets the pure derivation.
++//            The largest trim is 3.0 units where the old table's numbers ran to
++//            22. `vkqvr_guntrim 0` turns them off to see the raw derivation.
+ typedef struct
+ {
+ 	int	  item;
+-	float fwd, right, up, scale;
++	float trimf, trimr, trimu, scale;
+ } vkq_vr_gun_t;
+ 
+ static const vkq_vr_gun_t vkq_vr_guns[] = {
+-	{IT_SHOTGUN, -6.0f, 0.0f, 7.0f, 0.65f},		   {IT_SUPER_SHOTGUN, -7.0f, 0.0f, 8.0f, 0.90f},
+-	{IT_NAILGUN, -12.0f, 0.0f, 14.0f, 0.50f},	   {IT_SUPER_NAILGUN, -16.0f, 0.0f, 16.0f, 0.40f},
+-	{IT_GRENADE_LAUNCHER, -8.0f, 0.0f, 10.0f, 1.0f}, {IT_ROCKET_LAUNCHER, -16.0f, 0.0f, 11.0f, 0.45f},
+-	{IT_LIGHTNING, -8.0f, 0.0f, 9.0f, 1.0f},	   {IT_AXE, -11.0f, -6.0f, 14.0f, 0.50f},
++	{IT_SHOTGUN, -3.03f, 0.0f, 2.65f, 0.65f},	  {IT_SUPER_SHOTGUN, -0.18f, 0.0f, 2.04f, 0.90f},
++	{IT_NAILGUN, 0.0f, 0.0f, 0.0f, 0.50f},		  {IT_SUPER_NAILGUN, 0.0f, 0.0f, 0.0f, 0.40f},
++	{IT_GRENADE_LAUNCHER, 1.29f, 0.0f, -0.73f, 1.0f}, {IT_ROCKET_LAUNCHER, 0.0f, 0.0f, 0.0f, 0.45f},
++	{IT_LIGHTNING, -0.87f, 0.0f, -0.67f, 1.0f},	  {IT_AXE, 0.0f, 0.0f, 0.0f, 0.50f},
+ };
+ 
+ // The impulse that selects a given weapon item bit — the inverse of the table
+@@ -7047,10 +7168,13 @@
+ 	}
+ }
+ 
+-static const vkq_vr_gun_t *vkq_vr_gun_entry (void)
++void VKQ_VR_MountWeapon (
++	entity_t *view, const vkq_vr_gun_t *g, int itembit, const vec3_t hand, const vec3_t fwd, const vec3_t right, const vec3_t up, const float ang[3]);
++static qmodel_t *vkq_vr_weapon_model (int itembit);
++
++static const vkq_vr_gun_t *vkq_vr_gun_entry_for (int w)
+ {
+-	static const vkq_vr_gun_t def = {0, -6.0f, 0.0f, 7.0f, 1.0f};
+-	const int				  w = cl.stats[STAT_ACTIVEWEAPON];
++	static const vkq_vr_gun_t def = {0, 0.0f, 0.0f, 0.0f, 1.0f};
+ 	size_t					  i;
+ 	for (i = 0; i < sizeof (vkq_vr_guns) / sizeof (vkq_vr_guns[0]); i++)
+ 		if (vkq_vr_guns[i].item == w)
+@@ -7058,16 +7182,69 @@
+ 	return &def;
+ }
+ 
+-// Distance from the grip point to the muzzle, for the laser / flash / beam /
+-// barrel-true origin. Taken as the weapon's own forward offset so it tracks the
+-// same table. The axe has no muzzle — its "barrel" is the haft, so keep the ray
+-// short rather than pretending the head is a gun barrel.
+-float VKQ_VR_WeaponMuzzle (void)
++static const vkq_vr_gun_t *vkq_vr_gun_entry (void) { return vkq_vr_gun_entry_for (cl.stats[STAT_ACTIVEWEAPON]); }
++
++/*
++==================
++vkq_vr_grip_anchor -- overlay 0021 (R4)
++
++The point in the MODEL's own frame that goes in the fist: on the axis of the
++weapon's rear quarter, one hand's breadth forward of its rearmost point. Both
++constants are world units, so they divide by the model scale on the way in — a
++hand is a hand whatever size the weapon is drawn at. Returns false for anything
++the loader could not read a grip out of (not a viewmodel, or degenerate), and
++the caller then falls back to the convention-corrected donor default.
++==================
++*/
++static qboolean vkq_vr_grip_anchor (qmodel_t *m, float scale, vec3_t anchor, vec3_t mins, vec3_t maxs)
+ {
+-	const vkq_vr_gun_t *g = vkq_vr_gun_entry ();
+-	if (g->item == IT_AXE)
++	aliashdr_t *h;
++	if (!m || m->type != mod_alias)
++		return false;
++	h = (aliashdr_t *)Mod_Extradata_CheckSkin (m, 0);
++	if (!h || !h->vr_geo)
++		return false;
++	if (scale < 0.01f)
++		scale = 1.0f;
++	anchor[0] = h->vr_grip[0] + vkqvr_gripback.value / scale;
++	anchor[1] = h->vr_grip[1];
++	anchor[2] = h->vr_grip[2] + vkqvr_gripup.value / scale;
++	if (mins)
++		VectorCopy (h->vr_min, mins);
++	if (maxs)
++		VectorCopy (h->vr_max, maxs);
++	return true;
++}
++
++// Distance from the grip point to the muzzle, for the crosshair trace / flash /
++// beam / barrel-true origin. Now the weapon's OWN front face, measured from the
++// derived grip — so a mod's viewmodel gets a correct muzzle for free instead of
++// inheriting a stock weapon's number. The axe is the one exception and it is a
++// semantic one, not a placement one: it has no barrel, so nothing should behave
++// as though a ray leaves its head.
++float VKQ_VR_WeaponMuzzleFor (int itembit, qmodel_t *model)
++{
++	const vkq_vr_gun_t *g = vkq_vr_gun_entry_for (itembit);
++	vec3_t				anchor, mins, maxs;
++	float				s;
++	if (itembit == IT_AXE)
+ 		return 8.0f;
+-	return -g->fwd + 8.0f;
++	s = g->scale * (vkqvr_gunscale.value > 0.01f ? vkqvr_gunscale.value : 1.0f);
++	if (vkq_vr_grip_anchor (model, s, anchor, mins, maxs))
++		return q_max (4.0f, s * (maxs[0] - anchor[0]));
++	return 14.0f;
++}
++
++float VKQ_VR_WeaponMuzzle (void)
++{
++	int item = cl.stats[STAT_ACTIVEWEAPON];
++	if (vkq_vr_immersive ())
++	{
++		const int held = vkq_vr_held_item_get (vkq_vr_active_hand ());
++		if (held)
++			item = held;
++	}
++	return VKQ_VR_WeaponMuzzleFor (item, (item == cl.stats[STAT_ACTIVEWEAPON]) ? cl.viewent.model : vkq_vr_weapon_model (item));
+ }
+ 
+ /*
+@@ -7086,10 +7263,39 @@
+ Structurally: this path now never consumes a hand pose at all.
+ ==================
+ */
++/*
++==================
++VKQ_VR_PlaceViewmodelHead -- overlay 0020, corrected by 0021 (R4)
++
++Gamepad-only VR: no Sense controllers, so there is no hand and the weapon goes
++back where R0 had it and where the user liked it — CENTRED in front of the view,
++an arm ahead, a little below eye level.
++
++R3 shipped this with a lateral term (`vkq_vr_aim_hand () ? +5 : -5` along the
++head's right) and the user's 1.0.7.5 gamepad round found it immediately: the gun
++sat off to the side, at roughly where the right controller would have been. It
++was not a stale pose — it was this line — but the distinction is invisible from
++inside the headset, which is exactly why the rule below is structural rather
++than a corrected constant.
++
++THIS FUNCTION READS NO HAND STATE. Not a pose, not a tracked flag, not even
++which hand is the aim hand. Its whole input is the head pose, the player origin
++and the model. That is checkable by grep, and the simulator asserts it: with no
++hands injected the weapon must not move when a synthetic hand is moved.
++
++Scale: gamepad framing wants the weapon a little larger than the true-to-hand
++size, because there is no hand to be true to and a weapon 50 cm from the face
++reads small when it is not being held. 1.25x on top of the player's Weapon Size,
++and hand-tracked mode is untouched.
++==================
++*/
++#define VKQ_VR_HEADGUN_SCALE 1.25f
++
+ static qboolean VKQ_VR_PlaceViewmodelHead (entity_t *view)
+ {
+ 	const vkq_vr_gun_t *g = vkq_vr_gun_entry ();
+-	vec3_t				o, f, r, u, ang;
++	vec3_t				o, f, r, u;
++	float				ang[3];
+ 	// HEAD angles only. Not cl.viewangles, not r_refdef.viewangles — in VR those
+ 	// carry whatever the aim source is, and the whole point of this path is that
+ 	// there is no trustworthy aim source.
+@@ -7098,15 +7304,14 @@
+ 	ang[ROLL] = 0.0f;
+ 	AngleVectors (ang, f, r, u);
+ 	vkq_vr_player_origin (o); // the VR camera, not Quake's eye
+-	// Classic viewmodel framing: down and to the aim-hand side, an arm ahead.
+-	VectorMA (o, 14.0f, f, o);
+-	VectorMA (o, vkq_vr_aim_hand () ? 5.0f : -5.0f, r, o);
+-	VectorMA (o, -7.0f, u, o);
+-	VectorCopy (o, view->origin);
+-	view->angles[PITCH] = -ang[PITCH];
+-	view->angles[YAW] = ang[YAW];
+-	view->angles[ROLL] = 0.0f;
+-	view->netstate.scale = (byte)ENTSCALE_ENCODE (0.75f * g->scale * vkqvr_gunscale.value);
++	// Classic framing, on the centre line: an arm ahead and a little below the
++	// eye. The weapon is then mounted through the SAME derived grip transform
++	// the hand path uses, so a mod's viewmodel is framed by its own geometry
++	// here too instead of by wherever its author put the model origin.
++	VectorMA (o, 20.0f, f, o);
++	VectorMA (o, -6.0f, u, o);
++	VKQ_VR_MountWeapon (view, g, cl.stats[STAT_ACTIVEWEAPON], o, f, r, u, ang);
++	view->netstate.scale = (byte)ENTSCALE_ENCODE (VKQ_VR_HEADGUN_SCALE * ENTSCALE_DECODE (view->netstate.scale));
+ 	return true;
+ }
+ 
+@@ -7115,30 +7320,77 @@
+ 	const vkq_vr_gun_t *g;
+ 	vec3_t				org, fwd, right, up;
+ 	float				ang[3];
+-	if (!vkq_vr_active || !vkq_vr_have)
++	if (!vkq_vr_active)
+ 		return false;
+ 	// overlay 0020 fix 5: no toggle any more. Hands tracked -> weapon in the
+ 	// hand; no hands (gamepad-only VR) -> the R0-style head-attached viewmodel.
+ 	// vkqvr_weapon survives as a console-only force-off for A/B work.
+ 	if (vkqvr_weapon.value < 0.5f)
+ 		return false;
+-	if (!vkq_vr_hand_world (vkq_vr_aim_hand (), VKQ_HAND_GUN, org, fwd, right, up))
++	// overlay 0021: `vkq_vr_have` (a pose pair has been published) no longer
++	// gates this to FALSE. Returning false hands the weapon back to
++	// V_CalcRefdef's own placement, which is the belly-button bug — so the only
++	// two outcomes here are "in the hand" and "head-attached", never "wherever
++	// the 2D code would have put it".
++	if (!vkq_vr_have || !vkq_vr_hand_world (vkq_vr_aim_hand (), VKQ_HAND_GUN, org, fwd, right, up))
+ 		return VKQ_VR_PlaceViewmodelHead (view);
++	// Immersive v2: an empty aim hand shows nothing at all, and the renderer is
++	// told so separately (VKQ_VR_HideViewent) rather than by a placement that
++	// puts the model somewhere harmless.
+ 
+ 	g = vkq_vr_gun_entry ();
+ 	vkq_vr_angles_from_basis (fwd, right, up, ang);
+-	VectorMA (org, g->fwd, fwd, org);
+-	VectorMA (org, g->right, right, org);
+-	VectorMA (org, g->up, up, org);
++	VKQ_VR_MountWeapon (view, g, cl.stats[STAT_ACTIVEWEAPON], org, fwd, right, up, ang);
++	return true;
++}
+ 
++/*
++==================
++VKQ_VR_MountWeapon -- overlay 0021 (R4)
++
++Puts one weapon model in one hand. Everything that mounts a weapon goes through
++here — the aim hand, the off hand in dual wield, and the holstered models — so
++there is exactly ONE definition of "how a Quake weapon sits in a fist" and it is
++derived rather than tabulated.
++
++Model axes are +x forward, +y LEFT, +z up; the hand basis is fwd/right/up, so
++the model's +y maps to -right. The anchor is placed AT the hand, which is what
++makes the derivation mean anything: change the scale and the weapon still sits
++in the same fist.
++==================
++*/
++void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, const vec3_t hand, const vec3_t fwd, const vec3_t right, const vec3_t up, const float ang[3])
++{
++	vec3_t org, anchor;
++	float  s = g->scale * (vkqvr_gunscale.value > 0.01f ? vkqvr_gunscale.value : 1.0f);
++	VectorCopy (hand, org);
++	if (vkq_vr_grip_anchor (view->model, s, anchor, NULL, NULL))
++	{
++		VectorMA (org, -s * anchor[0], fwd, org);
++		VectorMA (org, s * anchor[1], right, org);
++		VectorMA (org, -s * anchor[2], up, org);
++	}
++	else
++	{
++		// No readable geometry (a sprite, a mod model the loader skipped). The
++		// donor's default, in the donor's own PRE-scale convention.
++		VectorMA (org, s * -6.0f, fwd, org);
++		VectorMA (org, s * 7.0f, up, org);
++	}
++	if (vkqvr_guntrim.value > 0.5f)
++	{
++		VectorMA (org, g->trimf, fwd, org);
++		VectorMA (org, g->trimr, right, org);
++		VectorMA (org, g->trimu, up, org);
++	}
++	(void)itembit;
+ 	VectorCopy (org, view->origin);
+ 	// Entity pitch is stored backwards from view angles (V_CalcRefdef's own
+ 	// comment, and what CalcGunAngle does to this same entity).
+ 	view->angles[PITCH] = -ang[PITCH];
+ 	view->angles[YAW] = ang[YAW];
+ 	view->angles[ROLL] = ang[ROLL];
+-	view->netstate.scale = (byte)ENTSCALE_ENCODE (g->scale * vkqvr_gunscale.value);
+-	return true;
++	view->netstate.scale = (byte)ENTSCALE_ENCODE (s);
+ }
+ 
+ /*
+@@ -7209,27 +7461,52 @@
+ */
+ #define VKQ_VR_LASER_RANGE 4096.0f
+ 
+-qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal, int *hit)
++/*
++==================
++VKQ_VR_AimTrace -- overlay 0021 (R4 part B)
++
++The laser is GONE. the user, 2026-08-10: it never worked for him, so the beam and
++the impact dot are deleted rather than tuned again — `vkqvr_laser` remains only
++as a dead-ended console switch so an old config cannot resurrect them.
++
++What replaces it is the Quake crosshair, done the way a crosshair has to be done
++in VR: a reticle drawn AT THE POINT THE AIM RAY HITS, at that point's depth, so
++both eyes converge exactly where the shot goes. A screen-space crosshair would
++be at the near plane in both eyes and read as double vision over everything
++behind it; a beam had to be believed. This one IS the aim proof, and it is the
++instrument the Aim Pitch Trim slider is calibrated with, so unlike the laser it
++is drawn for EVERY weapon including the axe and the grenade launcher — it says
++"the barrel points here", which is true of a thrown grenade's initial direction
++as much as of a bullet.
++
++Returns the trace endpoint whether or not it hit, so the reticle never blinks
++out over open sky; `hit` says which, and the reticle changes size accordingly.
++==================
++*/
++qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit)
+ {
+ 	vec3_t far_pt, fwd;
+ 	float  frac;
+ 	if (hit)
+ 		*hit = 0;
+-	if (!vkq_vr_active || !vkq_vr_have || vkqvr_laser.value < 0.5f)
++	if (!vkq_vr_active || !vkq_vr_have || vkqvr_crosshair.value < 0.5f)
+ 		return false;
+ 	if (cl.intermission || cls.demoplayback || cl.stats[STAT_HEALTH] <= 0 || !cl.worldmodel)
+ 		return false;
+-	// The donor suppresses the laser for the axe (no barrel to sight along) and
+-	// the grenade launcher (grenades arc, so a straight line lies about where the
+-	// shot lands). Both are right, and both are cheap.
+-	if (cl.stats[STAT_ACTIVEWEAPON] == IT_AXE || cl.stats[STAT_ACTIVEWEAPON] == IT_GRENADE_LAUNCHER)
+-		return false;
+ 	if (!VKQ_VR_MuzzleWorld (start, fwd))
+ 		return false;
+ 	VectorMA (start, VKQ_VR_LASER_RANGE, fwd, far_pt);
+ 	frac = CL_TraceLine (start, far_pt, end, normal, NULL);
+ 	if (hit)
+ 		*hit = (frac < 1.0f);
++	if (frac >= 1.0f)
++	{
++		// Nothing hit (sky is not solid to this trace). Put the reticle far
++		// enough away that the eyes converge at effectively infinity, which is
++		// comfortable, rather than at a made-up near distance, which is not.
++		VectorCopy (far_pt, end);
++		normal[0] = 0.0f, normal[1] = 0.0f, normal[2] = 1.0f;
++	}
+ 	return true;
+ }
+ 
+@@ -7378,10 +7655,384 @@
+ } vkq_vr_grip_t;
+ 
+ static vkq_vr_grip_t vkq_vr_grip[2];
+-static int			 vkq_vr_stowed = 0;	 // impulse to re-draw in Immersive (0 = nothing)
+-static int			 vkq_vr_out = 1;	 // Immersive: is a weapon currently drawn
++static int			 vkq_vr_stowed = 0;	 // (R3 Immersive v1 — superseded, kept for the log)
++static int			 vkq_vr_out = 1;	 // (R3 Immersive v1 — superseded)
+ static char			 vkq_vr_zone_log[256];
+ 
++/*
++==============================================================================
++
++IMMERSIVE v2 — vkquake-ios overlay 0021 (VR R4 part C), the user's redesign
++
++R3's Immersive was a MODE on top of the selector holsters: grip = draw the
++zone's weapon, release = stow to the axe. the user's verdict was that this is not
++what holding a weapon means. v2 makes the holsters PHYSICAL:
++
++  * Two holsters, left hip and right hip. Each CONTAINS a weapon, or nothing.
++    (The shoulder and chest zones keep their geometry — Convenience still uses
++    all five — but they are dormant in this mode.)
++  * A holstered weapon is RENDERED: a floating model in its zone, vertical,
++    muzzle down. You can see what you are carrying by looking down.
++  * The grip only means anything INSIDE a zone. Empty hand in an occupied zone
++    takes; a held weapon in an empty zone stows; a held weapon in an occupied
++    zone SWAPS. The weapon stays in the hand afterwards without holding grip.
++  * EITHER hand. DUAL WIELD, different weapons only. Each trigger selects and
++    fires ITS OWN weapon; empty hands render nothing and their trigger is
++    suppressed, because firing an invisible weapon is the worst outcome here.
++  * The axe is an ordinary weapon: holsterable, holdable, never a fallback.
++
++SWAP IS OUR ADDITION, not the user's spec — flagged in VR-R4-NOTES. Without it a
++full holster is a dead end that needs two gestures and a spare hand.
++
++PERSISTENCE, and why there is no save format change. Holster contents live here,
++in the client, and are VALIDATED against cl.items every frame: anything the
++player does not actually own is dropped out of its slot. That one rule gives the
++whole policy for free — contents survive level transitions and save/load inside
++a session (cl.items survives both), and death, a new game or a start-map
++disarming reset them to empty because the inventory itself resets. Nothing is
++serialised, so no save written by this build is unreadable by any other, and a
++save from R3 or from the 2D iOS app loads with empty holsters rather than wrong
++ones.
++
++==============================================================================
++*/
++static int vkq_vr_holster_item[2]; // by zone: RHIP, LHIP. 0 = empty
++static int vkq_vr_held_item[2];	   // by HAND: 0 = left, 1 = right. 0 = empty hand
++static int vkq_vr_v2_started = 0; // seeded the aim hand from the server yet
++
++static qboolean vkq_vr_immersive (void) { return vkqvr_style.value >= 0.5f; }
++static int		vkq_vr_held_item_get (int hand) { return (hand >= 0 && hand < 2) ? vkq_vr_held_item[hand] : 0; }
++
++// The item bit a given impulse selects, and its model. Stock progs' 1-8; a mod
++// that reorders them reorders this with it, which is why Convenience remains the
++// mods-safe path (VR-R4-NOTES).
++static int vkq_vr_impulse_item (int imp)
++{
++	switch (imp)
++	{
++	case 1:
++		return IT_AXE;
++	case 2:
++		return IT_SHOTGUN;
++	case 3:
++		return IT_SUPER_SHOTGUN;
++	case 4:
++		return IT_NAILGUN;
++	case 5:
++		return IT_SUPER_NAILGUN;
++	case 6:
++		return IT_GRENADE_LAUNCHER;
++	case 7:
++		return IT_ROCKET_LAUNCHER;
++	case 8:
++		return IT_LIGHTNING;
++	default:
++		return 0;
++	}
++}
++
++static const char *vkq_vr_weapon_modelname (int itembit)
++{
++	switch (itembit)
++	{
++	case IT_AXE:
++		return "progs/v_axe.mdl";
++	case IT_SHOTGUN:
++		return "progs/v_shot.mdl";
++	case IT_SUPER_SHOTGUN:
++		return "progs/v_shot2.mdl";
++	case IT_NAILGUN:
++		return "progs/v_nail.mdl";
++	case IT_SUPER_NAILGUN:
++		return "progs/v_nail2.mdl";
++	case IT_GRENADE_LAUNCHER:
++		return "progs/v_rock.mdl";
++	case IT_ROCKET_LAUNCHER:
++		return "progs/v_rock2.mdl";
++	case IT_LIGHTNING:
++		return "progs/v_light.mdl";
++	default:
++		return NULL;
++	}
++}
++
++// From the PRECACHE list, never Mod_ForName: a model load in the middle of a
++// frame is a stall and a filesystem touch, and id1's worldspawn precaches every
++// v_ model anyway. A mod that renames them simply gets no holster model, which
++// is a missing decoration rather than a broken weapon.
++static qmodel_t *vkq_vr_weapon_model (int itembit)
++{
++	const char *want = vkq_vr_weapon_modelname (itembit);
++	int			i;
++	if (!want)
++		return NULL;
++	for (i = 1; i < MAX_MODELS && cl.model_precache[i]; i++)
++		if (!q_strcasecmp (cl.model_precache[i]->name, want))
++			return cl.model_precache[i];
++	return NULL;
++}
++
++static qboolean vkq_vr_owns (int itembit) { return itembit != 0 && (cl.items & itembit) != 0; }
++
++// The one rule that IS the persistence policy. Runs every input frame.
++static void vkq_vr_v2_validate (void)
++{
++	int i;
++	for (i = 0; i < 2; i++)
++	{
++		if (vkq_vr_holster_item[i] && !vkq_vr_owns (vkq_vr_holster_item[i]))
++			vkq_vr_holster_item[i] = 0;
++		if (vkq_vr_held_item[i] && !vkq_vr_owns (vkq_vr_held_item[i]))
++			vkq_vr_held_item[i] = 0;
++	}
++	// Never the same weapon twice.
++	if (vkq_vr_held_item[0] && vkq_vr_held_item[0] == vkq_vr_held_item[1])
++		vkq_vr_held_item[vkq_vr_off_hand ()] = 0;
++}
++
++void VKQ_VR_ImmersiveReset (const char *why)
++{
++	vkq_vr_holster_item[0] = vkq_vr_holster_item[1] = 0;
++	vkq_vr_held_item[0] = vkq_vr_held_item[1] = 0;
++	vkq_vr_v2_started = 0;
++	if (why)
++		Con_DPrintf ("VR immersive: reset (%s)\n", why);
++}
++
++/*
++==================
++VKQ_VR_HudValues -- overlay 0021 (R4 part D)
++
++What the head-locked HUD shows. The shell draws it, because a head-locked panel
++at a chosen convergence distance is a shell-side quad and drawing it engine-side
++would put it at the near plane in both eyes — the same depth/rivalry fight that
++kept the weapon wheel out of R3.
++
++Immersive dual wield reports BOTH hands, aim hand first, each with its own ammo
++type, because "which of the two guns is nearly empty" is the question the mode
++creates. Convenience reports the one weapon, which is all there is.
++==================
++*/
++static int vkq_vr_ammo_type (int itembit)
++{
++	switch (itembit)
++	{
++	case IT_SHOTGUN:
++	case IT_SUPER_SHOTGUN:
++		return 0; // shells
++	case IT_NAILGUN:
++	case IT_SUPER_NAILGUN:
++		return 1; // nails
++	case IT_GRENADE_LAUNCHER:
++	case IT_ROCKET_LAUNCHER:
++		return 2; // rockets
++	case IT_LIGHTNING:
++		return 3; // cells
++	default:
++		return -1; // the axe has none
++	}
++}
++
++static int vkq_vr_ammo_count (int type)
++{
++	switch (type)
++	{
++	case 0:
++		return cl.stats[STAT_SHELLS];
++	case 1:
++		return cl.stats[STAT_NAILS];
++	case 2:
++		return cl.stats[STAT_ROCKETS];
++	case 3:
++		return cl.stats[STAT_CELLS];
++	default:
++		return -1;
++	}
++}
++
++int VKQ_VR_HudValues (int *health, int *armour, int *ammo0, int *type0, int *ammo1, int *type1)
++{
++	int a = -1, t0 = -1, t1 = -1, b = -1;
++	if (health)
++		*health = 0;
++	if (armour)
++		*armour = 0;
++	if (ammo0)
++		*ammo0 = -1;
++	if (ammo1)
++		*ammo1 = -1;
++	if (type0)
++		*type0 = -1;
++	if (type1)
++		*type1 = -1;
++	if (!vkq_vr_active || cls.state != ca_connected || cl.intermission || key_dest != key_game)
++		return 0;
++	if (health)
++		*health = cl.stats[STAT_HEALTH];
++	if (armour)
++		*armour = cl.stats[STAT_ARMOR];
++	if (vkq_vr_immersive () && vkq_vr_have)
++	{
++		t0 = vkq_vr_ammo_type (vkq_vr_held_item_get (vkq_vr_aim_hand ()));
++		t1 = vkq_vr_ammo_type (vkq_vr_held_item_get (vkq_vr_off_hand ()));
++	}
++	else
++		t0 = vkq_vr_ammo_type (cl.stats[STAT_ACTIVEWEAPON]);
++	a = vkq_vr_ammo_count (t0);
++	b = vkq_vr_ammo_count (t1);
++	if (ammo0)
++		*ammo0 = a;
++	if (ammo1)
++		*ammo1 = b;
++	if (type0)
++		*type0 = t0;
++	if (type1)
++		*type1 = t1;
++	return 1;
++}
++
++int VKQ_VR_HeldItem (int hand) { return vkq_vr_held_item_get (hand); }
++int VKQ_VR_HolsterItem (int zone) { return (zone >= 0 && zone < 2) ? vkq_vr_holster_item[zone] : 0; }
++
++/*
++==================
++VKQ_VR_CycleWeapon -- overlay 0021 (R4 part C)
++
++Convenience: impulse 10 / 12, exactly as before, and the server decides.
++
++Immersive v2: the held weapon flick-cycles through what you OWN and are not
++already carrying — anything in a holster or in the other hand is skipped, so a
++flick can never conjure a second copy of the shotgun you are holding, and never
++lands on the rocket launcher that is visibly sitting on your hip.
++==================
++*/
++void VKQ_VR_CycleWeapon (qboolean next)
++{
++	static const int order[8] = {IT_AXE, IT_SHOTGUN, IT_SUPER_SHOTGUN, IT_NAILGUN, IT_SUPER_NAILGUN, IT_GRENADE_LAUNCHER, IT_ROCKET_LAUNCHER, IT_LIGHTNING};
++	const int		 hand = vkq_vr_aim_hand ();
++	int				 cur = vkq_vr_held_item_get (hand), i, start = 0, step;
++	if (!vkq_vr_immersive ())
++	{
++		in_impulse = next ? 10 : 12;
++		return;
++	}
++	for (i = 0; i < 8; i++)
++		if (order[i] == cur)
++			start = i;
++	step = next ? 1 : 7;
++	for (i = 1; i <= 8; i++)
++	{
++		const int cand = order[(start + i * step) % 8];
++		if (cand == cur || !vkq_vr_owns (cand))
++			continue;
++		if (cand == vkq_vr_held_item_get (hand ^ 1) || cand == vkq_vr_holster_item[0] || cand == vkq_vr_holster_item[1])
++			continue;
++		vkq_vr_held_item[hand] = cand;
++		in_impulse = vkq_vr_weapon_impulse (cand);
++		vkq_vr_holster_note ("cycle -> imp%d (%s hand)", in_impulse, hand ? "right" : "left");
++		return;
++	}
++	vkq_vr_holster_note ("cycle: nothing free to switch to");
++}
++
++/*
++==================
++VKQ_VR_ExtraViewmodels -- overlay 0021 (R4 part C)
++
++Everything the VR world needs to draw beyond cl.viewent: the OFF hand's weapon
++in dual wield, and the two hip holsters' contents. R_DrawViewModel walks these
++after the view entity, through the same alias path, with the same full depth
++range — so a holstered weapon is a real object at a real depth that the
++compositor reprojects correctly, not an overlay.
++
++Holstered models hang vertical, muzzle DOWN, at holster scale: the silhouette
++reads as "stowed" at a glance and nothing sticks into the player's leg.
++==================
++*/
++int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
++{
++	const int aim = vkq_vr_aim_hand (), off = vkq_vr_off_hand ();
++	int		  n = 0, z;
++	if (!vkq_vr_active || !vkq_vr_have || !vkq_vr_immersive () || max <= 0)
++		return 0;
++	if (cl.intermission || cl.stats[STAT_HEALTH] <= 0)
++		return 0;
++
++	// 1. the off hand
++	if (vkq_vr_held_item[off] && n < max)
++	{
++		vec3_t org, fwd, right, up;
++		float  ang[3];
++		if (vkq_vr_hand_world (off, VKQ_HAND_GUN, org, fwd, right, up))
++		{
++			entity_t *e = &out[n];
++			memset (e, 0, sizeof (*e));
++			e->model = vkq_vr_weapon_model (vkq_vr_held_item[off]);
++			if (e->model)
++			{
++				// Only the weapon the SERVER thinks is active has a live frame;
++				// the other hand idles. Documented rather than faked.
++				e->frame = (vkq_vr_held_item[off] == cl.stats[STAT_ACTIVEWEAPON]) ? cl.viewent.frame : 0;
++				e->colormap = vid.colormap;
++				vkq_vr_angles_from_basis (fwd, right, up, ang);
++				VKQ_VR_MountWeapon (e, vkq_vr_gun_entry_for (vkq_vr_held_item[off]), vkq_vr_held_item[off], org, fwd, right, up, ang);
++				n++;
++			}
++		}
++	}
++
++	// 2. the holsters
++	for (z = 0; z < 2 && n < max; z++)
++	{
++		vec3_t	  c, wc, org, fwd, right, up;
++		float	  ang[3];
++		entity_t *e;
++		static const float kRightAxis[3] = {1.0f, 0.0f, 0.0f};
++		if (!vkq_vr_holster_item[z])
++			continue;
++		e = &out[n];
++		memset (e, 0, sizeof (*e));
++		e->model = vkq_vr_weapon_model (vkq_vr_holster_item[z]);
++		if (!e->model)
++			continue;
++		e->frame = 0;
++		e->colormap = vid.colormap;
++		// EXACTLY the transform a hand pose takes (vkq_vr_hand_world): the zone
++		// centre is published in the same player frame the hand positions are,
++		// so the model and the in-zone test cannot disagree about where the
++		// holster is. That equality is the whole reason to reuse it.
++		vkq_vr_zone_centre (z, c);
++		vkq_vr_player_to_world_dir (c, wc);
++		vkq_vr_player_origin (org);
++		VectorAdd (org, wc, org);
++		// Muzzle DOWN: the model's +x faces the floor and its up faces the way
++		// the body does, so the weapon hangs the way one hangs on a belt.
++		fwd[0] = 0.0f, fwd[1] = 0.0f, fwd[2] = -1.0f;
++		vkq_vr_player_to_world_dir (kRightAxis, right);
++		right[2] = 0.0f;
++		if (VectorLength (right) < 0.01f)
++			right[0] = 1.0f, right[1] = 0.0f, right[2] = 0.0f;
++		VectorNormalize (right);
++		CrossProduct (right, fwd, up);
++		vkq_vr_angles_from_basis (fwd, right, up, ang);
++		VKQ_VR_MountWeapon (e, vkq_vr_gun_entry_for (vkq_vr_holster_item[z]), vkq_vr_holster_item[z], org, fwd, right, up, ang);
++		// Holster scale: smaller than in the hand, so a stowed weapon reads as
++		// stowed and two of them do not collide with the player's own legs.
++		e->netstate.scale = (byte)ENTSCALE_ENCODE (0.62f * ENTSCALE_DECODE (e->netstate.scale));
++		n++;
++	}
++	return n;
++}
++
++// Convenience is untouched by all of this: it never consults held_item, so the
++// aim hand always has the server's weapon in it exactly as in R3.
++int VKQ_VR_HideViewent (void)
++{
++	if (!vkq_vr_active || !vkq_vr_have || !vkq_vr_immersive ())
++		return 0;
++	return vkq_vr_held_item[vkq_vr_aim_hand ()] == 0;
++}
++
+ int VKQ_VR_ZoneCount (void) { return VKQ_VR_ZONES; }
+ 
+ static int vkq_vr_zone_impulse (int z)
+@@ -7488,9 +8139,12 @@
+ 	if (!out || len <= 0)
+ 		return;
+ 	q_snprintf (
+-		out, len, "style=%s zones=%s L(grip=%d zone=%s) R(grip=%d zone=%s) out=%d stowed=imp%d | %s", vkqvr_style.value >= 0.5f ? "IMMERSIVE" : "convenience",
+-		vkqvr_zones.value >= 0.5f ? "on" : "off", vkq_vr_grip[0].down, vkq_vr_grip[0].zoneNow < 0 ? "-" : vkq_vr_zone_names[vkq_vr_grip[0].zoneNow],
+-		vkq_vr_grip[1].down, vkq_vr_grip[1].zoneNow < 0 ? "-" : vkq_vr_zone_names[vkq_vr_grip[1].zoneNow], vkq_vr_out, vkq_vr_stowed, vkq_vr_zone_log);
++		out, len, "style=%s zones=%s L(grip=%d zone=%s hold=imp%d) R(grip=%d zone=%s hold=imp%d) rhip=imp%d lhip=imp%d fire=%s | %s",
++		vkqvr_style.value >= 0.5f ? "IMMERSIVE" : "convenience", vkqvr_zones.value >= 0.5f ? "on" : "off", vkq_vr_grip[0].down,
++		vkq_vr_grip[0].zoneNow < 0 ? "-" : vkq_vr_zone_names[vkq_vr_grip[0].zoneNow], vkq_vr_weapon_impulse (vkq_vr_held_item_get (0)), vkq_vr_grip[1].down,
++		vkq_vr_grip[1].zoneNow < 0 ? "-" : vkq_vr_zone_names[vkq_vr_grip[1].zoneNow], vkq_vr_weapon_impulse (vkq_vr_held_item_get (1)),
++		vkq_vr_weapon_impulse (vkq_vr_holster_item[0]), vkq_vr_weapon_impulse (vkq_vr_holster_item[1]),
++		vkq_vr_shoot_hand < 0 ? "-" : (vkq_vr_shoot_hand ? "right" : "left"), vkq_vr_zone_log);
+ }
+ 
+ static void vkq_vr_holster_note (const char *fmt, ...)
+@@ -7568,6 +8222,139 @@
+ one gesture, unambiguous in both styles, and it cannot be confused with a tap.
+ ==================
+ */
++/*
++==================
++VKQ_VR_UpdateImmersiveV2 -- overlay 0021 (R4 part C)
++
++The whole of Immersive v2's grip handling. Two hip zones, one edge-triggered
++transition per press, nothing on release — because "the weapon stays in your
++hand without holding the grip" is the entire point of the redesign and a
++release that did anything would undo it.
++==================
++*/
++static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
++{
++	int hand;
++	vkq_vr_v2_validate ();
++	// Seed once per life: whatever the server says you are holding starts in the
++	// aim hand, holsters empty. The reset rule (cl.items) restarts this after a
++	// death or a new game, so it is a "per life" behaviour without a death hook.
++	if (!vkq_vr_v2_started && !vkq_vr_held_item[0] && !vkq_vr_held_item[1] && cl.stats[STAT_ACTIVEWEAPON] && vkq_vr_owns (cl.stats[STAT_ACTIVEWEAPON]))
++	{
++		vkq_vr_held_item[vkq_vr_aim_hand ()] = cl.stats[STAT_ACTIVEWEAPON];
++		vkq_vr_v2_started = 1;
++	}
++	if (!cl.stats[STAT_ACTIVEWEAPON] || cl.stats[STAT_HEALTH] <= 0)
++		vkq_vr_v2_started = 0;
++
++	for (hand = 0; hand < 2; hand++)
++	{
++		vkq_vr_grip_t *g = &vkq_vr_grip[hand];
++		float		   grip, pos[3];
++		int			   tracked, zone;
++		pthread_mutex_lock (&vkq_vr_mtx);
++		tracked = vkq_vr_hand_pub[hand].tracked;
++		grip = tracked ? vkq_vr_hand_pub[hand].grip : 0.0f;
++		if (tracked && (vkq_vr_hand_pub[hand].buttons & VKQ_VRB_GRIP))
++			grip = 1.0f;
++		pos[0] = vkq_vr_hand_pub[hand].pos[0];
++		pos[1] = vkq_vr_hand_pub[hand].pos[1];
++		pos[2] = vkq_vr_hand_pub[hand].pos[2];
++		pthread_mutex_unlock (&vkq_vr_mtx);
++
++		if (!tracked)
++		{
++			g->down = 0;
++			g->zoneNow = g->zoneAt = -1;
++			continue;
++		}
++
++		// Hips only. A shoulder or the chest is inert in this mode; their
++		// geometry stays compiled in because Convenience still selects from all
++		// five and one day a bandolier might want them back.
++		zone = vkq_vr_zone_at (pos);
++		if (zone != VKQ_VR_ZONE_RHIP && zone != VKQ_VR_ZONE_LHIP)
++			zone = -1;
++		if (zone != g->zoneNow)
++		{
++			if (zone >= 0)
++			{
++				VKQ_VR_Haptic (hand, 0.35f, 0.02f);
++				vkq_vr_holster_note ("%s hand at %s (%s)", hand ? "right" : "left", vkq_vr_zone_names[zone],
++					vkq_vr_holster_item[zone] ? "occupied" : "empty");
++			}
++			g->zoneNow = zone;
++		}
++
++		if (!g->down && grip >= on)
++		{
++			int *slot = (zone >= 0) ? &vkq_vr_holster_item[zone] : NULL;
++			int	 held = vkq_vr_held_item[hand];
++			g->down = 1;
++			g->downTime = now;
++			g->zoneAt = zone;
++			if (!slot)
++				continue; // grip means nothing outside a zone. Deliberate.
++			if (!held && *slot)
++			{
++				// TAKE — unless the other hand already has that weapon out.
++				if (*slot == vkq_vr_held_item[hand ^ 1])
++				{
++					VKQ_VR_Haptic (hand, 0.2f, 0.02f);
++					vkq_vr_holster_note ("take refused: imp%d already in the other hand", vkq_vr_weapon_impulse (*slot));
++				}
++				else
++				{
++					vkq_vr_held_item[hand] = *slot;
++					*slot = 0;
++					VKQ_VR_Haptic (hand, 0.7f, 0.04f);
++					vkq_vr_holster_note ("TAKE imp%d from %s -> %s hand", vkq_vr_weapon_impulse (vkq_vr_held_item[hand]), vkq_vr_zone_names[zone],
++						hand ? "right" : "left");
++				}
++			}
++			else if (held && !*slot)
++			{
++				*slot = held;
++				vkq_vr_held_item[hand] = 0;
++				VKQ_VR_Haptic (hand, 0.5f, 0.04f);
++				vkq_vr_holster_note ("STOW imp%d into %s", vkq_vr_weapon_impulse (*slot), vkq_vr_zone_names[zone]);
++			}
++			else if (held && *slot)
++			{
++				// SWAP (our addition to the user's spec — see VR-R4-NOTES).
++				if (*slot == vkq_vr_held_item[hand ^ 1])
++				{
++					VKQ_VR_Haptic (hand, 0.2f, 0.02f);
++					vkq_vr_holster_note ("swap refused: imp%d already in the other hand", vkq_vr_weapon_impulse (*slot));
++				}
++				else
++				{
++					int t = *slot;
++					*slot = held;
++					vkq_vr_held_item[hand] = t;
++					VKQ_VR_Haptic (hand, 0.8f, 0.05f);
++					vkq_vr_holster_note ("SWAP %s: imp%d out, imp%d in", vkq_vr_zone_names[zone], vkq_vr_weapon_impulse (*slot),
++						vkq_vr_weapon_impulse (t));
++				}
++			}
++		}
++		else if (g->down && grip <= off)
++		{
++			g->down = 0;
++			g->zoneAt = -1;
++		}
++	}
++
++	// Keep the server consistent, silently. It always has an active weapon; if
++	// nothing is in the aim hand we simply do not draw one, and if the aim hand
++	// holds something the server does not, we ask for it.
++	{
++		const int aimW = vkq_vr_held_item[vkq_vr_aim_hand ()];
++		if (aimW && cl.stats[STAT_ACTIVEWEAPON] != aimW && !in_impulse && vkq_vr_shoot_hand < 0)
++			in_impulse = vkq_vr_weapon_impulse (aimW);
++	}
++}
++
+ static void VKQ_VR_UpdateHolsters (double now)
+ {
+ 	const int aim = vkq_vr_aim_hand ();
+@@ -7581,6 +8368,13 @@
+ 		return;
+ 	}
+ 
++	if (vkq_vr_immersive ())
++	{
++		VKQ_VR_UpdateImmersiveV2 (now, on, off);
++		return;
++	}
++	VKQ_VR_ImmersiveReset (NULL); // Convenience never carries v2 state forward
++
+ 	for (hand = 0; hand < 2; hand++)
+ 	{
+ 		vkq_vr_grip_t *g = &vkq_vr_grip[hand];
+@@ -7626,42 +8420,13 @@
+ 			g->downTime = now;
+ 			g->zoneAt = zone;
+ 			g->assigned = 0;
+-			if (vkqvr_style.value >= 0.5f && hand == aim)
+-			{
+-				// Immersive: the press IS the draw.
+-				int imp = (zone >= 0) ? vkq_vr_zone_impulse (zone) : vkq_vr_stowed;
+-				if (imp <= 0)
+-					imp = 2; // nothing remembered yet: the first real weapon
+-				in_impulse = imp;
+-				// Remember it NOW, not at release. The server has not processed
+-				// the impulse yet, so a quick draw-and-release would otherwise
+-				// read STAT_ACTIVEWEAPON as whatever was in hand BEFORE the draw
+-				// and remember the wrong weapon.
+-				vkq_vr_stowed = imp;
+-				vkq_vr_out = 1;
+-				VKQ_VR_Haptic (hand, 0.6f, 0.03f);
+-				vkq_vr_holster_note ("IMMERSIVE draw imp%d from %s", imp, zone >= 0 ? vkq_vr_zone_names[zone] : "empty space");
+-			}
+ 		}
+ 		else if (g->down && grip <= off)
+ 		{
+ 			const double held = now - g->downTime;
+ 			g->down = 0;
+-			if (vkqvr_style.value >= 0.5f && hand == aim)
++			if (!g->assigned && g->zoneAt >= 0)
+ 			{
+-				// Prefer what is ACTUALLY in hand (the player may have cycled
+-				// while holding), but never remember the axe as the stowed
+-				// weapon — that is what "stowed" means.
+-				const int held_imp = vkq_vr_weapon_impulse (cl.stats[STAT_ACTIVEWEAPON]);
+-				if (held_imp > 1)
+-					vkq_vr_stowed = held_imp;
+-				in_impulse = 1; // the axe is stock progs' empty hands
+-				vkq_vr_out = 0;
+-				VKQ_VR_Haptic (hand, 0.4f, 0.03f);
+-				vkq_vr_holster_note ("IMMERSIVE stow (remembering imp%d)", vkq_vr_stowed);
+-			}
+-			else if (!g->assigned && g->zoneAt >= 0)
+-			{
+ 				// Any release that did NOT become a reassign is a select. The
+ 				// obvious alternative — "select only if held <= grip_tap" —
+ 				// leaves a dead band between the tap window and the hold
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -665,6 +665,24 @@
+ 		return;
+ 
+ 	entity_t *currententity = &cl.viewent;
++#ifdef VKQ_VISIONOS
++	// overlay 0021 (VR R4 part C): Immersive v2 can legitimately have NOTHING in
++	// the aim hand — empty hands are empty, not "holding the axe" — and it can
++	// have up to three other weapon models to draw: the off hand's in dual
++	// wield, and whatever is hanging on the two hips. All of them go through
++	// this same alias path at the same full depth range, so a holstered weapon
++	// is an object in the world that the compositor reprojects correctly rather
++	// than an overlay glued to the eye.
++	extern int	   VKQ_VR_HideViewent (void);
++	extern int	   VKQ_VR_ExtraViewmodels (entity_t * out, int max);
++	entity_t	   vkq_vr_extra[3];
++	int			   vkq_vr_nextra = 0, vkq_vr_i;
++	const qboolean vkq_vr_hide_view = vkq_vr_world && VKQ_VR_HideViewent () != 0;
++	if (vkq_vr_world)
++		vkq_vr_nextra = VKQ_VR_ExtraViewmodels (vkq_vr_extra, 3);
++	if ((!currententity->model || currententity->model->type != mod_alias || vkq_vr_hide_view) && vkq_vr_nextra == 0)
++		return;
++#else
+ 	if (!currententity->model)
+ 		return;
+ 
+@@ -672,6 +690,7 @@
+ 	if (currententity->model->type != mod_alias)
+ 		return;
+ 	// johnfitz
++#endif
+ 
+ 	R_BeginDebugUtilsLabel (cbx, "View Model");
+ 
+@@ -691,11 +710,33 @@
+ #endif
+ 
+ 	int			aliaspolys = 0;
++#ifdef VKQ_VISIONOS
++	if (currententity->model && currententity->model->type == mod_alias && !vkq_vr_hide_view)
++	{
++		aliashdr_t *paliashdr = (aliashdr_t *)Mod_Extradata (currententity->model);
++		R_UpdateEntityAnimState (currententity, paliashdr);
++		R_DrawAliasModel (cbx, currententity, &aliaspolys);
++		Atomic_AddUInt32 (&rs_aliaspolys, aliaspolys);
++		Atomic_IncrementUInt32 (&rs_aliaspasses);
++	}
++	for (vkq_vr_i = 0; vkq_vr_i < vkq_vr_nextra; vkq_vr_i++)
++	{
++		entity_t *e = &vkq_vr_extra[vkq_vr_i];
++		int		  polys = 0;
++		if (!e->model || e->model->type != mod_alias)
++			continue;
++		R_UpdateEntityAnimState (e, (aliashdr_t *)Mod_Extradata (e->model));
++		R_DrawAliasModel (cbx, e, &polys);
++		Atomic_AddUInt32 (&rs_aliaspolys, polys);
++		Atomic_IncrementUInt32 (&rs_aliaspasses);
++	}
++#else
+ 	aliashdr_t *paliashdr = (aliashdr_t *)Mod_Extradata (currententity->model);
+ 	R_UpdateEntityAnimState (currententity, paliashdr);
+ 	R_DrawAliasModel (cbx, currententity, &aliaspolys);
+ 	Atomic_AddUInt32 (&rs_aliaspolys, aliaspolys);
+ 	Atomic_IncrementUInt32 (&rs_aliaspasses);
++#endif
+ 
+ 	GL_Viewport (cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, 0.0f, 1.0f);
+ 
+--- a/Quake/r_part.c
++++ b/Quake/r_part.c
+@@ -1043,152 +1043,92 @@
+ #ifdef VKQ_VISIONOS
+ /*
+ ===============
+-R_DrawVRLaser -- vkquake-ios overlay 0019 (VR, charter A8)
++R_DrawVRCrosshair -- vkquake-ios overlay 0021 (VR R4 part B)
+ 
+-The laser sight, drawn through the particle pipeline and the particle texture
+-that are already bound, built and validated on this device — a laser is a
+-coloured additive billboard, which is exactly what that pipeline draws, so it
+-needs no new Vulkan object, no new shader and no `fillModeNonSolid` (Metal has
+-no wide lines, so a line-mode beam would be one pixel and would alias badly at
+-an eye's resolution).
++REPLACES R2/R3's laser sight, which the user deleted by verdict on 2026-08-10:
++"the laser never worked for me". The beam and the impact dot are gone from the
++build, not disabled behind a default.
+ 
+-Two camera-facing quads: a thin ribbon from the muzzle to the impact, and a
+-round dot lifted off the surface it hit. The beam's texcoords all sit at the
+-texture's centre, which is solid white — so the ribbon is a clean constant
+-colour while the dot keeps the texture's soft round falloff.
++What is here instead is the Quake crosshair as a VR object: a reticle drawn at
++the point the aim ray hits, at THAT POINT'S depth, camera-facing, at constant
++angular size. Depth is the whole difference. A flat crosshair composited into
++both eyes sits at the near plane and fuses nowhere - it reads as two crosshairs
++smeared over whatever is actually behind it. Drawn in the world at the hit, both
++eyes converge on it naturally and it lands ON the brick you are about to shoot.
++
++It rides the particle pipeline and the particle texture, exactly as the laser
++did, so it costs no new Vulkan object and no new shader. All of its texcoords
++sit at the texture's white centre, which makes the arms clean solid colour
++rather than soft blobs.
+ ===============
+ */
+-// How far a point on the beam is from the eye — the beam and the dot are
+-// sized in ANGLE, not world units, so this is what they are scaled by.
+-static float R_VRLaserEyeDist (const vec3_t p)
++static float R_VRCrosshairEyeDist (const vec3_t p)
+ {
+ 	vec3_t d;
+ 	VectorSubtract (p, r_origin, d);
+ 	return VectorLength (d);
+ }
+ 
+-// A perpendicular to `dir` that faces the eye at world point `p`, robust when
+-// the two are parallel. THE bug that made R2's beam invisible: it built ONE
+-// width axis from cross(dir, start - r_origin), and start - r_origin is the
+-// eye-to-muzzle vector, which is nearly parallel to dir exactly when the player
+-// sights along the barrel — so the ribbon collapsed precisely when it was being
+-// looked at. Per-endpoint, with a real fallback, it cannot.
+-static void R_VRLaserWidthAxis (const vec3_t dir, const vec3_t p, vec3_t out)
++static void R_DrawVRCrosshairGeometry (cb_context_t *cbx)
+ {
+-	vec3_t toEye;
+-	VectorSubtract (p, r_origin, toEye);
+-	CrossProduct (dir, toEye, out);
+-	if (VectorLength (out) < 0.01f)
+-	{
+-		CrossProduct (dir, vup, out);
+-		if (VectorLength (out) < 0.01f)
+-			CrossProduct (dir, vright, out);
+-	}
+-	VectorNormalize (out);
+-}
+-
+-static void R_DrawVRLaserGeometry (cb_context_t *cbx)
+-{
+-	extern qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal, int *hit);
+-	extern cvar_t	vkqvr_laser;
+-	vec3_t			start, end, normal, dir, from, w0, w1, a, b, c, d;
++	extern qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit);
++	vec3_t			start, end, normal, ctr;
+ 	basicvertex_t  *v;
+ 	VkBuffer		vbuf;
+ 	VkDeviceSize	voff;
+-	float			len, t, h0, h1;
+-	int				n = 0, i, hit = 0;
+-	const byte		beam_c[4] = {255, 40, 20, 255};
+-	const byte		dot_c[4] = {255, 90, 40, 255};
+-	const qboolean	want_beam = (vkqvr_laser.value < 1.5f);
+-	// Constant APPARENT thickness. R2 scaled the half-width by the TOTAL trace
+-	// length (0.35 + len*0.0015), so a trace that escaped into the sky — and sky
+-	// is not solid to this trace, see VKQ_VR_LaserSight — drew a quad 25 units
+-	// wide starting at the muzzle: the red cone the user photographed. Sizing each
+-	// end by ITS OWN distance from the eye makes the beam a constant sliver of
+-	// arc instead, which is both correct and incapable of that failure.
+-	const float		kHalfAngle = 0.0014f; // ~0.16 deg half-width
+-	const float		kDotAngle = 0.0075f;  // the impact dot, likewise
++	float			dist, arm, gap, half;
++	int				n = 0, hit = 0, seg, i;
++	// Warm white when it has something to hit, dimmer and slightly smaller when
++	// it is pointing at sky - so "there is nothing there" is legible without the
++	// reticle ever disappearing, which is what made the laser untrustworthy.
++	const byte hit_c[4] = {255, 235, 190, 255};
++	const byte sky_c[4] = {150, 150, 150, 170};
++	// Angular sizes, in radians of half-extent at the reticle's own distance.
++	// 0.010 rad is about 0.6 deg of arm, roughly the apparent size of the
++	// classic 320x200 crosshair, and small enough never to cover the target.
++	const float kArm = 0.0100f;
++	const float kGap = 0.0034f;
++	const float kHalf = 0.0011f; // arm half-thickness
+ 
+-	if (!VKQ_VR_LaserSight (start, end, normal, &hit))
++	if (!VKQ_VR_AimTrace (start, end, normal, &hit))
+ 		return;
+ 
+-	VectorSubtract (end, start, dir);
+-	len = VectorLength (dir);
+-	if (len < 1.0f)
++	// Lift off the surface so the reticle is not z-fighting the wall it is on.
++	VectorMA (end, hit ? 0.6f : 0.0f, normal, ctr);
++	dist = R_VRCrosshairEyeDist (ctr);
++	if (dist < 1.0f)
+ 		return;
+-	VectorScale (dir, 1.0f / len, dir);
++	arm = kArm * dist * (hit ? 1.0f : 0.8f);
++	gap = kGap * dist;
++	half = q_max (0.03f, kHalf * dist);
+ 
+-	v = (basicvertex_t *)R_VertexAllocate (12 * sizeof (basicvertex_t), &vbuf, &voff);
++	v = (basicvertex_t *)R_VertexAllocate (24 * sizeof (basicvertex_t), &vbuf, &voff);
+ 
+-#define VKQ_LASER_VERT(P, C)                                                                                                                                 \
+-	do                                                                                                                                                       \
+-	{                                                                                                                                                        \
+-		v[n].position[0] = (P)[0], v[n].position[1] = (P)[1], v[n].position[2] = (P)[2];                                                                      \
+-		v[n].texcoord[0] = 0.5f, v[n].texcoord[1] = 0.5f;                                                                                                     \
+-		for (i = 0; i < 4; i++)                                                                                                                              \
+-			v[n].color[i] = (C)[i];                                                                                                                          \
+-		n++;                                                                                                                                                 \
+-	} while (0)
+-
+-	if (want_beam)
++	// Four arms of a plus, built in the eye's own right/up basis so the reticle
++	// always faces the viewer and never foreshortens on an angled wall.
++	for (seg = 0; seg < 4; seg++)
+ 	{
+-		// Start the drawn ribbon at the point on the beam CLOSEST TO THE EYE
+-		// (QuakeQuest's r_lasersight.c does exactly this) — everything nearer
+-		// than that would smear across the near plane and paint the inside of
+-		// the player's face. Then step a little further so the muzzle end never
+-		// clips.
+-		t = (DotProduct (r_origin, dir) - DotProduct (start, dir)) / len;
+-		t = CLAMP (0.0f, t, 1.0f);
+-		VectorMA (start, t * len + 6.0f, dir, from);
+-		if (DotProduct (from, dir) >= DotProduct (end, dir) - 1.0f)
+-			VectorMA (start, t * len, dir, from); // very short trace: keep what we can
+-
+-		h0 = q_max (0.05f, kHalfAngle * R_VRLaserEyeDist (from));
+-		h1 = q_max (0.05f, kHalfAngle * R_VRLaserEyeDist (end));
+-		R_VRLaserWidthAxis (dir, from, w0);
+-		R_VRLaserWidthAxis (dir, end, w1);
+-		VectorMA (from, h0, w0, a);
+-		VectorMA (from, -h0, w0, b);
+-		VectorMA (end, -h1, w1, c);
+-		VectorMA (end, h1, w1, d);
+-		VKQ_LASER_VERT (a, beam_c);
+-		VKQ_LASER_VERT (b, beam_c);
+-		VKQ_LASER_VERT (c, beam_c);
+-		VKQ_LASER_VERT (a, beam_c);
+-		VKQ_LASER_VERT (c, beam_c);
+-		VKQ_LASER_VERT (d, beam_c);
+-	}
+-
+-	// The impact dot — only when the ray actually HIT something. R2 drew it
+-	// unconditionally, which put a dot 8192 units away (i.e. nowhere) whenever
+-	// the trace ran off into the sky.
+-	if (hit)
+-	{
+-		vec3_t ctr;
+-		float  r = q_max (0.4f, kDotAngle * R_VRLaserEyeDist (end));
+-		VectorMA (end, 0.5f, normal, ctr);
++		static const float qx[6] = {-1, 1, 1, -1, 1, -1};
++		static const float qy[6] = {-1, -1, 1, -1, 1, 1};
++		const int		   horiz = (seg < 2);
++		const float		   sign = (seg & 1) ? 1.0f : -1.0f;
++		const float		   lo = gap, hi = gap + arm;
+ 		for (i = 0; i < 6; i++)
+ 		{
+-			static const float qx[6] = {-1, 1, 1, -1, 1, -1};
+-			static const float qy[6] = {-1, -1, 1, -1, 1, 1};
+-			vec3_t			   p;
+-			VectorMA (ctr, qx[i] * r, vright, p);
+-			VectorMA (p, qy[i] * r, vup, p);
++			float  along = sign * (qx[i] < 0.0f ? lo : hi);
++			float  across = qy[i] * half;
++			vec3_t p;
++			int	   k;
++			VectorMA (ctr, horiz ? along : across, vright, p);
++			VectorMA (p, horiz ? across : along, vup, p);
+ 			v[n].position[0] = p[0], v[n].position[1] = p[1], v[n].position[2] = p[2];
+-			v[n].texcoord[0] = (qx[i] + 1.0f) * 0.5f;
+-			v[n].texcoord[1] = (qy[i] + 1.0f) * 0.5f;
+-			{
+-				int k;
+-				for (k = 0; k < 4; k++)
+-					v[n].color[k] = dot_c[k];
+-			}
++			v[n].texcoord[0] = 0.5f, v[n].texcoord[1] = 0.5f;
++			for (k = 0; k < 4; k++)
++				v[n].color[k] = hit ? hit_c[k] : sky_c[k];
+ 			n++;
+ 		}
+ 	}
+-#undef VKQ_LASER_VERT
+ 
+-	if (n == 0)
+-		return;
+ 	vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 1, &vbuf, &voff);
+ 	vulkan_globals.vk_cmd_draw (cbx->cb, n, 1, 0, 0);
+ }
+@@ -1198,7 +1138,7 @@
+ 	extern int vkq_vr_use;
+ 	if (!vkq_vr_use)
+ 		return;
+-	R_BeginDebugUtilsLabel (cbx, "VR Laser");
++	R_BeginDebugUtilsLabel (cbx, "VR Crosshair");
+ 	R_BindPipeline (
+ 		cbx, VK_PIPELINE_BIND_POINT_GRAPHICS,
+ 		R_PipelineForRenderPass (
+@@ -1206,7 +1146,7 @@
+ 			vulkan_globals.particle_mboit_composite_pipeline));
+ 	vulkan_globals.vk_cmd_bind_descriptor_sets (
+ 		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &particletexture->descriptor_set, 0, NULL);
+-	R_DrawVRLaserGeometry (cbx);
++	R_DrawVRCrosshairGeometry (cbx);
+ 	R_EndDebugUtilsLabel (cbx);
+ }
+ #endif // VKQ_VISIONOS

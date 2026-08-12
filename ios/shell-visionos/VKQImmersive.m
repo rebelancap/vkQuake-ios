@@ -349,7 +349,16 @@ void VKQ_Immersive_Run (cp_layer_renderer_t layer_renderer)
 			if (frame == NULL)
 				continue;
 
+			// R4.1: a failed timing prediction or a withheld drawable INVALIDATES the
+			// frame, and any further call on it — including the tidy-looking
+			// cp_frame_end_submission() that used to "balance" the start below — is
+			// API misuse that CompositorServices answers with __BUG_IN_CLIENT__ and
+			// an abort, not an error code. The 3D panel loop carried the identical
+			// mistake its VR sibling did (see the long note in VKQVR.m); abandon the
+			// frame instead — the only handling that does not touch a dead object.
 			cp_frame_timing_t timing = cp_frame_predict_timing (frame);
+			if (timing == NULL)
+				continue;
 			cp_frame_start_update (frame);
 			cp_frame_end_update (frame);
 			// Pace to the compositor cadence — without this the loop free-runs and
@@ -365,7 +374,14 @@ void VKQ_Immersive_Run (cp_layer_renderer_t layer_renderer)
 #pragma clang diagnostic pop
 			if (drawable == NULL)
 			{
-				cp_frame_end_submission (frame);
+				static int loggedWithheld = 0;
+				if (!loggedWithheld)
+				{
+					loggedWithheld = 1;
+					NSLog (@"[vkquake] imm: compositor withheld a drawable at frame %d — frame abandoned (ending an invalidated frame is the "
+							"__BUG_IN_CLIENT__ abort fixed in R4.1)",
+						   vkq_immFrameCount);
+				}
 				continue;
 			}
 
