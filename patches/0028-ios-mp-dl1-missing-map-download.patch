@@ -658,7 +658,7 @@
  
 --- /dev/null
 +++ b/Quake/cl_mapdl.c
-@@ -0,0 +1,1016 @@
+@@ -0,0 +1,1026 @@
 +/*
 +Copyright (C) 1996-2001 Id Software, Inc.
 +Copyright (C) 2010-2014 QuakeSpasm developers
@@ -1030,10 +1030,20 @@
 + *
 + * The extract root is derived from OUR filesystem, never from the record:
 + * install.extract is a hint of the form "{base}/<dir>/" and only its <dir>
-+ * component is used, validated as a single plain directory name. {base} is
-+ * always host_parms->userdir — the Documents root that holds id1/ — so no
-+ * archive record can aim the extraction anywhere else, and COM_UnzipToDir
-+ * re-checks containment for every entry it writes.
++ * component is used, validated as a whitelisted plain directory name. {base} is
++ * always com_basedir, so no archive record can aim the extraction anywhere else,
++ * and COM_UnzipToDir re-checks containment for every entry it writes.
++ *
++ * com_basedir AND NOT host_parms->userdir, which is what this originally used
++ * and which was wrong on iOS in a way only the simulator could show: Sys_Init
++ * derives host_parms->basedir from argv[0] — the APP BUNDLE — and iOS builds
++ * have no DO_USERDIRS, so userdir is that same bundle path. The engine's real
++ * content root arrives later, via -basedir, and lands in com_basedir; that is
++ * also what com_gamedir is built from, which is why the bare-.bsp install was
++ * always correct while this one quietly extracted into vkQuake.app/id1. The
++ * simulator's bundle is writable so it "worked" there; on a device the bundle is
++ * read-only and every entry would have failed to open. The containment check
++ * passed throughout because it was checking against the same wrong root.
 + */
 +static qboolean mdl_install_pkg (const char *zip, const char *map, const char *extracthint)
 +{
@@ -1068,12 +1078,12 @@
 +		}
 +	}
 +	if (dir[0])
-+		q_snprintf (root, sizeof (root), "%s/%s", host_parms->userdir, dir);
++		q_snprintf (root, sizeof (root), "%s/%s", com_basedir, dir);
 +	else
 +		q_strlcpy (root, com_gamedir, sizeof (root)); // the gamedir we are actually running
 +	Sys_mkdir (root);
 +
-+	n = COM_UnzipToDir (zip, root, host_parms->userdir, err, sizeof (err));
++	n = COM_UnzipToDir (zip, root, com_basedir, err, sizeof (err));
 +	if (n < 0)
 +	{
 +		mdl_fail ("%s", err);
