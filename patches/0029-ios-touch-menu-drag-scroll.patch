@@ -7,7 +7,7 @@ i tapped on that line item and tries to join that server."
 Two defects, one gesture model.
 
 1. There was no way to scroll a long list by touch at all. Fixed by splitting
-   the single finger into TAP and DRAG at a slop threshold (6 menu units, ~12
+   the single finger into TAP and DRAG at a slop threshold (8 menu units, ~12
    pt of glass at any interface scale): past the slop the gesture becomes a
    scroll, cancels the click it had armed, and emits K_MWHEELUP/K_MWHEELDOWN —
    one wheel step per row of finger travel, so the list tracks the thumb 1:1.

@@ -61,7 +61,9 @@ cleanup () {
 	[ -n "$FIXPID" ] && kill "$FIXPID" 2>/dev/null
 	pkill -f "vkquake -dedicated .*mpdl-fixture" 2>/dev/null
 	pkill -f "mpdl-fixture/fixture-server.py" 2>/dev/null
-	pkill -f "tail -n +1 -f $FIX/srvcmd" 2>/dev/null
+	# pkill -f is a REGEX match: a literal "+1" never matches itself (the + is a
+	# quantifier), so the old pattern orphaned this tail every run (found in MP-DL2).
+	pkill -f "mpdl-fixture/srvcmd" 2>/dev/null
 	xcrun simctl terminate "$UDID" $BUNDLE 2>/dev/null
 	echo "== shutting down $UDID (lane discipline: always, pass or fail)"
 	xcrun simctl shutdown "$UDID" 2>/dev/null
