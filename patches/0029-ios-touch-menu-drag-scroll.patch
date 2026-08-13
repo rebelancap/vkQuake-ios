@@ -1,0 +1,544 @@
+vkquake-ios overlay 0029: menu touch — tap activates, DRAG scrolls.
+
+Austin, device round on 1.1.0.1: "how can i scroll down the multiplayer list
+via touch controls only? ... if i tap on the scroll bar on the left, it thinks
+i tapped on that line item and tries to join that server."
+
+Two defects, one gesture model.
+
+1. There was no way to scroll a long list by touch at all. Fixed by splitting
+   the single finger into TAP and DRAG at a slop threshold (6 menu units, ~12
+   pt of glass at any interface scale): past the slop the gesture becomes a
+   scroll, cancels the click it had armed, and emits K_MWHEELUP/K_MWHEELDOWN —
+   one wheel step per row of finger travel, so the list tracks the thumb 1:1.
+   Wheel keys are what makes this ~40 lines instead of a per-menu feature:
+   M_HandleScrollBarKeys already handles both, and the server list, mods, key
+   binds and game options all route their keys through it.
+
+2. A tap that missed the rows still fired ENTER on whatever row the cursor had
+   been left on — which on the server list joined a server the player never
+   touched. M_Mouse_UpdateListCursor now records the rect it hit-tests, and a
+   tap outside it does not activate. The rect is the menu's own, so the fix is
+   menu-agnostic: it covers the gutter left of the server list and the gutter
+   right of the mods list without either menu knowing about it. Taps ON the
+   scrollbar are still passed through — M_HandleScrollBarKeys consumes them as
+   a page jump, so they can never reach a row.
+
+All menu touch state moves into menu.c behind M_TouchEvent, the one entry point
+both real SDL finger events and the vkq_touch* console commands call. Those
+commands exist because injected UIKit touches do not reach the touch path on a
+simulator, so driving the real handler from the console is the only way to test
+the gesture without a thumb on glass. vkq_slist_fake fills the host cache with a
+deterministic scrollable list for the same reason.
+
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -116,6 +116,46 @@
+ static int scrollbar_x;
+ static int scrollbar_y;
+ static int scrollbar_size;
++
++#ifdef VKQ_IOS
++// ---------------------------------------------------------------------------
++// TOUCH: tap vs drag (vkquake-ios 1.1.0.2)
++//
++// One finger, two meanings, decided by how far it travelled:
++//   TAP  — down and up inside a small slop circle -> activates the row (MOUSE1)
++//   DRAG — vertical travel past the slop          -> scrolls the list, no click
++//
++// The scroll is emitted as K_MWHEELUP / K_MWHEELDOWN key events, which is why
++// this is ~40 lines and not a per-menu feature: M_HandleScrollBarKeys already
++// handles both wheel keys, and every long menu (server list, mods, key binds,
++// game options) routes its keys through it. One mechanism, every list.
++//
++// These three "as drawn last frame" latches exist because the vendor's
++// scrollbar_* are consumed and zeroed inside M_UpdateMouse, while touch events
++// arrive during the input phase. They are set by the draw and cleared only by
++// the next M_Draw, so they are valid at any point in a frame.
++static int		list_hit_left, list_hit_right, list_hit_top, list_hit_bottom; // last list's hit rect
++static qboolean list_hit_valid;												  // ... and whether the last drawn menu had one
++static int		touch_bar_x, touch_bar_y, touch_bar_size;					  // last drawn scrollbar (0 size = none)
++
++// The tap/drag threshold, expressed in MENU units and scaled by the menu canvas
++// scale — so it is a fixed amount of GLASS (~12 pt on an iPhone at the shipped
++// interface scale) without the engine needing to know about UIKit points. One
++// row is 8 menu units, which is exactly the threshold: you have to drag a whole
++// list row before the gesture stops being a tap.
++#define VKQ_TOUCH_SLOP_MENU 8.0f
++
++// The touch-driven menu cursor, in drawable pixels, and the pending tap-click
++// M_UpdateMouse consumes two frames later. Both were globals in in_sdl3.c until
++// the tap/drag split moved every write into M_TouchEvent, right here.
++static float	vkq_menu_touch_x, vkq_menu_touch_y;
++static int		vkq_menu_click_pending;
++
++static float	vkq_touch_x0, vkq_touch_y0;	 // where the finger landed (drawable pixels)
++static float	vkq_touch_scroll_ref;		 // y of the last emitted wheel step
++static qboolean vkq_touch_down;			  // a finger is currently on the glass
++static qboolean vkq_touch_dragging;		  // ... and it has travelled past the slop
++#endif
+ 
+ void M_ConfigureNetSubsystem (void);
+ 
+@@ -192,10 +232,15 @@
+ M_PixelToMenuCanvasCoord
+ ================
+ */
+-static void M_PixelToMenuCanvasCoord (int *x, int *y)
++static float M_MenuCanvasScale (void)
+ {
+ 	float s = q_min ((float)glwidth / 320.0, (float)glheight / 200.0);
+-	s = CLAMP (1.0, M_GetScale (), s);
++	return CLAMP (1.0, M_GetScale (), s);
++}
++
++static void M_PixelToMenuCanvasCoord (int *x, int *y)
++{
++	float s = M_MenuCanvasScale ();
+ 	*x = (*x - (glwidth - 320 * s) / 2) / s;
+ 	*y = (*y - (glheight - 200 * s) / 2) / s;
+ }
+@@ -440,6 +485,13 @@
+ 	scrollbar_x = x;
+ 	scrollbar_y = y - 8;
+ 	scrollbar_size = (size + 2) * CHARACTER_SIZE;
++#ifdef VKQ_IOS
++	// Touch's own copy: the vendor's is zeroed inside M_UpdateMouse, but a finger
++	// event can arrive at any point in the frame. Cleared by the next M_Draw.
++	touch_bar_x = scrollbar_x;
++	touch_bar_y = scrollbar_y;
++	touch_bar_size = scrollbar_size;
++#endif
+ 	value = CLAMP (0.0f, value, 1.0f);
+ 	Draw_Character (cbx, x, y - CHARACTER_SIZE, 128 + 256);
+ 	for (int i = 0; i < size; i++)
+@@ -604,6 +656,18 @@
+ */
+ static void M_Mouse_UpdateListCursor (int *cursor, int left, int right, int top, int item_height, int num_items, int scroll_offset)
+ {
++#ifdef VKQ_IOS
++	// Record the rect a row can be hovered in, whether or not this frame's cursor
++	// moved. A touch tap OUTSIDE it must not activate the highlighted row — the
++	// finger did not land on a row, and firing ENTER on whatever the cursor was
++	// left sitting on is exactly how tapping the server-list scrollbar joined a
++	// random server (device round, 1.1.0.1).
++	list_hit_left = left;
++	list_hit_right = right;
++	list_hit_top = top;
++	list_hit_bottom = top + item_height * num_items;
++	list_hit_valid = (num_items > 0);
++#endif
+ 	if (!scrollbar_grab && !slider_grab && m_mouse_moved && (num_items > 0) && (m_mouse_x >= left) && (m_mouse_x <= right) && (m_mouse_y >= top) &&
+ 		(m_mouse_y <= (top + item_height * num_items)))
+ 		*cursor = scroll_offset + CLAMP (0, (m_mouse_y - top) / item_height, num_items - 1);
+@@ -3904,6 +3968,212 @@
+ #endif // VKQ_IOS
+ 
+ //=============================================================================
++#ifdef VKQ_IOS
++/* TOUCH: tap-to-activate, drag-to-scroll (see the latches at the top of the file) */
++
++/*
++================
++M_TouchInScrollbar -- is a menu-space point on the scrollbar the menu last drew?
++
++The vendor's M_InScrollbar asks the same question of the LIVE cursor and the
++vendor's scrollbar_*; this one asks it of an arbitrary point and of the touch
++latches, which survive M_UpdateMouse's bookkeeping.
++================
++*/
++static qboolean M_TouchInScrollbar (int mx, int my)
++{
++	return touch_bar_size && (mx >= touch_bar_x) && (mx <= touch_bar_x + 8) && (my >= touch_bar_y) && (my <= touch_bar_y + touch_bar_size);
++}
++
++/*
++================
++M_TouchTapActivates -- may the finger-up at the current cursor fire MOUSE1?
++
++Three answers, in order:
++  - on the scrollbar itself: YES. M_HandleScrollBarKeys takes K_MOUSE1 there and
++    jumps the page, and every menu that draws a scrollbar routes through it, so
++    the click is consumed and can never reach a row.
++  - a list was drawn and the finger landed outside its rows: NO. This is the
++    scroll-gutter fix, and it is menu-agnostic — the rect comes from the menu's
++    own M_Mouse_UpdateListCursor call, so mods / key binds / game options get it
++    for free, whichever side their scrollbar sits on.
++  - anything else (no list on screen, or a hit inside the rows): YES, unchanged.
++================
++*/
++static qboolean M_TouchTapActivates (void)
++{
++	if (M_TouchInScrollbar (m_mouse_x, m_mouse_y))
++		return true;
++	if (list_hit_valid &&
++		((m_mouse_x < list_hit_left) || (m_mouse_x > list_hit_right) || (m_mouse_y < list_hit_top) || (m_mouse_y > list_hit_bottom)))
++		return false;
++	return true;
++}
++
++/*
++================
++M_TouchEvent -- one finger, in DRAWABLE PIXELS. phase 0 = down, 1 = move, 2 = up.
++
++The single entry point for menu touch: the SDL_EVENT_FINGER_* cases in in_sdl3.c
++call it, and so do the vkq_touch* console commands, so a scripted drag exercises
++exactly the code a thumb does. Multi-touch is deliberately not modelled — the
++menu is a one-finger surface and a second finger simply restarts the gesture.
++================
++*/
++void M_TouchEvent (float px, float py, int phase)
++{
++	const float s = M_MenuCanvasScale ();
++	const float slop = VKQ_TOUCH_SLOP_MENU * s;		 // ~12 pt of glass
++	const float row = (float)CHARACTER_SIZE * s;	 // one list row, in pixels
++
++	if (phase == 0)
++	{
++		vkq_touch_down = true;
++		vkq_touch_dragging = false;
++		vkq_touch_x0 = px;
++		vkq_touch_y0 = py;
++		vkq_touch_scroll_ref = py;
++		vkq_menu_touch_x = px;
++		vkq_menu_touch_y = py;
++		return;
++	}
++	if (!vkq_touch_down)
++		return; // a move/up with no down (app resumed mid-gesture): ignore
++
++	if (!vkq_touch_dragging && (fabsf (py - vkq_touch_y0) > slop || fabsf (px - vkq_touch_x0) > slop))
++	{
++		// Past the slop: this gesture is a scroll, not a tap. Cancel any click it
++		// had already armed and stop feeding the hover cursor, so the row under the
++		// travelling finger does not fight the scroll.
++		vkq_touch_dragging = true;
++		vkq_menu_click_pending = 0;
++		vkq_touch_scroll_ref = py;
++	}
++
++	if (vkq_touch_dragging)
++	{
++		// One wheel step per row of travel, so the list tracks the finger 1:1 —
++		// M_HandleScrollBarKeys moves exactly one row per wheel step. Only fires
++		// where a scrollbar was actually drawn: menus without a scrollable list
++		// see no wheel keys at all and behave exactly as they did before.
++		if (touch_bar_size && (key_dest == key_menu || key_dest == key_console) && row >= 1.0f)
++		{
++			int guard = 64; // a flung finger must not spin here
++			// Finger UP means "show me later rows" (iOS convention) -> wheel DOWN.
++			while ((vkq_touch_scroll_ref - py) >= row && guard-- > 0)
++			{
++				Key_Event (K_MWHEELDOWN, true);
++				Key_Event (K_MWHEELDOWN, false);
++				vkq_touch_scroll_ref -= row;
++			}
++			while ((py - vkq_touch_scroll_ref) >= row && guard-- > 0)
++			{
++				Key_Event (K_MWHEELUP, true);
++				Key_Event (K_MWHEELUP, false);
++				vkq_touch_scroll_ref += row;
++			}
++		}
++	}
++	else
++	{
++		vkq_menu_touch_x = px;
++		vkq_menu_touch_y = py;
++	}
++
++	if (phase == 2)
++	{
++		// A tap arms the 2-frame pending click (M_UpdateMouse); a drag never does.
++		if (!vkq_touch_dragging)
++			vkq_menu_click_pending = 2;
++		vkq_touch_down = false;
++		vkq_touch_dragging = false;
++	}
++}
++
++// --- console seams -------------------------------------------------------
++// Injected UIKit touches do not reach the touch path on a simulator, so these
++// drive M_TouchEvent — the same function real finger events call — and are how
++// the whole gesture is verified without a thumb on glass.
++static int M_TouchCmd_ParsePhase (const char *p)
++{
++	if (!strcmp (p, "down"))
++		return 0;
++	if (!strcmp (p, "move"))
++		return 1;
++	return 2;
++}
++
++// vkq_touch <x 0..1> <y 0..1> <down|move|up> — screen-normalised, as a finger arrives.
++static void M_Touch_f (void)
++{
++	if (Cmd_Argc () != 4)
++	{
++		Con_Printf ("vkq_touch <x 0..1> <y 0..1> <down|move|up>\n");
++		return;
++	}
++	M_TouchEvent ((float)atof (Cmd_Argv (1)) * (float)glwidth, (float)atof (Cmd_Argv (2)) * (float)glheight, M_TouchCmd_ParsePhase (Cmd_Argv (3)));
++}
++
++// vkq_touchmenu <mx> <my> <down|move|up> — MENU-canvas coords (rows are 8 apart,
++// the list starts at y=32), converted back to pixels and fed to the same entry
++// point. This is how a test taps a named row or the scroll gutter exactly.
++static void M_TouchMenu_f (void)
++{
++	float s, px, py;
++	if (Cmd_Argc () != 4)
++	{
++		Con_Printf ("vkq_touchmenu <menu-x> <menu-y> <down|move|up>\n");
++		return;
++	}
++	s = M_MenuCanvasScale ();
++	px = (float)atof (Cmd_Argv (1)) * s + ((float)glwidth - 320.0f * s) / 2.0f;
++	py = (float)atof (Cmd_Argv (2)) * s + ((float)glheight - 200.0f * s) / 2.0f;
++	M_TouchEvent (px, py, M_TouchCmd_ParsePhase (Cmd_Argv (3)));
++}
++
++// vkq_touchdrag <x0> <y0> <x1> <y1> [steps] — screen-normalised drag, delivered
++// as down + steps moves + up, the way a real drag arrives.
++static void M_TouchDrag_f (void)
++{
++	float x0, y0, x1, y1;
++	int	  steps, i;
++	if (Cmd_Argc () < 5 || Cmd_Argc () > 6)
++	{
++		Con_Printf ("vkq_touchdrag <x0> <y0> <x1> <y1> [steps]\n");
++		return;
++	}
++	x0 = (float)atof (Cmd_Argv (1));
++	y0 = (float)atof (Cmd_Argv (2));
++	x1 = (float)atof (Cmd_Argv (3));
++	y1 = (float)atof (Cmd_Argv (4));
++	steps = (Cmd_Argc () == 6) ? atoi (Cmd_Argv (5)) : 12;
++	steps = CLAMP (1, steps, 200);
++	M_TouchEvent (x0 * (float)glwidth, y0 * (float)glheight, 0);
++	for (i = 1; i <= steps; i++)
++	{
++		float t = (float)i / (float)steps;
++		M_TouchEvent ((x0 + (x1 - x0) * t) * (float)glwidth, (y0 + (y1 - y0) * t) * (float)glheight, 1);
++	}
++	M_TouchEvent (x1 * (float)glwidth, y1 * (float)glheight, 2);
++	Con_Printf ("touchdrag: (%.3f,%.3f)->(%.3f,%.3f) %d steps\n", x0, y0, x1, y1, steps);
++}
++
++// vkq_menuinfo — the menu state a screenshot cannot show: which list is up, where
++// it is scrolled to, and the canvas mapping a test needs to aim a touch.
++static void M_MenuInfo_f (void)
++{
++	float s = M_MenuCanvasScale ();
++	Con_Printf (
++		"menuinfo: state=%d cursor=(%d,%d) slist=(first %d cursor %d of %d) mods=(first %d cursor %d of %d)\n", (int)m_state, m_mouse_x, m_mouse_y,
++		slist_first, slist_cursor, (int)hostCacheCount, first_mod, mods_cursor, num_mods);
++	Con_Printf (
++		"menuinfo: list rect=%s(%d..%d, %d..%d) scrollbar=(x %d y %d size %d) canvas: scale %.2f origin (%.0f,%.0f) drawable %dx%d\n",
++		list_hit_valid ? "" : "INVALID ", list_hit_left, list_hit_right, list_hit_top, list_hit_bottom, touch_bar_x, touch_bar_y, touch_bar_size, s,
++		((float)glwidth - 320.0f * s) / 2.0f, ((float)glheight - 200.0f * s) / 2.0f, glwidth, glheight);
++}
++#endif // VKQ_IOS
++
++//=============================================================================
+ /* Credits menu -- used by the 2021 re-release */
+ 
+ static void M_Menu_Credits_f (void) {}
+@@ -3922,6 +4192,16 @@
+ #ifdef VKQ_IOS
+ 	Cmd_AddCommand ("vkq_quicksave", VKQ_QuickSave_f);
+ 	Cmd_AddCommand ("vkq_quickload", VKQ_QuickLoad_f);
++	// Touch seams: one synthetic finger through the same entry point a real one
++	// uses, plus the menu state a screenshot cannot show. Two menus that are
++	// otherwise only reachable by walking the UI get an opener, so a scripted
++	// run can land on the exact list it is testing.
++	Cmd_AddCommand ("vkq_touch", M_Touch_f);
++	Cmd_AddCommand ("vkq_touchmenu", M_TouchMenu_f);
++	Cmd_AddCommand ("vkq_touchdrag", M_TouchDrag_f);
++	Cmd_AddCommand ("vkq_menuinfo", M_MenuInfo_f);
++	Cmd_AddCommand ("menu_slist", M_Menu_ServerList_f);
++	Cmd_AddCommand ("menu_mods", M_Menu_Mods_f);
+ #endif
+ 	Cmd_AddCommand ("menu_multiplayer", M_Menu_MultiPlayer_f);
+ 	Cmd_AddCommand ("menu_setup", M_Menu_Setup_f);
+@@ -3945,8 +4225,7 @@
+ 	// synthesis is unreliable here — SDL_GetMouseState freezes at the first tap's
+ 	// position (so every menu tap stuck on the first item, Single Player). Drive the
+ 	// menu straight from finger events (in_sdl3.c), already in drawable pixels.
+-	extern float vkq_menu_touch_x, vkq_menu_touch_y;
+-	float		 new_mouse_x = vkq_menu_touch_x;
++	float new_mouse_x = vkq_menu_touch_x;
+ 	float		 new_mouse_y = vkq_menu_touch_y;
+ #elif defined(USE_SDL3)
+ 	float new_mouse_x;
+@@ -3972,11 +4251,18 @@
+ 	// A tap (finger up) sets a 2-frame pending click: the position was applied above
+ 	// and the menu draw updates the highlighted row this frame, so firing MOUSE1 a
+ 	// couple frames later lands the click on the row you touched, not a stale one.
+-	extern int vkq_menu_click_pending;
+ 	if (vkq_menu_click_pending > 0 && --vkq_menu_click_pending == 0)
+ 	{
+-		Key_Event (K_MOUSE1, true);
+-		Key_Event (K_MOUSE1, false);
++		// ... but only if the finger actually landed on something. A tap in a
++		// list's scroll gutter used to fire ENTER on the stale cursor row, which
++		// on the server list meant joining a server you never touched.
++		if (M_TouchTapActivates ())
++		{
++			Key_Event (K_MOUSE1, true);
++			Key_Event (K_MOUSE1, false);
++		}
++		else
++			Con_DPrintf ("touch: tap at menu (%d,%d) is outside the list — not activating\n", m_mouse_x, m_mouse_y);
+ 	}
+ #endif
+ 
+@@ -4007,6 +4293,13 @@
+ 
+ void M_Draw (cb_context_t *cbx)
+ {
++#ifdef VKQ_IOS
++	// Touch's "what did the menu draw last frame" latches. Cleared here, at the
++	// top of the draw, so they describe the menu that is actually on screen —
++	// including the case below where nothing is drawn at all.
++	list_hit_valid = false;
++	touch_bar_size = 0;
++#endif
+ 	if (m_state == m_none || key_dest != key_menu)
+ 		return;
+ 
+--- a/Quake/menu.h
++++ b/Quake/menu.h
+@@ -75,6 +75,11 @@
+ float	 M_GetScale ();
+ void	 M_UpdateMouse ();
+ void	 M_MenuChanged ();
++#ifdef VKQ_IOS
++// One finger on the menu, in drawable pixels. phase 0 = down, 1 = move, 2 = up.
++// Called by in_sdl3.c's SDL_EVENT_FINGER_* cases and by the vkq_touch* commands.
++void M_TouchEvent (float px, float py, int phase);
++#endif
+ 
+ void M_Menu_Main_f (void);
+ void M_Menu_Options_f (void);
+--- a/Quake/in_sdl3.c
++++ b/Quake/in_sdl3.c
+@@ -28,14 +28,9 @@
+ 
+ extern cvar_t in_debugkeys;
+ 
+-#ifdef VKQ_IOS
+-// Touch-driven menu cursor position (drawable pixels) + pending tap-click, read by
+-// menu.c M_UpdateMouse. SDL's touch->mouse synthesis is unreliable on this hardware
+-// (SDL_GetMouseState freezes after the first tap), so the menu is fed from finger
+-// events instead — see the SDL_EVENT_FINGER_* handling in IN_Commands below.
+-float vkq_menu_touch_x = 0.0f, vkq_menu_touch_y = 0.0f;
+-int	  vkq_menu_click_pending = 0;
+-#endif
++// The touch-driven menu cursor (SDL's touch->mouse synthesis is unreliable on this
++// hardware — SDL_GetMouseState freezes after the first tap) lives in menu.c now,
++// behind M_TouchEvent; see the SDL_EVENT_FINGER_* handling in IN_Commands below.
+ 
+ static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
+ SDL_Gamepad			 *joy_active_controller = NULL;
+@@ -263,15 +258,15 @@
+ #ifdef VKQ_IOS
+ 		// Drive the menu cursor from touch directly (SDL's touch->mouse synthesis
+ 		// freezes here). tfinger.x/y are normalized [0,1] in window space; scale to
+-		// drawable pixels for the menu-canvas mapping. Click fires on finger-up, a
+-		// couple frames later (menu.c M_UpdateMouse) once the cursor has tracked.
++		// drawable pixels for the menu-canvas mapping. M_TouchEvent decides what the
++		// gesture MEANS — a tap arms the click that fires a couple frames later
++		// (menu.c M_UpdateMouse), a drag scrolls the list instead and arms nothing.
+ 		case SDL_EVENT_FINGER_DOWN:
+ 		case SDL_EVENT_FINGER_MOTION:
+ 		case SDL_EVENT_FINGER_UP:
+-			vkq_menu_touch_x = event.tfinger.x * (float)glwidth;
+-			vkq_menu_touch_y = event.tfinger.y * (float)glheight;
+-			if (event.type == SDL_EVENT_FINGER_UP)
+-				vkq_menu_click_pending = 2;
++			M_TouchEvent (
++				event.tfinger.x * (float)glwidth, event.tfinger.y * (float)glheight,
++				(event.type == SDL_EVENT_FINGER_DOWN) ? 0 : ((event.type == SDL_EVENT_FINGER_MOTION) ? 1 : 2));
+ 			break;
+ #endif
+ 
+--- a/Quake/net_main.c
++++ b/Quake/net_main.c
+@@ -431,7 +431,66 @@
+ 	if (idx >= hostCacheCount)
+ 		return "";
+ 	return hostcache[idx].cname;
++}
++
++#ifdef VKQ_IOS
++/*
++====================
++NET_SlistFake_f -- vkq_slist_fake <count> [real-address]
++
++A deterministic, scrollable server list without spinning up a dozen servers:
++stuff the host cache with <count> entries the menu can page through, plus (if
++given) ONE real address so a genuine tap-to-join is still provable. Fakes get
++ascending pings from 50 ms so NET_SlistSort's order is predictable and the real
++entry — ping 1 — always sorts to row 0.
++
++This is a test seam, not a feature: it writes only the client-side cache the
++server browser renders, a real `slist` search overwrites it, and the fake
++addresses point nowhere. Kept in the shipped build because it is 30 lines and
++the alternative is an engine-side dev gate the app target cannot set.
++====================
++*/
++static void NET_SlistFake_f (void)
++{
++	size_t n, want, have = 0;
++
++	if (Cmd_Argc () < 2 || Cmd_Argc () > 3)
++	{
++		Con_Printf ("vkq_slist_fake <count> [real-address] -- fill the server list for testing\n");
++		return;
++	}
++	want = (size_t)q_max (0, atoi (Cmd_Argv (1)));
++	if (Cmd_Argc () == 3)
++		++want;
++	if (want > HOSTCACHESIZE)
++		want = HOSTCACHESIZE;
++
++	memset (hostcache, 0, sizeof (hostcache));
++	if (Cmd_Argc () == 3)
++	{
++		q_strlcpy (hostcache[0].name, "LOCALHOST", sizeof (hostcache[0].name));
++		q_strlcpy (hostcache[0].map, "start", sizeof (hostcache[0].map));
++		q_strlcpy (hostcache[0].gamedir, "id1", sizeof (hostcache[0].gamedir));
++		q_strlcpy (hostcache[0].cname, Cmd_Argv (2), sizeof (hostcache[0].cname));
++		hostcache[0].users = 0;
++		hostcache[0].maxusers = 8;
++		hostcache[0].ping_ms = 1;
++		have = 1;
++	}
++	for (n = have; n < want; n++)
++	{
++		q_snprintf (hostcache[n].name, sizeof (hostcache[n].name), "SRV%02d", (int)(n - have + 1));
++		q_strlcpy (hostcache[n].map, "e1m1", sizeof (hostcache[n].map));
++		q_strlcpy (hostcache[n].gamedir, "id1", sizeof (hostcache[n].gamedir));
++		q_snprintf (hostcache[n].cname, sizeof (hostcache[n].cname), "10.0.0.%d:26000", (int)(n - have + 1));
++		hostcache[n].users = 1;
++		hostcache[n].maxusers = 8;
++		hostcache[n].ping_ms = 50 + (int)(n - have);
++	}
++	hostCacheCount = want;
++	Con_Printf ("vkq_slist_fake: host cache holds %d entr%s\n", (int)hostCacheCount, hostCacheCount == 1 ? "y" : "ies");
+ }
++#endif
+ 
+ static void Slist_Send (void *unused)
+ {
+@@ -925,6 +984,9 @@
+ 	Cvar_RegisterVariable (&hostname);
+ 
+ 	Cmd_AddCommand ("slist", NET_Slist_f);
++#ifdef VKQ_IOS
++	Cmd_AddCommand ("vkq_slist_fake", NET_SlistFake_f);
++#endif
+ 	Cmd_AddCommand ("listen", NET_Listen_f);
+ 	Cmd_AddCommand ("maxplayers", MaxPlayers_f);
+ 	Cmd_AddCommand ("port", NET_Port_f);
