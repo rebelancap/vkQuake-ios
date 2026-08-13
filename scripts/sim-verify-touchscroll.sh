@@ -10,7 +10,7 @@
 #   c. an injected TAP on the real server's row joins it (the server sees the
 #      player), then disconnects cleanly
 #   d. an injected TAP in the scroll gutter joins NOTHING and leaves the menu up
-#      (this is the bug Austin hit on 1.1.0.1), while a tap ON the bar itself is
+#      (this is the bug the 1.1.0.1 device round hit), while a tap ON the bar itself is
 #      still a page jump
 #   e. a DRAG scrolls the MODS list too — the same wheel-key mechanism, no
 #      per-menu code (fixture: 24 empty mod dirs, 14 fit on screen)
@@ -370,7 +370,7 @@ echo
 echo "== (x) taps still activate: Main -> Multiplayer by touch"
 # ===========================================================================
 # The main menu's rows are 20 apart from y=32 (M_Mouse_UpdateListCursor 70,320,32,20),
-# so Multiplayer is row 1. This is the path Austin walks to reach the server list.
+# so Multiplayer is row 1. This is the path a player walks to reach the server list.
 M=$(mark)
 tap 150 $((32 + 20 * 1 + 8))
 if [ "$(info state)" = "$M_MULTIPLAYER" ]; then

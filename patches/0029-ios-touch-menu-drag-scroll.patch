@@ -1,6 +1,6 @@
 vkquake-ios overlay 0029: menu touch — tap activates, DRAG scrolls.
 
-Austin, device round on 1.1.0.1: "how can i scroll down the multiplayer list
+From the 1.1.0.1 device round: "how can i scroll down the multiplayer list
 via touch controls only? ... if i tap on the scroll bar on the left, it thinks
 i tapped on that line item and tries to join that server."
 
