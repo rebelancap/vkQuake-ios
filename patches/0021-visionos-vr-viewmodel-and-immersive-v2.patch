@@ -307,28 +307,30 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
  	mod->type = mod_alias;
  
  	Mod_SetExtraFlags (mod); // johnfitz
-@@ -5500,6 +5792,20 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
+@@ -5500,6 +5792,22 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
  	}
  	SAFE_FREE (anim.posedata);
  
 +#ifdef VKQ_VISIONOS
 +	// overlay 0021 (VR R4): a pristine copy, because the flash collapse below
-+	// rewrites inverted_joints in place and a second mesh must still be
-+	// analysed against the animation as authored.
++	// rewrites the skinning joints in place and a second mesh must still be
++	// analysed against the animation as authored. (Upstream 1.36.0 renamed
++	// inverted_joints -> skinning_joints and moved the inverse-bind fold into
++	// the per-vertex joint-local positions; see the accumulator below.)
 +	jointpose_t *vkq_vm_joints0 = NULL;
 +	const qboolean vkq_vm_want = VKQ_VM_IsViewmodel (mod->name) && anim.numposes > 0 && anim.numjoints > 0;
 +	if (vkq_vm_want)
 +	{
 +		size_t nbytes = sizeof (jointpose_t) * anim.numjoints * anim.numposes;
 +		vkq_vm_joints0 = (jointpose_t *)Mem_Alloc (nbytes);
-+		memcpy (vkq_vm_joints0, inverted_joints, nbytes);
++		memcpy (vkq_vm_joints0, skinning_joints, nbytes);
 +	}
 +#endif
 +
  	// 3. each mesh has its own aliashdr_t : load vertices, triangles, textures...etc. and upload to GPU each surface:
  
  	for (int m = 0; m < nummeshes; m++)
-@@ -5644,6 +5950,102 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
+@@ -5644,6 +5952,124 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
  		TEMP_FREE (weight);
  		TEMP_FREE (vinfo);
  
@@ -348,22 +350,37 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
 +			byte		   *jused = (byte *)Mem_Alloc (nj);
 +			vkq_vm_result_t res;
 +			int				p, v, k, r;
++			// Upstream 1.36.0 skins from PER-INFLUENCE joint-local positions with
++			// the weight carried as the w component (Shaders/skinning.inc:
++			// joint_mat * vec4(jpx, jpy, jpz, weight)), and it has two vertex
++			// layouts now -- md5vert_t (4 influences) and md5vert8_t (8). These
++			// accessors reproduce the GPU's formula exactly for either layout;
++			// the old `w * (M * xyz)` form is no longer what the GPU computes.
++			const qboolean vkq_vm_eight = (surf->poseverttype == PV_MD5_8);
++			const int	   vkq_vm_ninf = vkq_vm_eight ? NUM_JOINT_INFLUENCES_8_WEIGHT : NUM_JOINT_INFLUENCES_4_WEIGHT;
++#define VKQ_VM_V8(vi)	  ((const md5vert8_t *)(poutvertexes + (size_t)(vi) * md5_vertex_size))
++#define VKQ_VM_V4(vi)	  ((const md5vert_t *)(poutvertexes + (size_t)(vi) * md5_vertex_size))
++#define VKQ_VM_W(vi, kk)  (vkq_vm_eight ? VKQ_VM_V8 (vi)->joint_weights[kk] : VKQ_VM_V4 (vi)->joint_weights[kk])
++#define VKQ_VM_J(vi, kk)  (vkq_vm_eight ? VKQ_VM_V8 (vi)->joint_indices[kk] : VKQ_VM_V4 (vi)->joint_indices[kk])
++#define VKQ_VM_PX(vi, kk) (vkq_vm_eight ? VKQ_VM_V8 (vi)->joint_position_x[kk] : VKQ_VM_V4 (vi)->joint_position_x[kk])
++#define VKQ_VM_PY(vi, kk) (vkq_vm_eight ? VKQ_VM_V8 (vi)->joint_position_y[kk] : VKQ_VM_V4 (vi)->joint_position_y[kk])
++#define VKQ_VM_PZ(vi, kk) (vkq_vm_eight ? VKQ_VM_V8 (vi)->joint_position_z[kk] : VKQ_VM_V4 (vi)->joint_position_z[kk])
 +			for (p = 0; p < np; p++)
 +			{
 +				const jointpose_t *jp = vkq_vm_joints0 + (size_t)p * nj;
 +				for (v = 0; v < nv; v++)
 +				{
-+					const md5vert_t *mv = &poutvertexes[v];
-+					float			 acc[3] = {0.0f, 0.0f, 0.0f};
-+					for (k = 0; k < NUM_JOINT_INFLUENCES; k++)
++					float acc[3] = {0.0f, 0.0f, 0.0f};
++					for (k = 0; k < vkq_vm_ninf; k++)
 +					{
-+						const float w = mv->joint_weights[k] * (1.0f / 255.0f);
++						const float w = VKQ_VM_W (v, k) * (1.0f / 255.0f);
++						const float jx = VKQ_VM_PX (v, k), jy = VKQ_VM_PY (v, k), jz = VKQ_VM_PZ (v, k);
 +						const float *m;
 +						if (w == 0.0f)
 +							continue;
-+						m = jp[mv->joint_indices[k]].mat;
++						m = jp[VKQ_VM_J (v, k)].mat;
 +						for (r = 0; r < 3; r++)
-+							acc[r] += w * (m[r * 4 + 0] * mv->xyz[0] + m[r * 4 + 1] * mv->xyz[1] + m[r * 4 + 2] * mv->xyz[2] + m[r * 4 + 3]);
++							acc[r] += m[r * 4 + 0] * jx + m[r * 4 + 1] * jy + m[r * 4 + 2] * jz + m[r * 4 + 3] * w;
 +					}
 +					px[(size_t)p * nv + v] = acc[0];
 +					if (p == 0)
@@ -379,10 +396,10 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
 +			memset (jflash, 0, nj);
 +			memset (jused, 0, nj);
 +			for (v = 0; v < nv; v++)
-+				for (k = 0; k < NUM_JOINT_INFLUENCES; k++)
-+					if (poutvertexes[v].joint_weights[k])
++				for (k = 0; k < vkq_vm_ninf; k++)
++					if (VKQ_VM_W (v, k))
 +					{
-+						const int ji = poutvertexes[v].joint_indices[k];
++						const int ji = VKQ_VM_J (v, k);
 +						jused[ji] = 1;
 +						if (!flash[v])
 +							jflash[ji] = 2; // contaminated by real geometry
@@ -394,7 +411,7 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
 +				int collapsed = 0;
 +				for (p = 0; p < np; p++)
 +				{
-+					jointpose_t *jp = inverted_joints + (size_t)p * nj;
++					jointpose_t *jp = skinning_joints + (size_t)p * nj;
 +					if (!parked[p])
 +						continue;
 +					for (k = 0; k < nj; k++)
@@ -425,13 +442,20 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
 +			Mem_Free (flash);
 +			Mem_Free (idle3);
 +			Mem_Free (px);
++#undef VKQ_VM_V8
++#undef VKQ_VM_V4
++#undef VKQ_VM_W
++#undef VKQ_VM_J
++#undef VKQ_VM_PX
++#undef VKQ_VM_PY
++#undef VKQ_VM_PZ
 +		}
 +#endif
 +
  		// Upload to GPU that surface/mesh m:
  		GLMesh_UploadBuffers (
  			mod, surf, poutindexes, (byte *)poutvertexes, NULL, skinning_joints, m == 0 ? skeleton_indexes : NULL, m == 0 ? num_skeleton_indexes : 0);
-@@ -5670,6 +6072,11 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
+@@ -5670,6 +6096,11 @@ static qboolean Mod_LoadMD5MeshModelData (qmodel_t *mod, const void *buffer, siz
  	mod->ymins[2] = mod->mins[2];
  	mod->ymaxs[2] = mod->maxs[2];
  

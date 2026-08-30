@@ -165,9 +165,9 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 +			else if (!strcmp (key, "weaponnum"))
 +				s->weaponnum = atoi (com_token);
 +			else if (!strcmp (key, "icon"))
-+				s->icon = Draw_TryCachePic (com_token, TEXPREF_ALPHA | TEXPREF_PAD | TEXPREF_NOPICMIP);
++				s->icon = Draw_TryCachePic (com_token, TEXPREF_ALPHA | TEXPREF_PAD | TEXPREF_NOPICMIP, PICFLAG_AUTO);
 +			else if (!strcmp (key, "icon_sel"))
-+				s->icon_sel = Draw_TryCachePic (com_token, TEXPREF_ALPHA | TEXPREF_PAD | TEXPREF_NOPICMIP);
++				s->icon_sel = Draw_TryCachePic (com_token, TEXPREF_ALPHA | TEXPREF_PAD | TEXPREF_NOPICMIP, PICFLAG_AUTO);
 +			else if (!strcmp (key, "ammoicon"))
 +				s->ammostat = SCR_WW_AmmoStat (com_token);
 +		}
