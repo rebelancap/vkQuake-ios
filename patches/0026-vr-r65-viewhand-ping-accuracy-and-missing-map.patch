@@ -1,6 +1,194 @@
+diff --git a/Quake/cl_main.c b/Quake/cl_main.c
+--- a/Quake/cl_main.c
++++ b/Quake/cl_main.c
+@@ -1091,6 +1091,69 @@ void CL_AccumulateCmd (void)
+ CL_SendCmd
+ =================
+ */
++#ifdef VKQ_VISIONOS
++/*
++==================
++VKQ_VR_AutoPause / the release below -- vkquake-ios overlay 0026 (VR R6.5 item 2b)
++
++THE CROWN-EXIT PAUSE MUST NOT BECOME A TRAP.
++
++R6.4 made a system dismissal (Digital Crown) pause the game, so a player yanked
++out of VR is not being shot at by a world they cannot see. the user's .13 round found
++the other half missing: "game stuck on paused with no way to unpause — i'd have to
++start or load a new game." On a headset there is no P key, and this port binds no
++pad button to pause, so the pause was permanent.
++
++Two things make this safe rather than just convenient:
++
++1. WE ONLY PAUSE WHAT WE PAUSED. `pause` is a TOGGLE. If the player had already
++   paused the game themselves before pressing the crown, the old unconditional
++   `pause` command silently UNPAUSED it — and would then have left this flag armed
++   over a running game, so their first step would have paused it. So the pause is
++   issued only when the game is actually running, and the flag is set only when we
++   were the one who paused it.
++
++2. ANY ATTEMPT TO PLAY RELEASES IT. The release lives in CL_SendCmd, after every
++   input device has added to the usercmd, so touch, an MFi pad, the Sense pair in
++   flat mode and a real keyboard all count without this code knowing they exist.
++   Menu navigation does not count (key_dest must be key_game), which is what lets
++   the paused screen persist while he reads it.
++==================
++*/
++/*
++ * 0 = not ours, 1 = pause ISSUED and awaiting the server's confirmation,
++ * 2 = confirmed paused and watching for the player to try to play.
++ *
++ * The middle state is load-bearing. `pause` goes through Cbuf to the server and
++ * `cl.paused` only flips when svc_setpause comes back, so for a few frames after
++ * we issue it the client still reads "not paused". A two-state flag would have
++ * read that as "the player resumed by some other route", disarmed itself, and left
++ * exactly the trap this exists to remove — with the symptom appearing only
++ * sometimes, depending on how the round trip fell across a frame.
++ */
++int vkq_vr_autopaused = 0;
++
++// client.h declares in_strafe/in_speed/in_mlook/in_klook but not these two;
++// cl_input.c is where all of them actually live.
++extern kbutton_t in_attack, in_jump;
++
++void VKQ_VR_AutoPause (void)
++{
++	if (cls.state != ca_connected || cls.signon != SIGNONS)
++		return; // nothing to pause; pausing the menu would be meaningless
++	if (cl.paused)
++	{
++		// Already paused by the player. Leave it alone and do NOT arm the release,
++		// or their own pause would be lifted by their next step.
++		Con_DPrintf ("vr: game was already paused; leaving it and not arming auto-resume\n");
++		return;
++	}
++	Cbuf_AddText ("pause\n");
++	vkq_vr_autopaused = 1;
++	Con_DPrintf ("vr: auto-paused on exit; any movement or fire will resume\n");
++}
++#endif
++
+ void CL_SendCmd (void)
+ {
+ 	usercmd_t cmd;
+@@ -1121,6 +1184,31 @@ void CL_SendCmd (void)
+ 	}
+ #endif
+ 
++#ifdef VKQ_VISIONOS
++	// R6.5 item 2b — release the crown-exit pause on the first attempt to play.
++	// Placed after every device has contributed to `cmd` and after the VR move-dir
++	// rotation, so "did the player try to move" is asked of the finished command.
++	if (vkq_vr_autopaused == 1)
++	{
++		// Waiting for svc_setpause to come back. Do nothing else until it does.
++		if (cl.paused)
++			vkq_vr_autopaused = 2;
++	}
++	else if (vkq_vr_autopaused == 2)
++	{
++		if (!cl.paused)
++		{
++			vkq_vr_autopaused = 0; // resumed by some other route — stop watching
++		}
++		else if (key_dest == key_game && (cmd.forwardmove != 0.0f || cmd.sidemove != 0.0f || cmd.upmove != 0.0f || (in_attack.state & 3) || (in_jump.state & 3)))
++		{
++			vkq_vr_autopaused = 0;
++			Cbuf_AddText ("pause\n");
++			Con_Printf ("resumed\n");
++		}
++	}
++#endif
++
+ 	CL_FinishMove (&cmd);
+ 
+ 	if (cls.signon == SIGNONS)
+diff --git a/Quake/cl_parse.c b/Quake/cl_parse.c
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -1088,6 +1088,78 @@ static void CL_ParseServerInfo (void)
+ 	// copy the naked name of the map file to the cl structure -- O.S
+ 	COM_StripExtension (COM_SkipPath (model_precache[1]), cl.mapname, sizeof (cl.mapname));
+ 
++	/*
++	 * vkquake-ios overlay 0026 (VR R6.5 item 4) — JOINING A SERVER RUNNING A MAP YOU
++	 * DO NOT HAVE MUST NOT BE A CRASH.
++	 *
++	 * the user joined an internet server and got `Host_Error: Model
++	 * MAPS/BLITZKRIEG2.BSP Not found` — a custom map he does not have. Host_Error is
++	 * a hostile way to say that: it takes a debug break, dumps a symbolicated stack
++	 * trace into the console, and longjmps out leaving key_dest == key_game with
++	 * cl.worldmodel NULL, which forces the full-screen console up. On a headset that
++	 * is a wall of backtrace with no route back to the menu.
++	 *
++	 * THIS ENGINE CANNOT DOWNLOAD THE MAP, and that is a fact rather than a setting:
++	 * vkQuake carries no client download code at all. The three QSS download
++	 * stufftexts (cl_serverextension_download, cl_downloadbegin,
++	 * cl_downloadfinished) are registered to a deliberate no-op handler,
++	 * svcdp_downloaddata has a protocol constant but NO case in the parser (a server
++	 * that sent one would hit "Illegible server message"), and the client's pext
++	 * advertisement offers only CSQC, REPLACEMENTDELTAS and PREDINFO — never
++	 * chunked downloads. No server of any lineage can push us this file.
++	 *
++	 * So the only honest behaviour is to fail early, cleanly, and legibly. The check
++	 * runs here because this is the one point where every precache name is known and
++	 * NOTHING has been loaded yet: the collection loop above only called
++	 * Mod_TouchModel (pure bookkeeping, no I/O), and cl.mapname was just set.
++	 *
++	 * COM_FileExists is the same search-path test the server side already uses
++	 * before changing level ("check for client having map before anything else",
++	 * host_cmd.c) and it opens nothing. Sweeping the whole list rather than just the
++	 * world model also catches a missing custom progs model, which is the other half
++	 * of this failure in the wild — and naming the first missing file is what makes
++	 * the message actionable.
++	 */
++	for (i = 1; i < nummodels; i++)
++	{
++		if (model_precache[i][0] == '*') // inline bmodels live inside the world
++			continue;
++		if (!COM_FileExists (model_precache[i], NULL))
++		{
++			extern qboolean	     m_return_onerror;
++			extern enum m_state_e m_return_state;
++			extern char			 m_return_reason[32];
++			const char			*missing = COM_SkipPath (model_precache[i]);
++			const qboolean		 ismap = !q_strncasecmp (model_precache[i], "maps/", 5);
++
++			Con_Printf ("\nThis server is running %s \"%s\", which you do not have.\n", ismap ? "a map" : "a model", missing);
++			Con_Printf ("vkQuake cannot download game content from servers; you need the file installed.\n\n");
++
++			// m_return_reason is 32 bytes and is drawn at y=148 on the join screens,
++			// which is exactly where "No Response" already appears — so this failure
++			// reads like the connect failures players already understand. It is also
++			// the ONLY message surface reachable from here: SCR_CenterPrint is wiped
++			// by the disconnect below, and SCR_ModalMessage blocks (the visionOS
++			// soft-lock patch 0022 exists for).
++			q_snprintf (m_return_reason, sizeof (m_return_reason), "Missing %.23s", missing);
++
++			// m_return_onerror is already false — Datagram_Connect clears it on the
++			// SUCCESS path, and by now the handshake has long succeeded. So restore
++			// the menu directly instead of relying on it. m_return_state holds the
++			// join screen when the player came from the menu; when they used the
++			// console it can be m_none, and key_menu with m_none is a dead screen.
++			key_dest = key_menu;
++			m_state = (m_return_state == m_slist || m_return_state == m_lanconfig) ? m_return_state : m_main;
++			m_return_onerror = false;
++			IN_Deactivate (true);
++
++			// Host_EndGame, not Host_Error: same clean CL_Disconnect and unwind,
++			// without the debug break and the stack trace. This is not a defect in
++			// our client and must not look like one.
++			Host_EndGame ("Server is running a map you do not have\n");
++		}
++	}
++
+ 	for (i = 1; i < nummodels; i++)
+ 	{
+ 		cl.model_precache[i] = Mod_ForName (model_precache[i], false);
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -7148,6 +7148,10 @@
+@@ -7299,6 +7299,10 @@ void VKQ_VR_ApplyHeadAim (void)
  // Which hand aims. `vkqvr_aimhand` is 1 for right-handed (the default).
  static int vkq_vr_aim_hand (void) { return vkqvr_aimhand.value < 0.5f ? 0 : 1; }
  static int vkq_vr_off_hand (void) { return vkq_vr_aim_hand () ^ 1; }
@@ -11,7 +199,7 @@
  
  // --- shell side: publish one hand --------------------------------------------
  // xform12 is the hand's player-frame pose as right[3], up[3], back[3], pos[3]
-@@ -8164,6 +8168,7 @@
+@@ -8315,6 +8319,7 @@ qboolean VKQ_VR_PlaceViewmodel (entity_t *view)
  	const vkq_vr_gun_t *g;
  	vec3_t				org, fwd, right, up;
  	float				ang[3];
@@ -19,7 +207,7 @@
  	if (!vkq_vr_active)
  		return false;
  	// overlay 0020 fix 5: no toggle any more. Hands tracked -> weapon in the
-@@ -8176,15 +8181,28 @@
+@@ -8327,15 +8332,28 @@ qboolean VKQ_VR_PlaceViewmodel (entity_t *view)
  	// V_CalcRefdef's own placement, which is the belly-button bug — so the only
  	// two outcomes here are "in the hand" and "head-attached", never "wherever
  	// the 2D code would have put it".
@@ -50,7 +238,7 @@
  	return true;
  }
  
-@@ -8688,6 +8706,82 @@
+@@ -8839,6 +8857,82 @@ static float  vkq_vr_hol_scale[2];
  static int	  vkq_vr_hol_live[2];
  
  static qboolean vkq_vr_immersive (void) { return vkqvr_style.value >= 0.5f; }
@@ -133,7 +321,7 @@
  // The server-side fire hook (sv_phys.c) has to know whether Immersive is on:
  // per-hand refire clocks belong to dual wield and nothing else.
  int VKQ_VR_ImmersiveActive (void) { return (vkq_vr_active && vkq_vr_have && vkq_vr_immersive ()) ? 1 : 0; }
-@@ -9197,7 +9291,11 @@
+@@ -9348,7 +9442,11 @@ reads as "stowed" at a glance and nothing sticks into the player's leg.
  */
  int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  {
@@ -146,7 +334,7 @@
  	int		  n = 0, z;
  	vkq_vr_hol_live[0] = vkq_vr_hol_live[1] = 0;
  	if (!vkq_vr_active || !vkq_vr_have || !vkq_vr_immersive () || max <= 0)
-@@ -9223,6 +9321,7 @@
+@@ -9374,6 +9472,7 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  				e->colormap = vid.colormap;
  				vkq_vr_angles_from_basis (fwd, right, up, ang);
  				VKQ_VR_MountWeapon (e, vkq_vr_gun_entry_for (vkq_vr_held_item[off]), vkq_vr_held_item[off], org, fwd, right, up, ang);
@@ -154,7 +342,7 @@
  				n++;
  			}
  		}
-@@ -9354,11 +9453,39 @@
+@@ -9505,9 +9604,37 @@ void VKQ_VR_HolsterGeomString (char *out, int len)
  // aim hand always has the server's weapon in it exactly as in R3.
  int VKQ_VR_HideViewent (void)
  {
@@ -169,8 +357,8 @@
 +	if (hide)
 +		vkq_vr_vm_record (vkq_vr_view_hand (), "", 0, 0); // nothing is drawn there
 +	return hide;
- }
- 
++}
++
 +/*
 +==================
 +VKQ_VR_ViewmodelDebugString -- R6.5 item 1's instrument
@@ -190,244 +378,13 @@
 +		cl.stats[STAT_ACTIVEWEAPON], vkq_vr_vm_model[0][0] ? vkq_vr_vm_model[0] : "-", vkq_vr_vm_frame[0], srcname[vkq_vr_vm_src[0] % 3],
 +		vkq_vr_vm_model[1][0] ? vkq_vr_vm_model[1] : "-", vkq_vr_vm_frame[1], srcname[vkq_vr_vm_src[1] % 3]);
 +	return out;
-+}
-+
- int VKQ_VR_ZoneCount (void) { return VKQ_VR_ZONES; }
- 
- static int vkq_vr_zone_impulse (int z)
---- a/Quake/cl_main.c
-+++ b/Quake/cl_main.c
-@@ -1079,7 +1079,70 @@
- =================
- CL_SendCmd
- =================
-+*/
-+#ifdef VKQ_VISIONOS
-+/*
-+==================
-+VKQ_VR_AutoPause / the release below -- vkquake-ios overlay 0026 (VR R6.5 item 2b)
-+
-+THE CROWN-EXIT PAUSE MUST NOT BECOME A TRAP.
-+
-+R6.4 made a system dismissal (Digital Crown) pause the game, so a player yanked
-+out of VR is not being shot at by a world they cannot see. the user's .13 round found
-+the other half missing: "game stuck on paused with no way to unpause — i'd have to
-+start or load a new game." On a headset there is no P key, and this port binds no
-+pad button to pause, so the pause was permanent.
-+
-+Two things make this safe rather than just convenient:
-+
-+1. WE ONLY PAUSE WHAT WE PAUSED. `pause` is a TOGGLE. If the player had already
-+   paused the game themselves before pressing the crown, the old unconditional
-+   `pause` command silently UNPAUSED it — and would then have left this flag armed
-+   over a running game, so their first step would have paused it. So the pause is
-+   issued only when the game is actually running, and the flag is set only when we
-+   were the one who paused it.
-+
-+2. ANY ATTEMPT TO PLAY RELEASES IT. The release lives in CL_SendCmd, after every
-+   input device has added to the usercmd, so touch, an MFi pad, the Sense pair in
-+   flat mode and a real keyboard all count without this code knowing they exist.
-+   Menu navigation does not count (key_dest must be key_game), which is what lets
-+   the paused screen persist while he reads it.
-+==================
- */
-+/*
-+ * 0 = not ours, 1 = pause ISSUED and awaiting the server's confirmation,
-+ * 2 = confirmed paused and watching for the player to try to play.
-+ *
-+ * The middle state is load-bearing. `pause` goes through Cbuf to the server and
-+ * `cl.paused` only flips when svc_setpause comes back, so for a few frames after
-+ * we issue it the client still reads "not paused". A two-state flag would have
-+ * read that as "the player resumed by some other route", disarmed itself, and left
-+ * exactly the trap this exists to remove — with the symptom appearing only
-+ * sometimes, depending on how the round trip fell across a frame.
-+ */
-+int vkq_vr_autopaused = 0;
-+
-+// client.h declares in_strafe/in_speed/in_mlook/in_klook but not these two;
-+// cl_input.c is where all of them actually live.
-+extern kbutton_t in_attack, in_jump;
-+
-+void VKQ_VR_AutoPause (void)
-+{
-+	if (cls.state != ca_connected || cls.signon != SIGNONS)
-+		return; // nothing to pause; pausing the menu would be meaningless
-+	if (cl.paused)
-+	{
-+		// Already paused by the player. Leave it alone and do NOT arm the release,
-+		// or their own pause would be lifted by their next step.
-+		Con_DPrintf ("vr: game was already paused; leaving it and not arming auto-resume\n");
-+		return;
-+	}
-+	Cbuf_AddText ("pause\n");
-+	vkq_vr_autopaused = 1;
-+	Con_DPrintf ("vr: auto-paused on exit; any movement or fire will resume\n");
-+}
-+#endif
-+
- void CL_SendCmd (void)
- {
- 	usercmd_t cmd;
-@@ -1110,6 +1173,31 @@
- 	}
- #endif
- 
-+#ifdef VKQ_VISIONOS
-+	// R6.5 item 2b — release the crown-exit pause on the first attempt to play.
-+	// Placed after every device has contributed to `cmd` and after the VR move-dir
-+	// rotation, so "did the player try to move" is asked of the finished command.
-+	if (vkq_vr_autopaused == 1)
-+	{
-+		// Waiting for svc_setpause to come back. Do nothing else until it does.
-+		if (cl.paused)
-+			vkq_vr_autopaused = 2;
-+	}
-+	else if (vkq_vr_autopaused == 2)
-+	{
-+		if (!cl.paused)
-+		{
-+			vkq_vr_autopaused = 0; // resumed by some other route — stop watching
-+		}
-+		else if (key_dest == key_game && (cmd.forwardmove != 0.0f || cmd.sidemove != 0.0f || cmd.upmove != 0.0f || (in_attack.state & 3) || (in_jump.state & 3)))
-+		{
-+			vkq_vr_autopaused = 0;
-+			Cbuf_AddText ("pause\n");
-+			Con_Printf ("resumed\n");
-+		}
-+	}
-+#endif
-+
- 	CL_FinishMove (&cmd);
- 
- 	if (cls.signon == SIGNONS)
---- a/Quake/cl_parse.c
-+++ b/Quake/cl_parse.c
-@@ -1023,7 +1023,79 @@
- 
- 	// copy the naked name of the map file to the cl structure -- O.S
- 	COM_StripExtension (COM_SkipPath (model_precache[1]), cl.mapname, sizeof (cl.mapname));
-+
-+	/*
-+	 * vkquake-ios overlay 0026 (VR R6.5 item 4) — JOINING A SERVER RUNNING A MAP YOU
-+	 * DO NOT HAVE MUST NOT BE A CRASH.
-+	 *
-+	 * the user joined an internet server and got `Host_Error: Model
-+	 * MAPS/BLITZKRIEG2.BSP Not found` — a custom map he does not have. Host_Error is
-+	 * a hostile way to say that: it takes a debug break, dumps a symbolicated stack
-+	 * trace into the console, and longjmps out leaving key_dest == key_game with
-+	 * cl.worldmodel NULL, which forces the full-screen console up. On a headset that
-+	 * is a wall of backtrace with no route back to the menu.
-+	 *
-+	 * THIS ENGINE CANNOT DOWNLOAD THE MAP, and that is a fact rather than a setting:
-+	 * vkQuake carries no client download code at all. The three QSS download
-+	 * stufftexts (cl_serverextension_download, cl_downloadbegin,
-+	 * cl_downloadfinished) are registered to a deliberate no-op handler,
-+	 * svcdp_downloaddata has a protocol constant but NO case in the parser (a server
-+	 * that sent one would hit "Illegible server message"), and the client's pext
-+	 * advertisement offers only CSQC, REPLACEMENTDELTAS and PREDINFO — never
-+	 * chunked downloads. No server of any lineage can push us this file.
-+	 *
-+	 * So the only honest behaviour is to fail early, cleanly, and legibly. The check
-+	 * runs here because this is the one point where every precache name is known and
-+	 * NOTHING has been loaded yet: the collection loop above only called
-+	 * Mod_TouchModel (pure bookkeeping, no I/O), and cl.mapname was just set.
-+	 *
-+	 * COM_FileExists is the same search-path test the server side already uses
-+	 * before changing level ("check for client having map before anything else",
-+	 * host_cmd.c) and it opens nothing. Sweeping the whole list rather than just the
-+	 * world model also catches a missing custom progs model, which is the other half
-+	 * of this failure in the wild — and naming the first missing file is what makes
-+	 * the message actionable.
-+	 */
-+	for (i = 1; i < nummodels; i++)
-+	{
-+		if (model_precache[i][0] == '*') // inline bmodels live inside the world
-+			continue;
-+		if (!COM_FileExists (model_precache[i], NULL))
-+		{
-+			extern qboolean	     m_return_onerror;
-+			extern enum m_state_e m_return_state;
-+			extern char			 m_return_reason[32];
-+			const char			*missing = COM_SkipPath (model_precache[i]);
-+			const qboolean		 ismap = !q_strncasecmp (model_precache[i], "maps/", 5);
- 
-+			Con_Printf ("\nThis server is running %s \"%s\", which you do not have.\n", ismap ? "a map" : "a model", missing);
-+			Con_Printf ("vkQuake cannot download game content from servers; you need the file installed.\n\n");
-+
-+			// m_return_reason is 32 bytes and is drawn at y=148 on the join screens,
-+			// which is exactly where "No Response" already appears — so this failure
-+			// reads like the connect failures players already understand. It is also
-+			// the ONLY message surface reachable from here: SCR_CenterPrint is wiped
-+			// by the disconnect below, and SCR_ModalMessage blocks (the visionOS
-+			// soft-lock patch 0022 exists for).
-+			q_snprintf (m_return_reason, sizeof (m_return_reason), "Missing %.23s", missing);
-+
-+			// m_return_onerror is already false — Datagram_Connect clears it on the
-+			// SUCCESS path, and by now the handshake has long succeeded. So restore
-+			// the menu directly instead of relying on it. m_return_state holds the
-+			// join screen when the player came from the menu; when they used the
-+			// console it can be m_none, and key_menu with m_none is a dead screen.
-+			key_dest = key_menu;
-+			m_state = (m_return_state == m_slist || m_return_state == m_lanconfig) ? m_return_state : m_main;
-+			m_return_onerror = false;
-+			IN_Deactivate (true);
-+
-+			// Host_EndGame, not Host_Error: same clean CL_Disconnect and unwind,
-+			// without the debug break and the stack trace. This is not a defect in
-+			// our client and must not look like one.
-+			Host_EndGame ("Server is running a map you do not have\n");
-+		}
-+	}
-+
- 	for (i = 1; i < nummodels; i++)
- 	{
- 		cl.model_precache[i] = Mod_ForName (model_precache[i], false);
---- a/Quake/net_main.c
-+++ b/Quake/net_main.c
-@@ -325,7 +325,12 @@
- 	slistActiveTime = slistStartTime = Sys_DoubleTime ();
- 
- 	SchedulePollProcedure (&slistSendProcedure, 0.0);
--	SchedulePollProcedure (&slistPollProcedure, 0.1);
-+	// R6.5: 0.1 -> 0.005 here too, and this one is the load-bearing half. The
-+	// broadcast goes out at +0.000 and the FIRST reply wins the hostcache slot, so
-+	// with the first read scheduled at +0.100 every local server measured exactly
-+	// 100 ms no matter what the re-schedule in Slist_Poll said. Fixing only the
-+	// re-schedule left the numbers unchanged, which the simulator caught.
-+	SchedulePollProcedure (&slistPollProcedure, 0.005);
- 
- 	hostCacheCount = 0;
  }
-@@ -460,7 +465,25 @@
  
- 	if ((Sys_DoubleTime () - slistActiveTime) < 1.5)
- 	{
--		SchedulePollProcedure (&slistPollProcedure, 0.1);
-+		/*
-+		 * vkquake-ios R6.5 — 0.1 -> 0.005, and this is the whole ping-accuracy fix.
-+		 *
-+		 * Replies are only READ inside this callback, so a reply that arrived 2 ms
-+		 * after the query still was not seen until the next 100 ms tick. Every RTT
-+		 * therefore came out as a multiple of the poll interval, which is exactly
-+		 * what the user saw: "most of it is just 100 or 200 with not a lot of
-+		 * variation".
-+		 *
-+		 * Polling fast does NOT mean querying fast: the send half is rate-limited to
-+		 * its original 4-per-100ms inside _Datagram_SearchForHosts, so servers and
-+		 * masters see the same traffic they always did. Only the reading got quicker.
-+		 *
-+		 * The floor is now how often NET_Poll itself is called — once per host frame,
-+		 * i.e. ~11 ms on a 90 Hz headset — rather than 100 ms. True packet-arrival
-+		 * timestamps would need select()/SO_TIMESTAMP and a restructured driver; this
-+		 * is the accuracy available without inventing one.
-+		 */
-+		SchedulePollProcedure (&slistPollProcedure, 0.005);
- 		return;
- 	}
- 
+ int VKQ_VR_ZoneCount (void) { return VKQ_VR_ZONES; }
+diff --git a/Quake/net_dgrm.c b/Quake/net_dgrm.c
 --- a/Quake/net_dgrm.c
 +++ b/Quake/net_dgrm.c
-@@ -2034,18 +2034,34 @@
+@@ -2034,18 +2034,34 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
  
  	if (!xmit)
  	{
@@ -472,3 +429,47 @@
  			}
  		}
  	}
+diff --git a/Quake/net_main.c b/Quake/net_main.c
+--- a/Quake/net_main.c
++++ b/Quake/net_main.c
+@@ -325,7 +325,12 @@ void NET_Slist_f (void)
+ 	slistActiveTime = slistStartTime = Sys_DoubleTime ();
+ 
+ 	SchedulePollProcedure (&slistSendProcedure, 0.0);
+-	SchedulePollProcedure (&slistPollProcedure, 0.1);
++	// R6.5: 0.1 -> 0.005 here too, and this one is the load-bearing half. The
++	// broadcast goes out at +0.000 and the FIRST reply wins the hostcache slot, so
++	// with the first read scheduled at +0.100 every local server measured exactly
++	// 100 ms no matter what the re-schedule in Slist_Poll said. Fixing only the
++	// re-schedule left the numbers unchanged, which the simulator caught.
++	SchedulePollProcedure (&slistPollProcedure, 0.005);
+ 
+ 	hostCacheCount = 0;
+ }
+@@ -460,7 +465,25 @@ static void Slist_Poll (void *unused)
+ 
+ 	if ((Sys_DoubleTime () - slistActiveTime) < 1.5)
+ 	{
+-		SchedulePollProcedure (&slistPollProcedure, 0.1);
++		/*
++		 * vkquake-ios R6.5 — 0.1 -> 0.005, and this is the whole ping-accuracy fix.
++		 *
++		 * Replies are only READ inside this callback, so a reply that arrived 2 ms
++		 * after the query still was not seen until the next 100 ms tick. Every RTT
++		 * therefore came out as a multiple of the poll interval, which is exactly
++		 * what the user saw: "most of it is just 100 or 200 with not a lot of
++		 * variation".
++		 *
++		 * Polling fast does NOT mean querying fast: the send half is rate-limited to
++		 * its original 4-per-100ms inside _Datagram_SearchForHosts, so servers and
++		 * masters see the same traffic they always did. Only the reading got quicker.
++		 *
++		 * The floor is now how often NET_Poll itself is called — once per host frame,
++		 * i.e. ~11 ms on a 90 Hz headset — rather than 100 ms. True packet-arrival
++		 * timestamps would need select()/SO_TIMESTAMP and a restructured driver; this
++		 * is the accuracy available without inventing one.
++		 */
++		SchedulePollProcedure (&slistPollProcedure, 0.005);
+ 		return;
+ 	}
+ 

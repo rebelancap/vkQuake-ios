@@ -1,6 +1,7 @@
+diff --git a/Quake/menu.c b/Quake/menu.c
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -86,8 +86,15 @@
+@@ -92,8 +92,15 @@ enum m_state_e m_return_state;
  qboolean	   m_return_onerror;
  char		   m_return_reason[32];
  
@@ -16,7 +17,7 @@
  #define IPXConfig	 (m_net_cursor == 0)
  #define TCPIPConfig	 (m_net_cursor == 1)
  
-@@ -1025,6 +1032,14 @@
+@@ -1161,6 +1168,14 @@ static void M_Save_Key (int k)
  
  int m_multiplayer_cursor;
  #define MULTIPLAYER_ITEMS 3
@@ -31,7 +32,7 @@
  
  static void M_Menu_MultiPlayer_f (void)
  {
-@@ -1036,18 +1051,33 @@
+@@ -1172,18 +1187,33 @@ static void M_Menu_MultiPlayer_f (void)
  
  static void M_MultiPlayer_Draw (cb_context_t *cbx)
  {
@@ -42,9 +43,9 @@
  	p = Draw_CachePic ("gfx/p_multi.lmp");
  	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
 -	M_DrawTransPic (cbx, 72, 32, Draw_CachePic ("gfx/mp_menu.lmp"));
- 
--	f = (int)(realtime * 10) % 6;
 -
+-	f = (int)(realtime * 10) % 6;
+ 
 -	M_Mouse_UpdateListCursor (&m_multiplayer_cursor, 70, 320, 32, 20, MULTIPLAYER_ITEMS, 0);
 -	M_DrawTransPic (cbx, 54, 32 + m_multiplayer_cursor * 20, Draw_CachePic (va ("gfx/menudot%i.lmp", f + 1)));
 +#ifdef VKQ_IOS
@@ -71,7 +72,7 @@
  
  	if (ipxAvailable || ipv4Available || ipv6Available)
  		return;
-@@ -1066,14 +1096,14 @@
+@@ -1202,14 +1232,14 @@ static void M_MultiPlayer_Key (int key)
  
  	case K_DOWNARROW:
  		S_LocalSound ("misc/menu1.wav");
@@ -88,13 +89,13 @@
  		break;
  
  	case K_MOUSE1:
-@@ -1081,8 +1111,32 @@
+@@ -1217,6 +1247,30 @@ static void M_MultiPlayer_Key (int key)
  	case K_KP_ENTER:
  	case K_ABUTTON:
  		m_entersound = true;
 +#ifdef VKQ_IOS
- 		switch (m_multiplayer_cursor)
- 		{
++		switch (m_multiplayer_cursor)
++		{
 +		case 0: // Join a Public Game -> native internet server browser (dpmaster)
 +			if (ipxAvailable || ipv4Available || ipv6Available)
 +				M_Menu_Search_f (SLIST_INTERNET);
@@ -116,12 +117,10 @@
 +			break;
 +		}
 +#else
-+		switch (m_multiplayer_cursor)
-+		{
+ 		switch (m_multiplayer_cursor)
+ 		{
  		case 0:
- 			if (ipxAvailable || ipv4Available || ipv6Available)
- 				M_Menu_Net_f ();
-@@ -1097,6 +1151,7 @@
+@@ -1233,6 +1287,7 @@ static void M_MultiPlayer_Key (int key)
  			M_Menu_Setup_f ();
  			break;
  		}

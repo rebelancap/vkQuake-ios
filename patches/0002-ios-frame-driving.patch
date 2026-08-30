@@ -1,6 +1,7 @@
+diff --git a/Quake/main_sdl.c b/Quake/main_sdl.c
 --- a/Quake/main_sdl.c
 +++ b/Quake/main_sdl.c
-@@ -75,6 +75,24 @@
+@@ -75,6 +75,24 @@ static void Sys_InitSDL (void)
  
  static quakeparms_t parms;
  
@@ -25,7 +26,7 @@
  int main (int argc, char *argv[])
  {
  	double time, oldtime, newtime;
-@@ -87,6 +105,34 @@
+@@ -87,6 +105,34 @@ int main (int argc, char *argv[])
  
  	parms.errstate = 0;
  
@@ -60,7 +61,7 @@
  	COM_InitArgv (parms.argc, parms.argv);
  
  	isDedicated = (COM_CheckParm ("-dedicated") != 0);
-@@ -114,6 +160,15 @@
+@@ -114,6 +160,15 @@ int main (int argc, char *argv[])
  	Sys_Printf ("Host_Init\n");
  	Host_Init ();
  

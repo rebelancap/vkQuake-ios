@@ -1,10 +1,100 @@
+diff --git a/Quake/gl_model.c b/Quake/gl_model.c
+--- a/Quake/gl_model.c
++++ b/Quake/gl_model.c
+@@ -4118,8 +4118,10 @@ same weapon, and an arbitrary mod's viewmodel all go through this identically.
+ typedef struct
+ {
+ 	int	   valid;		// 1 = mins/maxs/grip usable
+-	int	   nflash;		// parked-flash vertices found
+-	int	   nposes;		// poses in which they were parked (and collapsed)
++	int	   nflash;		// muzzle-flash vertices found (identified in the IDLE pose)
++	int	   nposes;		// poses in which they are collapsed (R5: all of them)
++	int	   nhidden;		// of those, how many had it PARKED behind the origin
++	float  firemax;		// furthest forward a firing pose threw the flash, model x
+ 	vec3_t mins, maxs;	// idle-pose bounds, flash excluded
+ 	vec3_t grip;		// (rear x, rear-slab y, rear-slab z)
+ } vkq_vm_result_t;
+@@ -4205,12 +4207,33 @@ static void VKQ_VM_Analyze (int nverts, int nposes, const float *px, const float
+ 	}
+ 	out->nflash = ncand;
+ 
+-	// Which poses have it parked: entirely behind the origin AND behind every
+-	// retained vertex the model ever shows. Both, so a weapon whose own body
+-	// reaches behind the origin (the shotgun's does) still gets a correct
+-	// answer.
++	// overlay 0022 (VR R5, the user 2026-08-10) — EVERY POSE, not just the parked
++	// ones.
++	//
++	// R4 collapsed the flash only where the rule said it was hidden, on the
++	// reasoning that "the muzzle flash still comes out of the barrel" was the
++	// half worth keeping. On device it is not: firing the nailgun and the rocket
++	// launcher put two large orange flames DOWN BESIDE THE PLAYER'S BODY, well
++	// away from the weapon (the user's screenshot, 1.0.7.7). The reason is that
++	// these models' firing poses do not move the flash to the muzzle at all —
++	// they move it forward relative to the model, and the model is a 0.40-0.45
++	// scale weapon anchored by its GRIP, so "forward of the model origin" lands
++	// between the fist and the shoulder rather than at the barrel. Baked
++	// 1996 flash geometry has no defensible position once the weapon leaves the
++	// camera.
++	//
++	// the user's standing verdict — "these are unnecessary regardless, we don't
++	// need it at all" — so the identification set (which still comes only from
++	// the IDLE-pose rule above, unchanged and still exact against the MD5 joint
++	// names) is now applied unconditionally. The real muzzle-flash dlight and the
++	// real, barrel-true projectile entities provide the firing feedback; they
++	// always did, and they are the ones that are actually at the muzzle.
++	//
++	// `parked` keeps its name and its meaning for the log: it still records which
++	// poses HID the flash, so the notes can say where each model animated it to.
+ 	if (ncand)
+ 	{
++		float fwdmax = -1e30f;
+ 		for (p = 0; p < nposes; p++)
+ 			for (i = 0; i < nverts; i++)
+ 				if (!flash[i] && px[p * nverts + i] < lim)
+@@ -4224,11 +4247,13 @@ static void VKQ_VM_Analyze (int nverts, int nposes, const float *px, const float
+ 				if (flash[i] && px[p * nverts + i] > fmax)
+ 					fmax = px[p * nverts + i];
+ 			if (fmax < lim)
+-			{
+-				parked[p] = 1;
+-				out->nposes++;
+-			}
++				out->nhidden++;
++			else if (fmax > fwdmax)
++				fwdmax = fmax; // how far forward a firing pose threw it
++			parked[p] = 1;	   // collapse in EVERY pose
++			out->nposes++;
+ 		}
++		out->firemax = (fwdmax > -1e29f) ? fwdmax : 0.0f;
+ 	}
+ 
+ 	// Bounds and grip axis from the idle pose, flash excluded.
+@@ -4292,10 +4317,15 @@ static void VKQ_VM_Publish (aliashdr_t *h, const vkq_vm_result_t *r, const char
+ 	VectorCopy (r->mins, h->vr_min);
+ 	VectorCopy (r->maxs, h->vr_max);
+ 	VectorCopy (r->grip, h->vr_grip);
++	// Con_DPrintf: `developer 1` turns the whole eight-model audit into console
++	// lines the simulator harness can assert on, without spamming a player's
++	// console on every map load.
+ 	if (r->valid)
+ 		Con_DPrintf (
+-			"VR viewmodel %s: bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f) grip (%.1f %.1f %.1f) flash %d verts in %d poses\n", name, r->mins[0], r->mins[1],
+-			r->mins[2], r->maxs[0], r->maxs[1], r->maxs[2], r->grip[0], r->grip[1], r->grip[2], r->nflash, r->nposes);
++			"VR viewmodel %s: bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f) grip (%.1f %.1f %.1f) flash %d verts culled in %d/%d poses (%d parked, firing poses "
++			"reach x=%.1f)\n",
++			name, r->mins[0], r->mins[1], r->mins[2], r->maxs[0], r->maxs[1], r->maxs[2], r->grip[0], r->grip[1], r->grip[2], r->nflash, r->nposes, r->nposes,
++			r->nhidden, r->firemax);
+ }
+ #endif // VKQ_VISIONOS
+ 
+diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
-@@ -1017,7 +1017,60 @@
- 
+@@ -1308,6 +1308,59 @@ void SCR_EndLoadingPlaque (void)
  const char *scr_notifystring;
  qboolean	scr_drawdialog;
-+
+ 
 +#ifdef VKQ_IOS
 +// vkquake-ios overlay 0022 (VR R5 item 1) — the modal soft-lock.
 +//
@@ -22,7 +112,7 @@
 +// the ENGINE's own 2D composite, because that composite is what the 2D window
 +// shows AND what the VR/3D panel samples. One draw, three surfaces, no UIKit.
 +static int vkq_modal_answer_row (void) { return (int)(200 * 0.35f); }
- 
++
 +int vkq_ios_modal_active = 0; // read by the Sense UI pump (gl_vidsdl.c)
 +// How many frames were actually drawn AS THE DIALOG while the last modal was
 +// up. This is the assertion for the sticky-flag fix, and it needs to be a
@@ -61,7 +151,7 @@
  static void SCR_DrawNotifyString (cb_context_t *cbx)
  {
  	const char *start;
-@@ -1048,6 +1101,12 @@
+@@ -1338,6 +1391,12 @@ static void SCR_DrawNotifyString (cb_context_t *cbx)
  			break;
  		start++; // skip the \n
  	} while (1);
@@ -74,7 +164,7 @@
  }
  
  /*
-@@ -1069,9 +1128,30 @@
+@@ -1359,9 +1418,30 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  	scr_notifystring = text;
  
  	// draw a fresh screen
@@ -95,17 +185,17 @@
 +	// Leaving the flag set for the duration means EVERY frame drawn while the
 +	// modal is up is the dialog — the 2D window, the 3D panel and the VR panel
 +	// all show the question and its YES/NO for as long as it is being asked.
- 	scr_drawdialog = true;
- 	SCR_UpdateScreen (false);
-+#else
 +	scr_drawdialog = true;
 +	SCR_UpdateScreen (false);
++#else
+ 	scr_drawdialog = true;
+ 	SCR_UpdateScreen (false);
  	scr_drawdialog = false;
 +#endif
  
  	S_ClearBuffer (); // so dma doesn't loop current sound
  
-@@ -1084,7 +1164,15 @@
+@@ -1374,7 +1454,15 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  	// deadlocks touch input. Show touch Yes/No buttons and pump the run loop.
  	{
  		extern void VKQ_iOS_ModalBegin (const char *t);
@@ -121,7 +211,7 @@
  	}
  #endif
  	do
-@@ -1094,7 +1182,34 @@
+@@ -1384,7 +1472,34 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  #ifdef VKQ_IOS
  		{
  			extern void VKQ_iOS_ModalPump (void);
@@ -156,7 +246,7 @@
  		}
  #else
  		Sys_Sleep (16);
-@@ -1107,6 +1222,8 @@
+@@ -1397,6 +1512,8 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  #ifdef VKQ_IOS
  	{
  		extern void VKQ_iOS_ModalEnd (void);
@@ -165,7 +255,7 @@
  		VKQ_iOS_ModalEnd ();
  	}
  #endif
-@@ -1115,10 +1232,21 @@
+@@ -1405,10 +1522,21 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  
  	// johnfitz -- timeout
  	if (time2 > time1)
@@ -188,9 +278,10 @@
  }
  
  //=============================================================================
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -6003,6 +6003,19 @@
+@@ -6154,6 +6154,19 @@ cvar_t vkqvr_gripback = {"vkqvr_gripback", "4.15", CVAR_NONE}; // fist forward o
  cvar_t vkqvr_gripup = {"vkqvr_gripup", "0.75", CVAR_NONE};	   // fist above the rear-quarter axis
  cvar_t vkqvr_guntrim = {"vkqvr_guntrim", "1", CVAR_NONE};	   // apply the four residual trims
  cvar_t vkqvr_crosshair = {"vkqvr_crosshair", "1", CVAR_NONE};  // R4 part B: the reticle at the hit point
@@ -210,11 +301,10 @@
  // R4 part E — strict weapon-flick gating. See the comment at the cycle site.
  cvar_t vkqvr_flick_y = {"vkqvr_flick_y", "0.85", CVAR_NONE};
  cvar_t vkqvr_flick_x = {"vkqvr_flick_x", "0.25", CVAR_NONE};
-@@ -6072,6 +6085,42 @@
- // A grip release inside a zone SELECTS; a grip held inside a zone for this long
+@@ -6224,6 +6237,42 @@ cvar_t vkqvr_grip_off = {"vkqvr_grip_off", "0.35", CVAR_NONE};
  // ASSIGNS instead (and suppresses the select). One threshold, no dead band.
  cvar_t vkqvr_grip_hold = {"vkqvr_grip_hold", "1.0", CVAR_NONE}; // seconds in-zone: reassign
-+
+ 
 +// ---------------------------------------------------------------------------
 +// overlay 0022 (R5 item 3) — holsters: where the model is DRAWN vs where the
 +// hand has to REACH.
@@ -250,10 +340,11 @@
 +// slider that moved only the drawn model would re-create the bug it exists to
 +// work around.
 +cvar_t vkqvr_holfwd = {"vkqvr_holfwd", "0", CVAR_NONE};
- 
++
  void VKQ_VR_RegisterCvars (void)
  {
-@@ -6092,6 +6141,11 @@
+ 	Cvar_RegisterVariable (&vkqvr_aimhand);
+@@ -6243,6 +6292,11 @@ void VKQ_VR_RegisterCvars (void)
  	Cvar_RegisterVariable (&vkqvr_gripup);
  	Cvar_RegisterVariable (&vkqvr_guntrim);
  	Cvar_RegisterVariable (&vkqvr_crosshair);
@@ -265,7 +356,7 @@
  	Cvar_RegisterVariable (&vkqvr_flick_y);
  	Cvar_RegisterVariable (&vkqvr_flick_x);
  	Cvar_RegisterVariable (&vkqvr_flick_off);
-@@ -6368,6 +6422,12 @@
+@@ -6519,6 +6573,12 @@ void VKQ_VR_EngineRelease (unsigned long long id)
  //
  // Base = Rx(-90).Rz(90).Rz(-bodyYaw).T(-vieworg - heightOfs). Pitch and roll are
  // deliberately absent: the head owns them.
@@ -278,7 +369,7 @@
  void VKQ_VR_ComposeView (int eye, float out[16])
  {
  	float base[16], rot[16], trans[16];
-@@ -6388,6 +6448,25 @@
+@@ -6539,6 +6599,25 @@ void VKQ_VR_ComposeView (int eye, float out[16])
  
  	memcpy (out, vkq_vr_cur[eye & 1].eye_from_player, 16 * sizeof (float));
  	MatrixMultiply (out, base); // out = eyeFromPlayer * base
@@ -304,13 +395,10 @@
  }
  
  void VKQ_VR_GetProjection (int eye, float out[16]) { memcpy (out, vkq_vr_cur[eye & 1].projection, 16 * sizeof (float)); }
-@@ -6784,7 +6863,118 @@
- 	{
- 		if (b->state & 1)
- 			b->state = 4; // up, and "released this frame"
-+	}
-+}
-+
+@@ -6938,6 +7017,117 @@ static void vkq_vr_hold (kbutton_t *b, qboolean down)
+ 	}
+ }
+ 
 +/*
 +==================
 +VKQ_VR_UIInputPump -- overlay 0022 (VR R5 item 1)
@@ -375,7 +463,7 @@
 +		prev[0] = btn[0];
 +		prev[1] = btn[1];
 +		return;
- 	}
++	}
 +	pressed = (btn[0] & ~prev[0]) | (btn[1] & ~prev[1]);
 +	prev[0] = btn[0];
 +	prev[1] = btn[1];
@@ -420,10 +508,12 @@
 +		Key_Event (k, false);
 +		repeat = now + (repeat > 0.0 ? 0.15 : 0.4); // one step, then autorepeat
 +	}
- }
- 
++}
++
  /*
-@@ -6854,45 +7044,15 @@
+ ==================
+ VKQ_VR_ApplyHandInput -- overlay 0019
+@@ -7005,45 +7195,15 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  	vkq_vr_stick_now (off, ls);
  	vkq_vr_stick_now (aim, rs);
  
@@ -476,7 +566,7 @@
  		// Nothing below this line may reach gameplay while a menu is up.
  		vkq_vr_hold (&in_attack, false);
  		vkq_vr_hold (&in_jump, false);
-@@ -6902,6 +7062,12 @@
+@@ -7053,6 +7213,12 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		return;
  	}
  
@@ -489,7 +579,7 @@
  	// --- gameplay -------------------------------------------------------------
  	// Convenience: right trigger fires, left trigger and A jump. Fixed layout,
  	// deliberately not bindable (both donors' ledgers paid for that).
-@@ -7011,18 +7177,28 @@
+@@ -7162,18 +7328,28 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  	// since the last cycle. Measured with synthetic stick injection in
  	// sim-verify-vr.sh: the R3 gate fires on 8 of 16 sampled diagonals, this one
  	// on 0, and both fire on all 4 clean vertical flicks.
@@ -520,7 +610,7 @@
  			cycleArmed = 1;
  	}
  
-@@ -7359,10 +7535,40 @@
+@@ -7510,10 +7686,40 @@ makes the derivation mean anything: change the scale and the weapon still sits
  in the same fist.
  ==================
  */
@@ -563,7 +653,7 @@
  	VectorCopy (hand, org);
  	if (vkq_vr_grip_anchor (view->model, s, anchor, NULL, NULL))
  	{
-@@ -7377,7 +7583,7 @@
+@@ -7528,7 +7734,7 @@ void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, con
  		VectorMA (org, s * -6.0f, fwd, org);
  		VectorMA (org, s * 7.0f, up, org);
  	}
@@ -572,23 +662,21 @@
  	{
  		VectorMA (org, g->trimf, fwd, org);
  		VectorMA (org, g->trimr, right, org);
-@@ -7390,9 +7596,14 @@
+@@ -7541,7 +7747,12 @@ void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, con
  	view->angles[PITCH] = -ang[PITCH];
  	view->angles[YAW] = ang[YAW];
  	view->angles[ROLL] = ang[ROLL];
 -	view->netstate.scale = (byte)ENTSCALE_ENCODE (s);
 +	view->netstate.scale = enc; // the value the offsets above were derived from
- }
- 
++}
++
 +void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, const vec3_t hand, const vec3_t fwd, const vec3_t right, const vec3_t up, const float ang[3])
 +{
 +	VKQ_VR_MountWeaponEx (view, g, itembit, hand, fwd, right, up, ang, 1.0f, true);
-+}
-+
+ }
+ 
  /*
- ==================
- VKQ_VR_LaserSight -- overlay 0019 (charter A8)
-@@ -7494,7 +7705,24 @@
+@@ -7645,7 +7856,24 @@ qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit)
  	if (cl.intermission || cls.demoplayback || cl.stats[STAT_HEALTH] <= 0 || !cl.worldmodel)
  		return false;
  	if (!VKQ_VR_MuzzleWorld (start, fwd))
@@ -614,7 +702,7 @@
  	VectorMA (start, VKQ_VR_LASER_RANGE, fwd, far_pt);
  	frac = CL_TraceLine (start, far_pt, end, normal, NULL);
  	if (hit)
-@@ -7510,6 +7738,56 @@
+@@ -7661,6 +7889,56 @@ qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit)
  	return true;
  }
  
@@ -671,7 +759,7 @@
  // ---------------------------------------------------------------------------
  // overlay 0020 fix 1 — standing eye height, computed once per frame.
  //
-@@ -7700,6 +7978,13 @@
+@@ -7851,6 +8129,13 @@ static int vkq_vr_holster_item[2]; // by zone: RHIP, LHIP. 0 = empty
  static int vkq_vr_held_item[2];	   // by HAND: 0 = left, 1 = right. 0 = empty hand
  static int vkq_vr_v2_started = 0; // seeded the aim hand from the server yet
  
@@ -685,7 +773,7 @@
  static qboolean vkq_vr_immersive (void) { return vkqvr_style.value >= 0.5f; }
  static int		vkq_vr_held_item_get (int hand) { return (hand >= 0 && hand < 2) ? vkq_vr_held_item[hand] : 0; }
  
-@@ -7891,6 +8176,114 @@
+@@ -8042,6 +8327,114 @@ int VKQ_VR_HudValues (int *health, int *armour, int *ammo0, int *type0, int *amm
  	return 1;
  }
  
@@ -800,7 +888,7 @@
  int VKQ_VR_HeldItem (int hand) { return vkq_vr_held_item_get (hand); }
  int VKQ_VR_HolsterItem (int zone) { return (zone >= 0 && zone < 2) ? vkq_vr_holster_item[zone] : 0; }
  
-@@ -7953,6 +8346,7 @@
+@@ -8104,6 +8497,7 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  {
  	const int aim = vkq_vr_aim_hand (), off = vkq_vr_off_hand ();
  	int		  n = 0, z;
@@ -808,7 +896,7 @@
  	if (!vkq_vr_active || !vkq_vr_have || !vkq_vr_immersive () || max <= 0)
  		return 0;
  	if (cl.intermission || cl.stats[STAT_HEALTH] <= 0)
-@@ -8000,7 +8394,9 @@
+@@ -8151,7 +8545,9 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  		// EXACTLY the transform a hand pose takes (vkq_vr_hand_world): the zone
  		// centre is published in the same player frame the hand positions are,
  		// so the model and the in-zone test cannot disagree about where the
@@ -819,7 +907,7 @@
  		vkq_vr_zone_centre (z, c);
  		vkq_vr_player_to_world_dir (c, wc);
  		vkq_vr_player_origin (org);
-@@ -8014,14 +8410,83 @@
+@@ -8165,16 +8561,85 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  			right[0] = 1.0f, right[1] = 0.0f, right[2] = 0.0f;
  		VectorNormalize (right);
  		CrossProduct (right, fwd, up);
@@ -871,8 +959,8 @@
  		n++;
  	}
  	return n;
-+}
-+
+ }
+ 
 +/*
 +==================
 +VKQ_VR_HolsterGeomString -- overlay 0022 (R5 item 3)
@@ -904,10 +992,12 @@
 +			vkq_vr_hol_zone[z][0], vkq_vr_hol_zone[z][1], vkq_vr_hol_zone[z][2], vkq_vr_hol_org[z][0], vkq_vr_hol_org[z][1], vkq_vr_hol_org[z][2],
 +			vkq_vr_hol_scale[z], vkq_vr_hol_err[z][0], vkq_vr_hol_err[z][1], vkq_vr_hol_err[z][2], VectorLength (vkq_vr_hol_err[z]));
 +	}
- }
- 
++}
++
  // Convenience is untouched by all of this: it never consults held_item, so the
-@@ -8064,6 +8529,15 @@
+ // aim hand always has the server's weapon in it exactly as in R3.
+ int VKQ_VR_HideViewent (void)
+@@ -8215,6 +8680,15 @@ static void vkq_vr_zone_set_impulse (int z, int imp)
  static void vkq_vr_zone_centre (int z, float out[3])
  {
  	const float ws = vkq_vr_worldscale;
@@ -923,7 +1013,7 @@
  	switch (z)
  	{
  	case VKQ_VR_ZONE_RHIP:
-@@ -8082,6 +8556,7 @@
+@@ -8233,6 +8707,7 @@ static void vkq_vr_zone_centre (int z, float out[3])
  		out[0] = vkqvr_chest_x.value * ws, out[1] = vkqvr_chest_y.value * ws, out[2] = vkqvr_chest_z.value * ws;
  		break;
  	}
@@ -931,9 +1021,44 @@
  }
  
  static float vkq_vr_zone_radius (int z)
+diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -496,6 +496,30 @@ void IN_Commands (void)
+ 	const float	   stickthreshold = 0.9;
+ 	const float	   triggerthreshold = joy_deadzone_trigger.value;
+ 
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0022 (VR R5 item 1) — PSVR2 Sense controllers navigate
++	// everything a gamepad can, in every mode.
++	//
++	// This is the exact function ericw's comment below points at ("allow joysticks
++	// to add keys so they can be used to confirm SCR_ModalMessage"): it is called
++	// once per host frame AND once per iteration of the modal pump, which is the
++	// only place in the engine with both properties. Before R5 the Sense pair
++	// reached the engine solely through VKQ_VR_ApplyHandInput, i.e. only from
++	// CL_AccumulateCmd, i.e. only while a VR world frame was running — so the
++	// controllers were dead in 2D, dead in the 3D panel, and dead inside the modal
++	// that blocks CL_AccumulateCmd. That is the general gap behind the soft-lock,
++	// and it is closed here rather than at any of the three symptoms.
++	//
++	// ABOVE the joy_enable / joy_active_controller early-outs on purpose: the
++	// Sense pair is deliberately NOT an SDL gamepad (charter A10's SDL filter), so
++	// gating it on SDL's joystick state would make it depend on hardware it is
++	// defined not to be.
++	{
++		extern void VKQ_VR_UIInputPump (void);
++		VKQ_VR_UIInputPump ();
++	}
++#endif
++
+ 	if (!joy_enable.value)
+ 		return;
+ 
+diff --git a/Quake/r_part.c b/Quake/r_part.c
 --- a/Quake/r_part.c
 +++ b/Quake/r_part.c
-@@ -1062,75 +1062,256 @@
+@@ -1066,75 +1066,256 @@ sit at the texture's white centre, which makes the arms clean solid colour
  rather than soft blobs.
  ===============
  */
@@ -943,6 +1068,7 @@
 -	VectorSubtract (p, r_origin, d);
 -	return VectorLength (d);
 -}
+-
 +/*
 +===============
 +R5 ITEM 4 — WHY THE RETICLE WAS NOT THERE.
@@ -961,7 +1087,7 @@
 +   right arm and the down arm came out counter-clockwise and were discarded by
 +   the rasterizer. What survived was two thin strokes meeting at a gap, which is
 +   not a shape anybody recognises as a crosshair.
- 
++
 +2. IT WAS ~1 PIXEL THICK. The half-thickness was 0.0011 rad, i.e. 0.13 degrees
 +   across — around three pixels at the eye target's angular resolution before
 +   the foveal upscale, on top of arms that were half missing.
@@ -1024,11 +1150,11 @@
 +	const float kArm = debug ? 0.090f : q_max (0.002f, vkqvr_xhairsize.value);
 +	const float kHalf = debug ? 0.020f : q_max (0.0004f, vkqvr_xhairthick.value);
 +	const float kGap = kArm * 0.32f;
- 
++
 +	vkq_vr_xhair_drawn = 0;
 +	vkq_vr_xhair_verts = 0;
 +	vkq_vr_xhair_dbg = debug;
-+
+ 
  	if (!VKQ_VR_AimTrace (start, end, normal, &hit))
  		return;
  
@@ -1130,6 +1256,11 @@
 -		for (i = 0; i < 6; i++)
 +		// along = R(90*seg) . cr ; across = R(90*seg) . cu
 +		for (i = 0; i < 3; i++)
++		{
++			au[i] = ax[seg] * cr[i] + ay[seg] * cu[i];
++			aw[i] = -ay[seg] * cr[i] + ax[seg] * cu[i];
++		}
++		for (i = 0; i < 12; i++)
  		{
 -			float  along = sign * (qx[i] < 0.0f ? lo : hi);
 -			float  across = qy[i] * half;
@@ -1137,11 +1268,6 @@
 -			int	   k;
 -			VectorMA (ctr, horiz ? along : across, vright, p);
 -			VectorMA (p, horiz ? across : along, vup, p);
-+			au[i] = ax[seg] * cr[i] + ay[seg] * cu[i];
-+			aw[i] = -ay[seg] * cr[i] + ax[seg] * cu[i];
-+		}
-+		for (i = 0; i < 12; i++)
-+		{
 +			// 0-5 = one winding, 6-11 = the same two triangles reversed.
 +			const int	j = (i < 6) ? i : (11 - i);
 +			const float along = (qa[j] > 0.5f) ? hi : lo;
@@ -1222,7 +1348,7 @@
  }
  
  void R_DrawVRLaser (cb_context_t *cbx)
-@@ -1144,8 +1325,12 @@
+@@ -1148,8 +1329,12 @@ void R_DrawVRLaser (cb_context_t *cbx)
  		R_PipelineForRenderPass (
  			cbx->render_pass_index, vulkan_globals.particle_pipeline, vulkan_globals.particle_oit_pipeline, vulkan_globals.particle_mboit_moment_pipeline,
  			vulkan_globals.particle_mboit_composite_pipeline));
@@ -1236,125 +1362,3 @@
  	R_DrawVRCrosshairGeometry (cbx);
  	R_EndDebugUtilsLabel (cbx);
  }
---- a/Quake/gl_model.c
-+++ b/Quake/gl_model.c
-@@ -3880,8 +3880,10 @@
- typedef struct
- {
- 	int	   valid;		// 1 = mins/maxs/grip usable
--	int	   nflash;		// parked-flash vertices found
--	int	   nposes;		// poses in which they were parked (and collapsed)
-+	int	   nflash;		// muzzle-flash vertices found (identified in the IDLE pose)
-+	int	   nposes;		// poses in which they are collapsed (R5: all of them)
-+	int	   nhidden;		// of those, how many had it PARKED behind the origin
-+	float  firemax;		// furthest forward a firing pose threw the flash, model x
- 	vec3_t mins, maxs;	// idle-pose bounds, flash excluded
- 	vec3_t grip;		// (rear x, rear-slab y, rear-slab z)
- } vkq_vm_result_t;
-@@ -3967,12 +3969,33 @@
- 	}
- 	out->nflash = ncand;
- 
--	// Which poses have it parked: entirely behind the origin AND behind every
--	// retained vertex the model ever shows. Both, so a weapon whose own body
--	// reaches behind the origin (the shotgun's does) still gets a correct
--	// answer.
-+	// overlay 0022 (VR R5, the user 2026-08-10) — EVERY POSE, not just the parked
-+	// ones.
-+	//
-+	// R4 collapsed the flash only where the rule said it was hidden, on the
-+	// reasoning that "the muzzle flash still comes out of the barrel" was the
-+	// half worth keeping. On device it is not: firing the nailgun and the rocket
-+	// launcher put two large orange flames DOWN BESIDE THE PLAYER'S BODY, well
-+	// away from the weapon (the user's screenshot, 1.0.7.7). The reason is that
-+	// these models' firing poses do not move the flash to the muzzle at all —
-+	// they move it forward relative to the model, and the model is a 0.40-0.45
-+	// scale weapon anchored by its GRIP, so "forward of the model origin" lands
-+	// between the fist and the shoulder rather than at the barrel. Baked
-+	// 1996 flash geometry has no defensible position once the weapon leaves the
-+	// camera.
-+	//
-+	// the user's standing verdict — "these are unnecessary regardless, we don't
-+	// need it at all" — so the identification set (which still comes only from
-+	// the IDLE-pose rule above, unchanged and still exact against the MD5 joint
-+	// names) is now applied unconditionally. The real muzzle-flash dlight and the
-+	// real, barrel-true projectile entities provide the firing feedback; they
-+	// always did, and they are the ones that are actually at the muzzle.
-+	//
-+	// `parked` keeps its name and its meaning for the log: it still records which
-+	// poses HID the flash, so the notes can say where each model animated it to.
- 	if (ncand)
- 	{
-+		float fwdmax = -1e30f;
- 		for (p = 0; p < nposes; p++)
- 			for (i = 0; i < nverts; i++)
- 				if (!flash[i] && px[p * nverts + i] < lim)
-@@ -3986,11 +4009,13 @@
- 				if (flash[i] && px[p * nverts + i] > fmax)
- 					fmax = px[p * nverts + i];
- 			if (fmax < lim)
--			{
--				parked[p] = 1;
--				out->nposes++;
--			}
-+				out->nhidden++;
-+			else if (fmax > fwdmax)
-+				fwdmax = fmax; // how far forward a firing pose threw it
-+			parked[p] = 1;	   // collapse in EVERY pose
-+			out->nposes++;
- 		}
-+		out->firemax = (fwdmax > -1e29f) ? fwdmax : 0.0f;
- 	}
- 
- 	// Bounds and grip axis from the idle pose, flash excluded.
-@@ -4054,10 +4079,15 @@
- 	VectorCopy (r->mins, h->vr_min);
- 	VectorCopy (r->maxs, h->vr_max);
- 	VectorCopy (r->grip, h->vr_grip);
-+	// Con_DPrintf: `developer 1` turns the whole eight-model audit into console
-+	// lines the simulator harness can assert on, without spamming a player's
-+	// console on every map load.
- 	if (r->valid)
- 		Con_DPrintf (
--			"VR viewmodel %s: bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f) grip (%.1f %.1f %.1f) flash %d verts in %d poses\n", name, r->mins[0], r->mins[1],
--			r->mins[2], r->maxs[0], r->maxs[1], r->maxs[2], r->grip[0], r->grip[1], r->grip[2], r->nflash, r->nposes);
-+			"VR viewmodel %s: bounds (%.1f %.1f %.1f)-(%.1f %.1f %.1f) grip (%.1f %.1f %.1f) flash %d verts culled in %d/%d poses (%d parked, firing poses "
-+			"reach x=%.1f)\n",
-+			name, r->mins[0], r->mins[1], r->mins[2], r->maxs[0], r->maxs[1], r->maxs[2], r->grip[0], r->grip[1], r->grip[2], r->nflash, r->nposes, r->nposes,
-+			r->nhidden, r->firemax);
- }
- #endif // VKQ_VISIONOS
- 
---- a/Quake/in_sdl.c
-+++ b/Quake/in_sdl.c
-@@ -464,6 +464,30 @@
- 	int			   i;
- 	const float	   stickthreshold = 0.9;
- 	const float	   triggerthreshold = joy_deadzone_trigger.value;
-+
-+#ifdef VKQ_VISIONOS
-+	// vkquake-ios overlay 0022 (VR R5 item 1) — PSVR2 Sense controllers navigate
-+	// everything a gamepad can, in every mode.
-+	//
-+	// This is the exact function ericw's comment below points at ("allow joysticks
-+	// to add keys so they can be used to confirm SCR_ModalMessage"): it is called
-+	// once per host frame AND once per iteration of the modal pump, which is the
-+	// only place in the engine with both properties. Before R5 the Sense pair
-+	// reached the engine solely through VKQ_VR_ApplyHandInput, i.e. only from
-+	// CL_AccumulateCmd, i.e. only while a VR world frame was running — so the
-+	// controllers were dead in 2D, dead in the 3D panel, and dead inside the modal
-+	// that blocks CL_AccumulateCmd. That is the general gap behind the soft-lock,
-+	// and it is closed here rather than at any of the three symptoms.
-+	//
-+	// ABOVE the joy_enable / joy_active_controller early-outs on purpose: the
-+	// Sense pair is deliberately NOT an SDL gamepad (charter A10's SDL filter), so
-+	// gating it on SDL's joystick state would make it depend on hardware it is
-+	// defined not to be.
-+	{
-+		extern void VKQ_VR_UIInputPump (void);
-+		VKQ_VR_UIInputPump ();
-+	}
-+#endif
- 
- 	if (!joy_enable.value)
- 		return;

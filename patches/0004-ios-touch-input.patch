@@ -1,6 +1,7 @@
+diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -161,15 +161,59 @@
+@@ -192,15 +192,59 @@ void IN_HideCursor ()
  #endif
  }
  
@@ -60,7 +61,7 @@
  	if (safemode || COM_CheckParm ("-nomouse"))
  	{
  		no_mouse = true;
-@@ -513,6 +551,25 @@
+@@ -544,6 +588,25 @@ void IN_JoyMove (usercmd_t *cmd)
  		lookRaw = temp;
  	}
  
@@ -86,12 +87,10 @@
  	moveDeadzone = IN_ApplyDeadzone (moveRaw, joy_deadzone_move.value, joy_outer_threshold_move.value);
  	lookDeadzone = IN_ApplyDeadzone (lookRaw, joy_deadzone_look.value, joy_outer_threshold_look.value);
  
-@@ -593,8 +650,75 @@
- 		else
- 			cmd->forwardmove_accumulator -= m_forward.value * dmy;
+@@ -626,6 +689,73 @@ void IN_MouseMove (usercmd_t *cmd)
  	}
-+}
-+
+ }
+ 
 +#ifdef VKQ_IOS
 +// --- vkquake-ios overlay 0004: touch input bridge --------------------------
 +// The native UIKit overlay (ios/shell/ios_touch.m) calls these C setters; the
@@ -108,7 +107,7 @@
 +{
 +	vkq_move_fwd = fwd;
 +	vkq_move_side = side;
- }
++}
 +void VKQ_TouchLook (float dyaw_deg, float dpitch_deg)
 +{
 +	vkq_look_yaw += dyaw_deg;
@@ -135,7 +134,7 @@
 +	extern SDL_Gamepad *joy_active_controller; // in_sdl3.c: the engine's open gamepad
 +	return joy_active_controller != NULL ? 1 : 0;
 +}
- 
++
 +static void IN_TouchMove (usercmd_t *cmd)
 +{
 +	float run = (vkq_touch_run && cl_movespeedkey.value > 0) ? cl_movespeedkey.value : 1.0f;
@@ -162,7 +161,7 @@
  void IN_Move (usercmd_t *cmd)
  {
  	// We only want the latest joystick movements
-@@ -604,6 +711,9 @@
+@@ -635,6 +765,9 @@ void IN_Move (usercmd_t *cmd)
  
  	IN_JoyMove (cmd);
  	IN_MouseMove (cmd);
@@ -172,7 +171,7 @@
  }
  
  void IN_ClearStates (void) {}
-@@ -616,17 +726,13 @@
+@@ -647,17 +780,13 @@ void IN_UpdateInputMode (void)
  		textmode = want_textmode;
  		if (in_debugkeys.value)
  			Con_Printf ("SDL_EnableUNICODE %d time: %g\n", textmode, Sys_DoubleTime ());

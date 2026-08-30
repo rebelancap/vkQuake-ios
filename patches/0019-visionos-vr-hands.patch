@@ -1,6 +1,176 @@
+diff --git a/Quake/cl_main.c b/Quake/cl_main.c
+--- a/Quake/cl_main.c
++++ b/Quake/cl_main.c
+@@ -765,6 +765,19 @@ void CL_RelinkEntities (void)
+ 			AngleVectors (ent->angles, fv, rv, uv);
+ 
+ 			VectorMA (dl->origin, 18, fv, dl->origin);
++#ifdef VKQ_VISIONOS
++			// vkquake-ios overlay 0019 (VR, charter A8): your own muzzle flash
++			// belongs at the gun you can see, not at the body it is fired from.
++			// Only the local player's — every other entity still flashes at its
++			// own origin, which is where its gun is.
++			if (ent == &cl.entities[cl.viewentity])
++			{
++				extern qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
++				vec3_t			mo, mf;
++				if (VKQ_VR_MuzzleWorld (mo, mf))
++					VectorCopy (mo, dl->origin);
++			}
++#endif
+ 			dl->radius = 200 + (COM_Rand () & 31);
+ 			dl->minlight = 32;
+ 			dl->die = cl.time + 0.1;
+@@ -1060,7 +1073,12 @@ void CL_AccumulateCmd (void)
+ 	// then sees ordinary view angles and stock progs, mods and multiplayer all
+ 	// aim where the player is looking. No-op outside VR.
+ 	{
++		// overlay 0019 (R2): the Sense pair contributes to the SAME pending
++		// command a gamepad does, in the same place, so both can be connected and
++		// both work — the gamepad path above is not touched at all.
++		extern void VKQ_VR_ApplyHandInput (usercmd_t * cmd);
+ 		extern void VKQ_VR_ApplyHeadAim (void);
++		VKQ_VR_ApplyHandInput (&cl.pendingcmd);
+ 		VKQ_VR_ApplyHeadAim ();
+ 	}
+ #endif
+@@ -1091,6 +1109,18 @@ void CL_SendCmd (void)
+ 	cmd.servertime = cl.time;
+ 	cmd.seconds = cmd.servertime - cl.pendingcmd.servertime;
+ 
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0019 (VR, charter A6): with hand aim the server moves
++	// the player along the GUN's yaw, which is not where the player is looking.
++	// Rotating the finished wish vector here — after every device has added to
++	// it, before it is written — is the whole of "walk where I face". No-op
++	// outside VR and in aim-hand-relative mode.
++	{
++		extern void VKQ_VR_ApplyMoveDir (usercmd_t * c);
++		VKQ_VR_ApplyMoveDir (&cmd);
++	}
++#endif
++
+ 	CL_FinishMove (&cmd);
+ 
+ 	if (cls.signon == SIGNONS)
+@@ -1380,6 +1410,17 @@ void CL_Init (void)
+ 	CL_InitTEnts ();
+ 
+ 	cmd_function_t *cmd;
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0019: the VR tunables (aim hand, snap turn, grip
++	// calibration, laser, damage flash). Registered here so they exist before
++	// any config runs; NOT archived — VR settings persist through the shell's
++	// crash-safe settings store instead, which is what keeps them out of a 2D
++	// player's config.cfg (charter §7).
++	{
++		extern void VKQ_VR_RegisterCvars (void);
++		VKQ_VR_RegisterCvars ();
++	}
++#endif
+ 
+ 	Cvar_RegisterVariable (&cl_name);
+ 	Cvar_RegisterVariable (&cl_topcolor);
+diff --git a/Quake/cl_tent.c b/Quake/cl_tent.c
+--- a/Quake/cl_tent.c
++++ b/Quake/cl_tent.c
+@@ -368,6 +368,19 @@ void CL_UpdateTEnts (void)
+ 		if (b->entity == cl.viewentity && cl.entities)
+ 		{
+ 			VectorCopy (cl.entities[cl.viewentity].origin, b->start);
++#ifdef VKQ_VISIONOS
++			// vkquake-ios overlay 0019 (VR, charter A8): the thunderbolt has to
++			// leave the barrel you can see. Stock Quake starts it at the player's
++			// waist — a deliberate flat-screen hack to keep it out of the view —
++			// and in VR that reads as lightning erupting from your belly.
++			// QuakeQuest's CL_Beam_CalculatePositions makes the same correction.
++			{
++				extern qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
++				vec3_t			mo, mf;
++				if (VKQ_VR_MuzzleWorld (mo, mf))
++					VectorCopy (mo, b->start);
++			}
++#endif
+ 		}
+ 
+ 		// calculate pitch and yaw
+diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -665,8 +665,20 @@ R_DrawViewModel -- johnfitz -- gutted
+ */
+ void R_DrawViewModel (cb_context_t *cbx)
+ {
++#ifdef VKQ_VISIONOS
++	// overlay 0019 (VR, charter A8): VR forces viewsize 130 to strip the flat HUD
++	// out of the eyes (A9), and viewsize 130 is also stock Quake's "hide the
++	// weapon" switch — so R1 had no viewmodel in VR at all. In VR the two
++	// meanings come apart: the HUD belongs on the panel, the weapon belongs in
++	// your hand.
++	extern int	  vkq_vr_use;
++	const qboolean vkq_vr_world = (vkq_vr_use != 0);
++	if (!r_drawviewmodel.value || !r_drawentities.value || chase_active.value || (scr_viewsize.value >= 130 && !vkq_vr_world))
++		return;
++#else
+ 	if (!r_drawviewmodel.value || !r_drawentities.value || chase_active.value || scr_viewsize.value >= 130)
+ 		return;
++#endif
+ 
+ 	if (cl.items & IT_INVISIBILITY || cl.stats[STAT_HEALTH] <= 0)
+ 		return;
+@@ -683,7 +695,19 @@ void R_DrawViewModel (cb_context_t *cbx)
+ 	R_BeginDebugUtilsLabel (cbx, "View Model");
+ 
+ 	// hack the depth range to prevent view model from poking into walls
++#ifdef VKQ_VISIONOS
++	// overlay 0019 (VR): the depth-range squash is a 2D trick — it keeps a
++	// face-glued gun out of geometry by lying about how far away it is. In VR
++	// the gun is a real object an arm's length away, and that lie is visible
++	// twice over: it breaks stereo depth, and the compositor reprojects on the
++	// depth we hand it (charter A5), so a squashed gun would swim against the
++	// world on every head turn. Full range in VR; unchanged everywhere else.
++	GL_Viewport (
++		cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, vkq_vr_world ? 0.0f : 0.7f,
++		1.0f);
++#else
+ 	GL_Viewport (cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, 0.7f, 1.0f);
++#endif
+ 
+ 	int aliaspolys = 0;
+ 	R_DrawAliasModel (cbx, currententity, &aliaspolys);
+@@ -1545,6 +1569,15 @@ static void R_DrawParticlesTask (void *unused)
+ 	R_SetupContext (cbx);
+ 	Fog_EnableGFog (cbx); // johnfitz
+ 	R_DrawParticles (cbx);
++#ifdef VKQ_VISIONOS
++	// overlay 0019 (VR, charter A8): the laser sight rides the particle pass —
++	// same pipeline, same texture, same transparency ordering, so it is a draw
++	// call rather than a rendering feature.
++	{
++		extern void R_DrawVRLaser (cb_context_t * c);
++		R_DrawVRLaser (cbx);
++	}
++#endif
+ 
+ 	if (R_UseMBOIT ())
+ 	{
+@@ -1553,6 +1586,12 @@ static void R_DrawParticlesTask (void *unused)
+ 		R_SetupContext (composite_cbx);
+ 		Fog_EnableGFog (composite_cbx);
+ 		R_DrawParticles (composite_cbx);
++#ifdef VKQ_VISIONOS
++		{
++			extern void R_DrawVRLaser (cb_context_t * c);
++			R_DrawVRLaser (composite_cbx);
++		}
++#endif
+ 	}
+ #ifdef PSET_SCRIPT
+ 	cb_context_t *fte_blend_cbx = NULL;
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -5932,6 +5932,41 @@
+@@ -6083,6 +6083,41 @@ typedef struct
  	float tan_l, tan_r, tan_u, tan_d;
  } vkq_vr_eye_t;
  
@@ -42,7 +212,7 @@
  static pthread_mutex_t	  vkq_vr_mtx = PTHREAD_MUTEX_INITIALIZER;
  static pthread_cond_t	  vkq_vr_cv = PTHREAD_COND_INITIALIZER;
  static unsigned long long vkq_vr_pub_id = 0;	  // last pose published by the shell
-@@ -5939,10 +5974,76 @@
+@@ -6090,10 +6125,76 @@ static unsigned long long vkq_vr_rendered_id = 0; // last id the engine finished
  static unsigned long long vkq_vr_frame_id = 0;	  // id of the frame being rendered
  static vkq_vr_eye_t		  vkq_vr_pub[2];		  // guarded by vkq_vr_mtx
  static vkq_vr_eye_t		  vkq_vr_cur[2];		  // engine's private copy (render thread)
@@ -119,7 +289,7 @@
  static void vkq_vr_deadline (struct timespec *ts, int ms)
  {
  	struct timespec now;
-@@ -6019,6 +6120,12 @@
+@@ -6170,6 +6271,12 @@ void VKQ_VR_SetActive (int on)
  		vkq_vr_pub_id = vkq_vr_rendered_id = vkq_vr_frame_id = 0;
  		vkq_vr_rendezvous = vkq_vr_timeouts_engine = vkq_vr_timeouts_shell = 0;
  	}
@@ -132,7 +302,7 @@
  	pthread_cond_broadcast (&vkq_vr_cv); // never leave either side blocked on exit
  	pthread_mutex_unlock (&vkq_vr_mtx);
  }
-@@ -6080,6 +6187,12 @@
+@@ -6231,6 +6338,12 @@ unsigned long long VKQ_VR_EngineAcquire (int timeout_ms)
  	if (vkq_vr_have)
  	{
  		memcpy (vkq_vr_cur, vkq_vr_pub, sizeof (vkq_vr_cur));
@@ -145,7 +315,7 @@
  		vkq_vr_frame_id = vkq_vr_pub_id;
  	}
  	pthread_mutex_unlock (&vkq_vr_mtx);
-@@ -6155,9 +6268,657 @@
+@@ -6306,9 +6419,657 @@ void VKQ_VR_ApplyHeadAim (void)
  	while (delta < -180.0f)
  		delta += 360.0f;
  	vkq_vr_body_yaw = anglemod (vkq_vr_body_yaw + delta);
@@ -806,225 +976,85 @@
 +}
 +
  #endif
---- a/Quake/cl_main.c
-+++ b/Quake/cl_main.c
-@@ -757,6 +757,19 @@
- 			AngleVectors (ent->angles, fv, rv, uv);
+diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
+--- a/Quake/in_sdl3.c
++++ b/Quake/in_sdl3.c
+@@ -40,6 +40,44 @@ int	  vkq_menu_click_pending = 0;
+ static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
+ SDL_Gamepad			 *joy_active_controller = NULL;
  
- 			VectorMA (dl->origin, 18, fv, dl->origin);
 +#ifdef VKQ_VISIONOS
-+			// vkquake-ios overlay 0019 (VR, charter A8): your own muzzle flash
-+			// belongs at the gun you can see, not at the body it is fired from.
-+			// Only the local player's — every other entity still flashes at its
-+			// own origin, which is where its gun is.
-+			if (ent == &cl.entities[cl.viewentity])
-+			{
-+				extern qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
-+				vec3_t			mo, mf;
-+				if (VKQ_VR_MuzzleWorld (mo, mf))
-+					VectorCopy (mo, dl->origin);
-+			}
-+#endif
- 			dl->radius = 200 + (COM_Rand () & 31);
- 			dl->minlight = 32;
- 			dl->die = cl.time + 0.1;
-@@ -1049,7 +1062,12 @@
- 	// then sees ordinary view angles and stock progs, mods and multiplayer all
- 	// aim where the player is looking. No-op outside VR.
- 	{
-+		// overlay 0019 (R2): the Sense pair contributes to the SAME pending
-+		// command a gamepad does, in the same place, so both can be connected and
-+		// both work — the gamepad path above is not touched at all.
-+		extern void VKQ_VR_ApplyHandInput (usercmd_t * cmd);
- 		extern void VKQ_VR_ApplyHeadAim (void);
-+		VKQ_VR_ApplyHandInput (&cl.pendingcmd);
- 		VKQ_VR_ApplyHeadAim ();
- 	}
- #endif
-@@ -1079,6 +1097,18 @@
- 	cmd.sequence = cl.movemessages;
- 	cmd.servertime = cl.time;
- 	cmd.seconds = cmd.servertime - cl.pendingcmd.servertime;
++/*
++================
++IN_VKQIgnoreSpatial -- vkquake-ios overlay 0019 (charter A10, trap ledger)
 +
-+#ifdef VKQ_VISIONOS
-+	// vkquake-ios overlay 0019 (VR, charter A6): with hand aim the server moves
-+	// the player along the GUN's yaw, which is not where the player is looking.
-+	// Rotating the finished wish vector here — after every device has added to
-+	// it, before it is written — is the whole of "walk where I face". No-op
-+	// outside VR and in aim-hand-relative mode.
-+	{
-+		extern void VKQ_VR_ApplyMoveDir (usercmd_t * c);
-+		VKQ_VR_ApplyMoveDir (&cmd);
-+	}
-+#endif
- 
- 	CL_FinishMove (&cmd);
- 
-@@ -1346,6 +1376,18 @@
- 
- 	CL_InitInput ();
- 	CL_InitTEnts ();
++visionOS 26 vends each PSVR2 Sense half as its own GCController once the app
++declares `SpatialGamepad`. SDL3's MFi backend adopts ANY GCController with a
++physical input profile (SDL_mfijoystick.m's generic branch), so without this the
++pair arrives as two half-gamepads, SDL opens the FIRST one it sees, and the
++player gets movement from one fist and nothing from the other.
 +
-+#ifdef VKQ_VISIONOS
-+	// vkquake-ios overlay 0019: the VR tunables (aim hand, snap turn, grip
-+	// calibration, laser, damage flash). Registered here so they exist before
-+	// any config runs; NOT archived — VR settings persist through the shell's
-+	// crash-safe settings store instead, which is what keeps them out of a 2D
-+	// player's config.cfg (charter §7).
-+	{
-+		extern void VKQ_VR_RegisterCvars (void);
-+		VKQ_VR_RegisterCvars ();
-+	}
-+#endif
- 
- 	Cvar_RegisterVariable (&cl_name);
- 	Cvar_RegisterVariable (&cl_topcolor);
---- a/Quake/view.c
-+++ b/Quake/view.c
-@@ -479,7 +479,21 @@
- 		r = r * (1 - a2) + cl.cshifts[j].destcolor[0] * a2;
- 		g = g * (1 - a2) + cl.cshifts[j].destcolor[1] * a2;
- 		b = b * (1 - a2) + cl.cshifts[j].destcolor[2] * a2;
-+	}
++The filter asks the native backend — which is looking at the same GCController
++objects and can read `productCategory` — whether THIS SDL device is a spatial
++controller. Matched by SDL's own naming rule (vendorName, falling back to
++productCategory), because SDL exposes no handle back to the GCController and its
++generic MFi VID/PID is shared with every ordinary pad, so the blacklist hint
++cannot separate them.
 +
-+#ifdef VKQ_VISIONOS
-+	// vkquake-ios overlay 0019 (VR, charter A11): the damage/pickup flash is
-+	// feedback, not a face-full of red. A full-strength polyblend across both
-+	// eyes at arm's length is genuinely unpleasant in a way it never is on a
-+	// screen, so VR scales it (default 0.5). The flash still happens — a player
-+	// who cannot tell they are being hit is a worse problem.
-+	{
-+		extern int	 vkq_vr_active;
-+		extern cvar_t vkqvr_flashscale;
-+		if (vkq_vr_active)
-+			a *= CLAMP (0.0f, vkqvr_flashscale.value, 1.0f);
- 	}
-+#endif
- 
- 	v_blend[0] = CLAMP (0.0f, r, 255.0f);
- 	v_blend[1] = CLAMP (0.0f, g, 255.0f);
-@@ -845,6 +859,19 @@
- 	else
- 		oldz = ent->origin[2];
- 
-+#ifdef VKQ_VISIONOS
-+	// vkquake-ios overlay 0019 (VR, charter A8): LAST, so it overrides every
-+	// face-attached placement above (bob, the viewsize fudge, the stair-step
-+	// smoothing) rather than fighting them — in VR the gun is an object in the
-+	// room held in your hand, and none of those corrections apply to it.
-+	// Returns false with no controller tracked, and everything above stands:
-+	// that is exactly R1, so a gamepad player sees no change.
-+	{
-+		extern qboolean VKQ_VR_PlaceViewmodel (entity_t * v);
-+		VKQ_VR_PlaceViewmodel (view);
-+	}
++THE RULE THAT MATTERS (paid for in sm64coopdx 1.1.2.22): this removes NOTHING
++from the working path. Ordinary gamepads are not spatial, the predicate returns
++false for them, and SDL keeps driving them with the player's own binds. If the
++match ever fails, the failure mode is the status quo — SDL adopts a Sense half —
++not a dead gamepad, and the inventory line in the diagnostics file says so.
++================
++*/
++static qboolean IN_VKQIgnoreSpatial (SDL_JoystickID id)
++{
++	extern int	VKQ_Sense_ShouldIgnoreSDLGamepad (const char *name);
++	const char *name = SDL_GetGamepadNameForID (id);
++	if (!name)
++		name = SDL_GetJoystickNameForID (id);
++	if (!name || !VKQ_Sense_ShouldIgnoreSDLGamepad (name))
++		return false;
++	Con_Printf ("VR: leaving spatial controller '%s' to the native backend\n", name);
++	return true;
++}
 +#endif
 +
- 	if (chase_active.value)
- 		Chase_UpdateForDrawing (); // johnfitz
- }
---- a/Quake/gl_rmain.c
-+++ b/Quake/gl_rmain.c
-@@ -646,8 +646,20 @@
- */
- void R_DrawViewModel (cb_context_t *cbx)
+ void IN_StartupJoystick (void)
  {
-+#ifdef VKQ_VISIONOS
-+	// overlay 0019 (VR, charter A8): VR forces viewsize 130 to strip the flat HUD
-+	// out of the eyes (A9), and viewsize 130 is also stock Quake's "hide the
-+	// weapon" switch — so R1 had no viewmodel in VR at all. In VR the two
-+	// meanings come apart: the HUD belongs on the panel, the weapon belongs in
-+	// your hand.
-+	extern int	  vkq_vr_use;
-+	const qboolean vkq_vr_world = (vkq_vr_use != 0);
-+	if (!r_drawviewmodel.value || !r_drawentities.value || chase_active.value || (scr_viewsize.value >= 130 && !vkq_vr_world))
-+		return;
-+#else
- 	if (!r_drawviewmodel.value || !r_drawentities.value || chase_active.value || scr_viewsize.value >= 130)
- 		return;
-+#endif
- 
- 	if (cl.items & IT_INVISIBILITY || cl.stats[STAT_HEALTH] <= 0)
- 		return;
-@@ -664,7 +676,19 @@
- 	R_BeginDebugUtilsLabel (cbx, "View Model");
- 
- 	// hack the depth range to prevent view model from poking into walls
-+#ifdef VKQ_VISIONOS
-+	// overlay 0019 (VR): the depth-range squash is a 2D trick — it keeps a
-+	// face-glued gun out of geometry by lying about how far away it is. In VR
-+	// the gun is a real object an arm's length away, and that lie is visible
-+	// twice over: it breaks stereo depth, and the compositor reprojects on the
-+	// depth we hand it (charter A5), so a squashed gun would swim against the
-+	// world on every head turn. Full range in VR; unchanged everywhere else.
-+	GL_Viewport (
-+		cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, vkq_vr_world ? 0.0f : 0.7f,
-+		1.0f);
-+#else
- 	GL_Viewport (cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, 0.7f, 1.0f);
-+#endif
- 
- 	int			aliaspolys = 0;
- 	aliashdr_t *paliashdr = (aliashdr_t *)Mod_Extradata (currententity->model);
-@@ -1120,6 +1144,15 @@
- 	R_SetupContext (cbx);
- 	Fog_EnableGFog (cbx); // johnfitz
- 	R_DrawParticles (cbx);
-+#ifdef VKQ_VISIONOS
-+	// overlay 0019 (VR, charter A8): the laser sight rides the particle pass —
-+	// same pipeline, same texture, same transparency ordering, so it is a draw
-+	// call rather than a rendering feature.
-+	{
-+		extern void R_DrawVRLaser (cb_context_t * c);
-+		R_DrawVRLaser (cbx);
-+	}
-+#endif
- 
- 	if (R_UseMBOIT ())
- 	{
-@@ -1128,6 +1161,12 @@
- 		R_SetupContext (composite_cbx);
- 		Fog_EnableGFog (composite_cbx);
- 		R_DrawParticles (composite_cbx);
-+#ifdef VKQ_VISIONOS
-+		{
-+			extern void R_DrawVRLaser (cb_context_t * c);
-+			R_DrawVRLaser (composite_cbx);
-+		}
-+#endif
- 	}
- #ifdef PSET_SCRIPT
- 	cb_context_t *fte_blend_cbx = NULL;
---- a/Quake/cl_tent.c
-+++ b/Quake/cl_tent.c
-@@ -368,6 +368,19 @@
- 		if (b->entity == cl.viewentity && cl.entities)
+ 	char			controllerdb[MAX_OSPATH];
+@@ -77,6 +115,10 @@ void IN_StartupJoystick (void)
+ 		for (int i = 0; i < count; i++)
  		{
- 			VectorCopy (cl.entities[cl.viewentity].origin, b->start);
+ 			SDL_JoystickID id = joysticks[i];
 +#ifdef VKQ_VISIONOS
-+			// vkquake-ios overlay 0019 (VR, charter A8): the thunderbolt has to
-+			// leave the barrel you can see. Stock Quake starts it at the player's
-+			// waist — a deliberate flat-screen hack to keep it out of the view —
-+			// and in VR that reads as lightning erupting from your belly.
-+			// QuakeQuest's CL_Beam_CalculatePositions makes the same correction.
-+			{
-+				extern qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
-+				vec3_t			mo, mf;
-+				if (VKQ_VR_MuzzleWorld (mo, mf))
-+					VectorCopy (mo, b->start);
-+			}
++			if (IN_VKQIgnoreSpatial (id))
++				continue;
 +#endif
- 		}
+ 			if (SDL_IsGamepad (id))
+ 			{
+ 				const char *controllername = SDL_GetGamepadNameForID (id);
+@@ -240,6 +282,10 @@ void IN_SendKeyEvents (void)
+ #endif
  
- 		// calculate pitch and yaw
+ 		case SDL_EVENT_GAMEPAD_ADDED:
++#ifdef VKQ_VISIONOS
++			if (IN_VKQIgnoreSpatial (event.gdevice.which))
++				break;
++#endif
+ 			if (joy_active_instaceid == 0)
+ 			{
+ 				joy_active_controller = SDL_OpenGamepad (event.gdevice.which);
+diff --git a/Quake/r_part.c b/Quake/r_part.c
 --- a/Quake/r_part.c
 +++ b/Quake/r_part.c
-@@ -1040,8 +1040,137 @@
+@@ -1044,6 +1044,135 @@ void R_DrawParticles (cb_context_t *cbx)
  	R_EndDebugUtilsLabel (cbx);
  }
  
 +#ifdef VKQ_VISIONOS
- /*
++/*
 +===============
 +R_DrawVRLaser -- vkquake-ios overlay 0019 (VR, charter A8)
 +
@@ -1039,7 +1069,7 @@
 +round dot lifted off the surface it hit. The beam's texcoords all sit at the
 +texture's centre, which is solid white — so the ribbon is a clean constant
 +colour while the dot keeps the texture's soft round falloff.
- ===============
++===============
 +*/
 +static void R_DrawVRLaserGeometry (cb_context_t *cbx)
 +{
@@ -1152,77 +1182,50 @@
 +}
 +#endif // VKQ_VISIONOS
 +
-+/*
-+===============
- R_DrawParticles_ShowTris -- johnfitz
+ /*
  ===============
- */
---- a/Quake/in_sdl3.c
-+++ b/Quake/in_sdl3.c
-@@ -39,6 +39,44 @@
+ R_DrawParticles_ShowTris -- johnfitz
+diff --git a/Quake/view.c b/Quake/view.c
+--- a/Quake/view.c
++++ b/Quake/view.c
+@@ -484,6 +484,20 @@ void V_CalcBlend (void)
+ 		b = b * (1 - a2) + cl.cshifts[j].destcolor[2] * a2;
+ 	}
  
- static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
- SDL_Gamepad			 *joy_active_controller = NULL;
-+
 +#ifdef VKQ_VISIONOS
-+/*
-+================
-+IN_VKQIgnoreSpatial -- vkquake-ios overlay 0019 (charter A10, trap ledger)
-+
-+visionOS 26 vends each PSVR2 Sense half as its own GCController once the app
-+declares `SpatialGamepad`. SDL3's MFi backend adopts ANY GCController with a
-+physical input profile (SDL_mfijoystick.m's generic branch), so without this the
-+pair arrives as two half-gamepads, SDL opens the FIRST one it sees, and the
-+player gets movement from one fist and nothing from the other.
-+
-+The filter asks the native backend — which is looking at the same GCController
-+objects and can read `productCategory` — whether THIS SDL device is a spatial
-+controller. Matched by SDL's own naming rule (vendorName, falling back to
-+productCategory), because SDL exposes no handle back to the GCController and its
-+generic MFi VID/PID is shared with every ordinary pad, so the blacklist hint
-+cannot separate them.
-+
-+THE RULE THAT MATTERS (paid for in sm64coopdx 1.1.2.22): this removes NOTHING
-+from the working path. Ordinary gamepads are not spatial, the predicate returns
-+false for them, and SDL keeps driving them with the player's own binds. If the
-+match ever fails, the failure mode is the status quo — SDL adopts a Sense half —
-+not a dead gamepad, and the inventory line in the diagnostics file says so.
-+================
-+*/
-+static qboolean IN_VKQIgnoreSpatial (SDL_JoystickID id)
-+{
-+	extern int	VKQ_Sense_ShouldIgnoreSDLGamepad (const char *name);
-+	const char *name = SDL_GetGamepadNameForID (id);
-+	if (!name)
-+		name = SDL_GetJoystickNameForID (id);
-+	if (!name || !VKQ_Sense_ShouldIgnoreSDLGamepad (name))
-+		return false;
-+	Con_Printf ("VR: leaving spatial controller '%s' to the native backend\n", name);
-+	return true;
-+}
++	// vkquake-ios overlay 0019 (VR, charter A11): the damage/pickup flash is
++	// feedback, not a face-full of red. A full-strength polyblend across both
++	// eyes at arm's length is genuinely unpleasant in a way it never is on a
++	// screen, so VR scales it (default 0.5). The flash still happens — a player
++	// who cannot tell they are being hit is a worse problem.
++	{
++		extern int	 vkq_vr_active;
++		extern cvar_t vkqvr_flashscale;
++		if (vkq_vr_active)
++			a *= CLAMP (0.0f, vkqvr_flashscale.value, 1.0f);
++	}
 +#endif
++
+ 	v_blend[0] = CLAMP (0.0f, r, 255.0f);
+ 	v_blend[1] = CLAMP (0.0f, g, 255.0f);
+ 	v_blend[2] = CLAMP (0.0f, b, 255.0f);
+@@ -865,6 +879,19 @@ void V_CalcRefdef (void)
+ 	else
+ 		oldz = ent->origin[2];
  
- void IN_StartupJoystick (void)
- {
-@@ -77,6 +115,10 @@
- 		for (int i = 0; i < count; i++)
- 		{
- 			SDL_JoystickID id = joysticks[i];
 +#ifdef VKQ_VISIONOS
-+			if (IN_VKQIgnoreSpatial (id))
-+				continue;
++	// vkquake-ios overlay 0019 (VR, charter A8): LAST, so it overrides every
++	// face-attached placement above (bob, the viewsize fudge, the stair-step
++	// smoothing) rather than fighting them — in VR the gun is an object in the
++	// room held in your hand, and none of those corrections apply to it.
++	// Returns false with no controller tracked, and everything above stands:
++	// that is exactly R1, so a gamepad player sees no change.
++	{
++		extern qboolean VKQ_VR_PlaceViewmodel (entity_t * v);
++		VKQ_VR_PlaceViewmodel (view);
++	}
 +#endif
- 			if (SDL_IsGamepad (id))
- 			{
- 				const char *controllername = SDL_GetGamepadNameForID (id);
-@@ -234,6 +276,10 @@
- #endif
- 
- 		case SDL_EVENT_GAMEPAD_ADDED:
-+#ifdef VKQ_VISIONOS
-+			if (IN_VKQIgnoreSpatial (event.gdevice.which))
-+				break;
-+#endif
- 			if (joy_active_instaceid == 0)
- 			{
- 				joy_active_controller = SDL_OpenGamepad (event.gdevice.which);
++
+ 	if (chase_active.value)
+ 		Chase_UpdateForDrawing (); // johnfitz
+ }

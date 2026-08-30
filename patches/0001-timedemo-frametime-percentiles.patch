@@ -1,6 +1,7 @@
---- a/Quake/cl_demo.c	2026-07-08 23:48:27
-+++ b/Quake/cl_demo.c	2026-07-09 00:07:55
-@@ -89,6 +89,19 @@
+diff --git a/Quake/cl_demo.c b/Quake/cl_demo.c
+--- a/Quake/cl_demo.c
++++ b/Quake/cl_demo.c
+@@ -89,6 +89,19 @@ static void CL_WriteDemoMessage (void)
  	fflush (cls.demofile);
  }
  
@@ -20,7 +21,7 @@
  static int CL_GetDemoMessage (void)
  {
  	int	  r, i;
-@@ -107,6 +120,12 @@
+@@ -107,6 +120,12 @@ static int CL_GetDemoMessage (void)
  			if (host_framecount == cls.td_lastframe)
  				return 0; // already read this frame's message
  			cls.td_lastframe = host_framecount;
@@ -33,7 +34,7 @@
  			// if this is the second frame, grab the real td_starttime
  			// so the bogus time on the first frame doesn't count
  			if (host_framecount == cls.td_startframe + 1)
-@@ -755,6 +774,19 @@
+@@ -762,6 +781,19 @@ static void CL_FinishTimeDemo (void)
  	if (!time)
  		time = 1;
  	Con_Printf ("%i frames %5.1f seconds %5.1f fps\n", frames, time, frames / time);
@@ -53,7 +54,7 @@
  }
  
  /*
-@@ -785,4 +817,7 @@
+@@ -792,4 +824,7 @@ void CL_TimeDemo_f (void)
  	cls.timedemo = true;
  	cls.td_startframe = host_framecount;
  	cls.td_lastframe = -1; // get a new message this frame

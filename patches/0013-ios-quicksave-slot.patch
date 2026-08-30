@@ -9,9 +9,10 @@ menu chrome, which do the same teardown the menu's own load path does, and
 VKQ_iOS_QuickSaveAvailable() so the shell only offers them from the first
 main menu of a live single-player game.
 
+diff --git a/Quake/menu.c b/Quake/menu.c
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -60,6 +60,9 @@
+@@ -64,6 +64,9 @@ static void M_Help_Draw (cb_context_t *cbx);
  static void M_Quit_Draw (cb_context_t *cbx);
  
  static void M_Main_Key (int key);
@@ -21,7 +22,7 @@ main menu of a live single-player game.
  static void M_SinglePlayer_Key (int key);
  static void M_Load_Key (int key);
  static void M_Save_Key (int key);
-@@ -629,6 +632,13 @@
+@@ -683,6 +686,13 @@ void M_Menu_Main_f (void)
  	IN_Deactivate (true);
  	key_dest = key_menu;
  	m_state = m_main;
@@ -35,7 +36,7 @@ main menu of a live single-player game.
  }
  
  static qpic_t *Get_Menu2 ()
-@@ -841,6 +851,15 @@
+@@ -980,6 +990,15 @@ int load_cursor; // 0 < load_cursor < MAX_SAVEGAMES
  #define MAX_SAVEGAMES 20 /* johnfitz -- increased from 12 */
  char m_filenames[MAX_SAVEGAMES][SAVEGAME_COMMENT_LENGTH + 1];
  int	 loadable[MAX_SAVEGAMES];
@@ -51,21 +52,20 @@ main menu of a live single-player game.
  
  static void M_ScanSaves (void)
  {
-@@ -881,9 +900,75 @@
+@@ -1018,7 +1037,71 @@ static void M_ScanSaves (void)
+ 			break;
  		}
  	}
- 
++
 +#ifdef VKQ_IOS
-+	// same dual lookup the numbered slots use (prefpath when multiuser, else gamedir)
++	// same dual lookup the numbered slots use above: com_gamedir first, then the
++	// legacy save dir when there is one (upstream 1.36.0's COM_GetLegacySaveDir).
 +	q_strlcpy (vkq_quick_comment, "--- NO QUICK SAVE ---", sizeof (vkq_quick_comment));
 +	vkq_quick_loadable = false;
-+	for (j = (multiuser ? 0 : 1); j < 2; ++j)
++	for (j = 0; j < (have_legacy_saves ? 2 : 1); ++j)
 +	{
-+		if (j == 0)
-+			q_snprintf (name, sizeof (name), "%squick.sav", save_path);
-+		else
-+			q_snprintf (name, sizeof (name), "%s/quick.sav", com_gamedir);
-+		f = fopen (name, "r");
++		q_snprintf (name, sizeof (name), "%s/quick.sav", j ? legacy_dir : com_gamedir);
++		f = Sys_fopen (name, "r");
 +		if (!f)
 +			continue;
 +		if (fscanf (f, "%i\n", &version) == 1 && fscanf (f, "%79s\n", name) == 1)
@@ -81,10 +81,8 @@ main menu of a live single-player game.
 +			break;
 +	}
 +#endif
++}
 +
- 	SDL_free (save_path);
- }
- 
 +#ifdef VKQ_IOS
 +// Availability for the shell's quick save/load chrome: a LIVE single-player game
 +// AND the first main menu — not a submenu, and never over the HUD.
@@ -121,13 +119,12 @@ main menu of a live single-player game.
 +	key_dest = key_game;
 +	SCR_BeginLoadingPlaque ();
 +	Cbuf_AddText ("load quick\n");
-+}
+ }
 +#endif
-+
+ 
  static void M_Menu_Load_f (void)
  {
- 	M_MenuChanged ();
-@@ -908,6 +993,12 @@
+@@ -1044,6 +1127,12 @@ static void M_Menu_Save_f (void)
  	IN_Deactivate (true);
  	key_dest = key_menu;
  	M_ScanSaves ();
@@ -140,20 +137,20 @@ main menu of a live single-player game.
  }
  
  static void M_Load_Draw (cb_context_t *cbx)
-@@ -918,11 +1009,21 @@
+@@ -1054,11 +1143,21 @@ static void M_Load_Draw (cb_context_t *cbx)
  	p = Draw_CachePic ("gfx/p_load.lmp");
  	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
  
 +#ifdef VKQ_IOS
 +	// quick save on top, drawn bright so it reads as a different kind of slot
 +	M_PrintWhite (cbx, 16, 32, vkq_quick_comment);
- 	for (i = 0; i < MAX_SAVEGAMES; i++)
++	for (i = 0; i < MAX_SAVEGAMES; i++)
 +		M_Print (cbx, 16, 32 + 8 * (i + 1), m_filenames[i]);
 +
 +	// line cursor
 +	M_Mouse_UpdateListCursor (&load_cursor, 16, 320, 32, 8, VKQ_LOAD_ROWS, 0);
 +#else
-+	for (i = 0; i < MAX_SAVEGAMES; i++)
+ 	for (i = 0; i < MAX_SAVEGAMES; i++)
  		M_Print (cbx, 16, 32 + 8 * i, m_filenames[i]);
  
  	// line cursor
@@ -162,7 +159,7 @@ main menu of a live single-player game.
  	Draw_Character (cbx, 8, 32 + load_cursor * 8, 12 + ((int)(realtime * 4) & 1));
  }
  
-@@ -957,8 +1058,13 @@
+@@ -1093,8 +1192,13 @@ static void M_Load_Key (int k)
  	case K_KP_ENTER:
  	case K_ABUTTON:
  		S_LocalSound ("misc/menu2.wav");
@@ -173,11 +170,11 @@ main menu of a live single-player game.
  		if (!loadable[load_cursor])
  			return;
 +#endif
- 		m_state = m_none;
- 		IN_Activate ();
- 		key_dest = key_game;
-@@ -968,23 +1074,40 @@
+ 
+ 		// Draw before leaving the menu so disconnected loads don't expose the console.
  		SCR_BeginLoadingPlaque ();
+@@ -1104,23 +1208,40 @@ static void M_Load_Key (int k)
+ 		key_dest = key_game;
  
  		// issue the load command
 +#ifdef VKQ_IOS
@@ -195,10 +192,10 @@ main menu of a live single-player game.
  		S_LocalSound ("misc/menu1.wav");
  		load_cursor--;
 +#ifdef VKQ_IOS
- 		if (load_cursor < 0)
++		if (load_cursor < 0)
 +			load_cursor = VKQ_LOAD_ROWS - 1;
 +#else
-+		if (load_cursor < 0)
+ 		if (load_cursor < 0)
  			load_cursor = MAX_SAVEGAMES - 1;
 +#endif
  		break;
@@ -217,10 +214,10 @@ main menu of a live single-player game.
  		break;
  	}
  }
-@@ -3654,6 +3777,10 @@
- 	Cmd_AddCommand ("menu_singleplayer", M_Menu_SinglePlayer_f);
+@@ -4846,6 +4967,10 @@ void M_Init (void)
  	Cmd_AddCommand ("menu_load", M_Menu_Load_f);
  	Cmd_AddCommand ("menu_save", M_Menu_Save_f);
+ 	Cmd_AddCommand ("menu_maps", M_Menu_Maps_Cmd_f);
 +#ifdef VKQ_IOS
 +	Cmd_AddCommand ("vkq_quicksave", VKQ_QuickSave_f);
 +	Cmd_AddCommand ("vkq_quickload", VKQ_QuickLoad_f);

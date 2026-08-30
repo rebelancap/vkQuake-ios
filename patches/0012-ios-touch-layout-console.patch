@@ -7,9 +7,10 @@ because injected UIKit touches do not reach the touch path on the simulator,
 so this is the only way to verify the editor without a finger on glass.
 Applies on top of 0004's VKQ_IOS block.
 
+diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -169,6 +169,8 @@
+@@ -200,6 +200,8 @@ void IN_HideCursor ()
  // keyboard and feeds characters back via VKQ_TouchChar / VKQ_TouchKey.
  extern void VKQ_iOS_SetTextActive (int active);
  static void IN_TouchLook_f (void); // defined with the touch bridge below
@@ -18,7 +19,7 @@ Applies on top of 0004's VKQ_IOS block.
  // Shell still uses this to position SDL's view-shift when the native keyboard shows.
  void VKQ_iOS_SetTextInputRect (int x, int y, int w, int h)
  {
-@@ -213,6 +215,8 @@
+@@ -244,6 +246,8 @@ void IN_Init (void)
  	// UIKit entirely, so a touch-look regression could never be caught without
  	// hands on glass. Feeds the same accumulator a finger drag does.
  	Cmd_AddCommand ("vkq_touchlook", IN_TouchLook_f);
@@ -27,11 +28,10 @@ Applies on top of 0004's VKQ_IOS block.
  #endif
  	if (safemode || COM_CheckParm ("-nomouse"))
  	{
-@@ -689,7 +693,48 @@
- 		return;
+@@ -721,6 +725,47 @@ static void IN_TouchLook_f (void)
  	}
  	VKQ_TouchLook ((float)atof (Cmd_Argv (1)), (float)atof (Cmd_Argv (2)));
-+}
+ }
 +// `touchedit` opens/closes the on-screen layout editor; `touchedit reset` puts
 +// every button back to its shipped position. Reachable from the console bridge,
 +// which is how both get verified headlessly.
@@ -53,7 +53,7 @@ Applies on top of 0004's VKQ_IOS block.
 +		return;
 +	}
 +	VKQ_iOS_ToggleLayoutEdit ();
- }
++}
 +
 +// `vkq_faketouch <x 0..1> <y 0..1> <down|move|up>` — synthetic finger for the
 +// layout editor; injected UIKit touches never reach the touch path on a sim, so

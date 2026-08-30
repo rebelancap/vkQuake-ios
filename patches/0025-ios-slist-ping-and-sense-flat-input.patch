@@ -1,342 +1,10 @@
---- a/Quake/net_defs.h
-+++ b/Quake/net_defs.h
-@@ -263,6 +263,14 @@
- 	int				 maxusers;
- 	int				 driver;
- 	int				 ldriver;
-+	// vkquake-ios R6.3: round-trip time of the slist query that produced this
-+	// entry, in milliseconds, or -1 when it could not be measured. The slist
-+	// query is already a datagram round trip, so this costs one timestamp at the
-+	// send and one subtraction at the reply — no protocol extension, and nothing
-+	// the far end has to support. MUST be assigned on EVERY fill path: hostcache[]
-+	// is never memset (NET_Slist_f resets only hostCacheCount), so a new slot
-+	// silently inherits the previous search's bytes.
-+	int				 ping_ms;
- 	struct qsockaddr addr;
- } hostcache_t;
- 
---- a/Quake/net.h
-+++ b/Quake/net.h
-@@ -113,6 +113,10 @@
- void		NET_SlistSort (void);
- const char *NET_SlistPrintServer (size_t n);
- const char *NET_SlistPrintServerName (size_t n);
-+// vkquake-ios R6.3: the measured round-trip in milliseconds as text, or "--".
-+// menu.c cannot see hostcache_t (it does not include net_defs.h), so the ping
-+// reaches the menu through this accessor exactly as the name and map already do.
-+const char *NET_SlistPingText (size_t n);
- 
- /* FIXME: driver related, but public:
-  */
---- a/Quake/net_main.c
-+++ b/Quake/net_main.c
-@@ -275,10 +275,14 @@
- 	}
- }
- 
-+// vkquake-ios R6.3: the ping column costs cells, and the menu row is already
-+// wider than the 320-unit menu canvas. Name 15->13 and map 15->11 pays for
-+// " %4s" of milliseconds and brings the row back inside the canvas. The console
-+// and the menu use the SAME widths so the two lists look like the same list.
- static void PrintSlistHeader (void)
- {
--	Con_Printf ("Server          Map             Users\n");
--	Con_Printf ("--------------- --------------- -----\n");
-+	Con_Printf ("Server        Map         Users Ping\n");
-+	Con_Printf ("------------- ----------- ----- ----\n");
- 	slistLastShown = 0;
- }
- 
-@@ -289,9 +293,11 @@
- 	for (n = slistLastShown; n < hostCacheCount; n++)
- 	{
- 		if (hostcache[n].maxusers)
--			Con_Printf ("%-15.15s %-15.15s %2u/%2u\n", hostcache[n].name, hostcache[n].map, hostcache[n].users, hostcache[n].maxusers);
-+			Con_Printf (
-+				"%-13.13s %-11.11s %2u/%2u %4s\n", hostcache[n].name, hostcache[n].map, hostcache[n].users, hostcache[n].maxusers,
-+				NET_SlistPingText (n));
- 		else
--			Con_Printf ("%-15.15s %-15.15s\n", hostcache[n].name, hostcache[n].map);
-+			Con_Printf ("%-13.13s %-11.11s       %4s\n", hostcache[n].name, hostcache[n].map, NET_SlistPingText (n));
- 	}
- 	slistLastShown = n;
- }
-@@ -322,6 +328,48 @@
- 	SchedulePollProcedure (&slistPollProcedure, 0.1);
- 
- 	hostCacheCount = 0;
-+}
-+
-+/*
-+====================
-+NET_SlistPingText -- vkquake-ios R6.3
-+
-+The ping column, as it is rendered in both the console list and the menu. One
-+definition, so the two surfaces cannot disagree. "--" is an honest answer for a
-+server whose RTT we could not measure; it is not 0 and not 999.
-+====================
-+*/
-+const char *NET_SlistPingText (size_t idx)
-+{
-+	static char text[8];
-+
-+	if (idx >= hostCacheCount || hostcache[idx].ping_ms < 0)
-+		return "--";
-+	q_snprintf (text, sizeof (text), "%d", q_min (hostcache[idx].ping_ms, 9999));
-+	return text;
-+}
-+
-+/*
-+====================
-+NET_SlistSort -- vkquake-ios R6.3: ping ascending, then name
-+
-+the user asked for the list to sort itself by ping. Unmeasured servers (ping_ms
-+< 0) sort AFTER every measured one rather than first, which is what a -1 would do
-+numerically — that inversion is the whole reason the comparator is written with an
-+explicit key rather than a subtraction. Name remains the tie-break, so an
-+all-LAN list (every RTT the same sub-millisecond 0) keeps the alphabetical order
-+it has always had instead of becoming arbitrary.
-+
-+Deliberately still called ONCE per entry into the list screen, from
-+M_ServerList_Draw's slist_sorted latch. See the note there: re-sorting a list the
-+user is already looking at is a defect on this port, not a feature.
-+====================
-+*/
-+static int NET_SlistSortKey (size_t idx)
-+{
-+	// INT_MAX rather than a large literal: any measured ping, however awful,
-+	// still outranks "never answered".
-+	return (hostcache[idx].ping_ms < 0) ? INT_MAX : hostcache[idx].ping_ms;
- }
- 
- void NET_SlistSort (void)
-@@ -334,7 +382,10 @@
- 		{
- 			for (j = i + 1; j < hostCacheCount; j++)
- 			{
--				if (strcmp (hostcache[j].name, hostcache[i].name) < 0)
-+				const int ki = NET_SlistSortKey (i);
-+				const int kj = NET_SlistSortKey (j);
-+				const qboolean before = (kj != ki) ? (kj < ki) : (strcmp (hostcache[j].name, hostcache[i].name) < 0);
-+				if (before)
- 				{
- 					memcpy (&temp, &hostcache[j], sizeof (hostcache_t));
- 					memcpy (&hostcache[j], &hostcache[i], sizeof (hostcache_t));
-@@ -352,14 +403,19 @@
- 	if (idx >= hostCacheCount)
- 		return "";
- 
-+	// R6.3: no trailing '\n'. M_Print has no newline handling — it blits every
-+	// byte it is given — so the old format drew a stray glyph at x=324 on every
-+	// row, off the right of the 320-unit canvas. The console printer above does
-+	// its own newline, and this string is drawn, not printed.
- 	if (hostcache[idx].maxusers)
- 	{
- 		q_snprintf (
--			string, sizeof (string), "%-15.15s %-15.15s %2u/%2u\n", hostcache[idx].name, hostcache[idx].map, hostcache[idx].users, hostcache[idx].maxusers);
-+			string, sizeof (string), "%-13.13s %-11.11s %2u/%2u %4s", hostcache[idx].name, hostcache[idx].map, hostcache[idx].users,
-+			hostcache[idx].maxusers, NET_SlistPingText (idx));
- 	}
- 	else
- 	{
--		q_snprintf (string, sizeof (string), "%-15.15s %-15.15s\n", hostcache[idx].name, hostcache[idx].map);
-+		q_snprintf (string, sizeof (string), "%-13.13s %-11.11s       %4s", hostcache[idx].name, hostcache[idx].map, NET_SlistPingText (idx));
- 	}
- 
- 	return string;
---- a/Quake/net_dgrm.c
-+++ b/Quake/net_dgrm.c
-@@ -1637,10 +1637,61 @@
- 	int				 driver;
- 	qboolean		 requery;
- 	qboolean		 master;
-+	// vkquake-ios R6.3: when this host's CCREQ_SERVER_INFO / getinfo went out.
-+	// The unicast query is per-host, so the only correct place for the clock is
-+	// here rather than in one global. 0 means "never queried in this session".
-+	double			 sendtime;
- 	struct qsockaddr addr;
- }		   *hostlist;
- size_t		hostlist_count;
- size_t		hostlist_max;
-+
-+/*
-+====================
-+_Datagram_SlistPing -- vkquake-ios R6.3
-+
-+The round trip, in milliseconds, for a reply that has just arrived from `addr`.
-+
-+Two clocks, because there are two kinds of query. An internet search unicasts a
-+query per host (from hostlist[], max four per 100 ms poll) so each host has its own
-+send time and the RTT is exact. A LAN search only ever broadcasts, so no per-host
-+record exists and the broadcast time is the only honest reference — on a LAN that
-+is sub-millisecond anyway.
-+
-+Returns -1 when neither clock can answer, which is what puts a row's ping column
-+at "--" and sinks it below every measured server in the sort.
-+====================
-+*/
-+static double slist_broadcast_time;
-+
-+static int _Datagram_SlistPing (struct qsockaddr *addr)
-+{
-+	const double now = Sys_DoubleTime ();
-+	double		 sent = 0.0;
-+	size_t		 u;
-+	double		 rtt;
-+
-+	for (u = 0; u < hostlist_count; u++)
-+	{
-+		if (hostlist[u].sendtime > 0.0 && dfunc.AddrCompare (addr, &hostlist[u].addr) == 0)
-+		{
-+			sent = hostlist[u].sendtime;
-+			break;
-+		}
-+	}
-+	if (sent <= 0.0)
-+		sent = slist_broadcast_time;
-+	if (sent <= 0.0)
-+		return -1;
-+
-+	rtt = (now - sent) * 1000.0;
-+	if (rtt < 0.0)
-+		return -1; // a clock that ran backwards is not a measurement
-+	if (rtt > 9999.0)
-+		rtt = 9999.0;
-+	return (int)(rtt + 0.5);
-+}
-+
- static void _Datagram_AddPossibleHost (struct qsockaddr *addr, qboolean master)
- {
- 	size_t u;
-@@ -1660,6 +1711,7 @@
- 	hostlist[hostlist_count].requery = true;
- 	hostlist[hostlist_count].master = master;
- 	hostlist[hostlist_count].driver = net_landriverlevel;
-+	hostlist[hostlist_count].sendtime = 0.0;
- 	hostlist_count++;
- }
- 
-@@ -1725,6 +1777,7 @@
- 		MSG_WriteString (&net_message, "QUAKE");
- 		MSG_WriteByte (&net_message, NET_PROTOCOL_VERSION);
- 		*((int *)net_message.data) = BigLong (NETFLAG_CTL | (net_message.cursize & NETFLAG_LENGTH_MASK));
-+		slist_broadcast_time = Sys_DoubleTime (); // R6.3: the LAN clock starts here
- 		dfunc.Broadcast (dfunc.controlSock, net_message.data, net_message.cursize);
- 		SZ_Clear (&net_message);
- 
-@@ -1864,6 +1917,9 @@
- 				memcpy (&hostcache[n].addr, &readaddr, sizeof (struct qsockaddr));
- 				hostcache[n].driver = net_driverlevel;
- 				hostcache[n].ldriver = net_landriverlevel;
-+				// R6.3: unconditional. hostcache[] is never zeroed, so a slot reused
-+				// from a previous search would otherwise report that search's ping.
-+				hostcache[n].ping_ms = _Datagram_SlistPing (&readaddr);
- 				q_strlcpy (hostcache[n].cname, dfunc.AddrToString (&readaddr, false), sizeof (hostcache[n].cname));
- 
- 				// check for a name conflict
-@@ -1946,6 +2002,8 @@
- 		memcpy (&hostcache[n].addr, &readaddr, sizeof (struct qsockaddr));
- 		hostcache[n].driver = net_driverlevel;
- 		hostcache[n].ldriver = net_landriverlevel;
-+		// R6.3: unconditional, for the same reason as the infoResponse path above.
-+		hostcache[n].ping_ms = _Datagram_SlistPing (&readaddr);
- 		q_strlcpy (hostcache[n].cname, dfunc.AddrToString (&readaddr, false), sizeof (hostcache[n].cname));
- 
- 		// check for a name conflict
-@@ -1982,6 +2040,7 @@
- 			if (hostlist[i].requery && hostlist[i].driver == net_landriverlevel)
- 			{
- 				hostlist[i].requery = false;
-+				hostlist[i].sendtime = Sys_DoubleTime (); // R6.3: this host's clock starts here
- 				_Datagram_SendServerQuery (&hostlist[i].addr, hostlist[i].master);
- 				sentsomething = true;
- 				n--;
---- a/Quake/net_loop.c
-+++ b/Quake/net_loop.c
-@@ -55,6 +55,11 @@
- 	hostcache[0].users = net_activeconnections;
- 	hostcache[0].maxusers = svs.maxclients;
- 	hostcache[0].driver = net_driverlevel;
-+	// vkquake-ios R6.3: the loopback server IS this process — the round trip is
-+	// zero, and it is a measurement rather than a missing one, so it reads "0" and
-+	// sorts to the top rather than showing "--" at the bottom. Assigned here
-+	// because hostcache[] is never zeroed between searches.
-+	hostcache[0].ping_ms = 0;
- 	strcpy (hostcache[0].cname, "local");
- 	return false;
- }
---- a/Quake/menu.c
-+++ b/Quake/menu.c
-@@ -3685,7 +3685,12 @@
- static int		slist_cursor;
- static int		slist_first;
- static qboolean slist_sorted;
--#define SERVER_LIST_MAX_ON_SCREEN 21
-+// vkquake-ios R6.3: one row of the list is now a column header, so the list body
-+// starts 8 units lower and shows one fewer server. The header is what makes the
-+// ping column mean something to someone who did not ask for it.
-+#define SERVER_LIST_MAX_ON_SCREEN 20
-+#define SERVER_LIST_HEADER_Y	  32
-+#define SERVER_LIST_TOP_Y		  40
- 
- static void M_Menu_ServerList_f (void)
- {
-@@ -3705,6 +3710,24 @@
- 	size_t	n;
- 	qpic_t *p;
- 
-+	/*
-+	 * R6.3 — SORTED ONCE, ON ENTRY, AND DELIBERATELY NOT LIVE.
-+	 *
-+	 * The brief asked for the list to re-sort as replies arrive. It must not, on
-+	 * this port, and the reason is patch 0009: a touch sets the highlighted row
-+	 * during THIS draw and the synthetic K_MOUSE1 fires two frames later, so any
-+	 * re-order inside that window connects the player to a different server than
-+	 * the row their finger was on. `slist_cursor` is a raw index into hostcache[]
-+	 * with no name or address memo behind it, so there is nothing to re-find the
-+	 * selection by.
-+	 *
-+	 * Nothing is lost by sorting once, because the engine finishes the search
-+	 * BEFORE the list is ever shown: M_Search_Draw pumps NET_Poll and only calls
-+	 * M_Menu_ServerList_f once slistInProgress goes false. Every ping is already
-+	 * known by the time the first row is drawn, so "sort as they arrive" and "sort
-+	 * on entry" produce the same order for the user — one of them just cannot
-+	 * connect you to the wrong server.
-+	 */
- 	if (!slist_sorted)
- 	{
- 		slist_sorted = true;
-@@ -3712,14 +3735,18 @@
- 	}
- 
- 	if (hostCacheCount > SERVER_LIST_MAX_ON_SCREEN)
--		M_DrawScrollbar (cbx, 0, 40, (float)(slist_first) / (hostCacheCount - SERVER_LIST_MAX_ON_SCREEN), SERVER_LIST_MAX_ON_SCREEN - 2);
--	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, 32, 8, SERVER_LIST_MAX_ON_SCREEN, slist_first);
-+		M_DrawScrollbar (
-+			cbx, 0, SERVER_LIST_TOP_Y, (float)(slist_first) / (hostCacheCount - SERVER_LIST_MAX_ON_SCREEN), SERVER_LIST_MAX_ON_SCREEN - 2);
-+	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, SERVER_LIST_TOP_Y, 8, SERVER_LIST_MAX_ON_SCREEN, slist_first);
- 
- 	p = Draw_CachePic ("gfx/p_multi.lmp");
- 	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
-+	// Column widths are NET_SlistPrintServer's, kept in step by hand: name 13,
-+	// map 11, users 5, ping 4.
-+	M_PrintWhite (cbx, 28, SERVER_LIST_HEADER_Y, "Server        Map         Users Ping");
- 	for (n = 0; n < SERVER_LIST_MAX_ON_SCREEN && n < hostCacheCount; n++)
--		M_Print (cbx, 28, 32 + 8 * n, NET_SlistPrintServer (slist_first + n));
--	Draw_Character (cbx, 16, 32 + (slist_cursor - slist_first) * 8, 12 + ((int)(realtime * 4) & 1));
-+		M_Print (cbx, 28, SERVER_LIST_TOP_Y + 8 * n, NET_SlistPrintServer (slist_first + n));
-+	Draw_Character (cbx, 16, SERVER_LIST_TOP_Y + (slist_cursor - slist_first) * 8, 12 + ((int)(realtime * 4) & 1));
- 
- 	if (*m_return_reason)
- 		M_PrintWhite (cbx, 16, 148, m_return_reason);
+diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -449,7 +449,150 @@
- 			Key_Event (key, true);
- 		}
+@@ -482,6 +482,149 @@ static void IN_JoyKeyEvent (qboolean wasdown, qboolean isdown, int key, double *
  	}
-+}
-+
+ }
+ 
 +#ifdef VKQ_VISIONOS
 +/*
 +================
@@ -477,12 +145,13 @@
 +		buttons[SDL_GAMEPAD_BUTTON_RIGHT_STICK] = true; // K_RTHUMB -> +movedown
 +
 +	return 1;
- }
++}
 +#endif // VKQ_VISIONOS
- 
++
  /*
  ================
-@@ -461,7 +604,9 @@
+ IN_Commands
+@@ -492,7 +635,9 @@ Emit key events for game controller buttons, including emulated buttons for anal
  void IN_Commands (void)
  {
  	joyaxisstate_t newaxisstate;
@@ -492,7 +161,7 @@
  	const float	   stickthreshold = 0.9;
  	const float	   triggerthreshold = joy_deadzone_trigger.value;
  
-@@ -492,17 +637,64 @@
+@@ -523,17 +668,64 @@ void IN_Commands (void)
  	if (!joy_enable.value)
  		return;
  
@@ -531,21 +200,21 @@
 +		have_source = 1;
 +		for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
 +		{
- #ifdef USE_SDL3
--		qboolean newstate = SDL_GetGamepadButton (joy_active_controller, (SDL_GamepadButton)i);
++#ifdef USE_SDL3
 +			newbuttonstate[i] = SDL_GetGamepadButton (joy_active_controller, (SDL_GamepadButton)i);
- #else
--		qboolean newstate = SDL_GameControllerGetButton (joy_active_controller, (SDL_GameControllerButton)i);
++#else
 +			newbuttonstate[i] = SDL_GameControllerGetButton (joy_active_controller, (SDL_GameControllerButton)i);
- #endif
++#endif
 +		}
 +		for (i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)
 +		{
-+#ifdef USE_SDL3
+ #ifdef USE_SDL3
+-		qboolean newstate = SDL_GetGamepadButton (joy_active_controller, (SDL_GamepadButton)i);
 +			newaxisstate.axisvalue[i] = SDL_GetGamepadAxis (joy_active_controller, (SDL_GamepadAxis)i) / 32768.0f;
-+#else
+ #else
+-		qboolean newstate = SDL_GameControllerGetButton (joy_active_controller, (SDL_GameControllerButton)i);
 +			newaxisstate.axisvalue[i] = SDL_GameControllerGetAxis (joy_active_controller, (SDL_GameControllerAxis)i) / 32768.0f;
-+#endif
+ #endif
 +		}
 +	}
 +
@@ -563,23 +232,23 @@
  		qboolean oldstate = joy_buttonstate.buttondown[i];
  
  		joy_buttonstate.buttondown[i] = newstate;
-@@ -512,15 +704,6 @@
- 		IN_JoyKeyEvent (oldstate, newstate, IN_KeyForControllerButton ((SDL_GamepadButton)i), &joy_buttontimer[i]);
- #else
- 		IN_JoyKeyEvent (oldstate, newstate, IN_KeyForControllerButton ((SDL_GameControllerButton)i), &joy_buttontimer[i]);
--#endif
--	}
--
+@@ -546,15 +738,6 @@ void IN_Commands (void)
+ #endif
+ 	}
+ 
 -	for (i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)
 -	{
 -#ifdef USE_SDL3
 -		newaxisstate.axisvalue[i] = SDL_GetGamepadAxis (joy_active_controller, (SDL_GamepadAxis)i) / 32768.0f;
 -#else
 -		newaxisstate.axisvalue[i] = SDL_GameControllerGetAxis (joy_active_controller, (SDL_GameControllerAxis)i) / 32768.0f;
- #endif
- 	}
- 
-@@ -567,8 +750,17 @@
+-#endif
+-	}
+-
+ 	// emit emulated arrow keys so the analog sticks can be used in the menu
+ 	if (key_dest != key_game)
+ 	{
+@@ -598,8 +781,17 @@ void IN_JoyMove (usercmd_t *cmd)
  	if (!joy_enable.value)
  		return;
  
@@ -597,3 +266,344 @@
  
  	if (cl.paused || key_dest != key_game)
  		return;
+diff --git a/Quake/menu.c b/Quake/menu.c
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -4824,7 +4824,12 @@ static void M_Search_Key (int key) {}
+ static int		slist_cursor;
+ static int		slist_first;
+ static qboolean slist_sorted;
+-#define SERVER_LIST_MAX_ON_SCREEN 21
++// vkquake-ios R6.3: one row of the list is now a column header, so the list body
++// starts 8 units lower and shows one fewer server. The header is what makes the
++// ping column mean something to someone who did not ask for it.
++#define SERVER_LIST_MAX_ON_SCREEN 20
++#define SERVER_LIST_HEADER_Y	  32
++#define SERVER_LIST_TOP_Y		  40
+ 
+ static void M_Menu_ServerList_f (void)
+ {
+@@ -4844,6 +4849,24 @@ static void M_ServerList_Draw (cb_context_t *cbx)
+ 	size_t	n;
+ 	qpic_t *p;
+ 
++	/*
++	 * R6.3 — SORTED ONCE, ON ENTRY, AND DELIBERATELY NOT LIVE.
++	 *
++	 * The brief asked for the list to re-sort as replies arrive. It must not, on
++	 * this port, and the reason is patch 0009: a touch sets the highlighted row
++	 * during THIS draw and the synthetic K_MOUSE1 fires two frames later, so any
++	 * re-order inside that window connects the player to a different server than
++	 * the row their finger was on. `slist_cursor` is a raw index into hostcache[]
++	 * with no name or address memo behind it, so there is nothing to re-find the
++	 * selection by.
++	 *
++	 * Nothing is lost by sorting once, because the engine finishes the search
++	 * BEFORE the list is ever shown: M_Search_Draw pumps NET_Poll and only calls
++	 * M_Menu_ServerList_f once slistInProgress goes false. Every ping is already
++	 * known by the time the first row is drawn, so "sort as they arrive" and "sort
++	 * on entry" produce the same order for the user — one of them just cannot
++	 * connect you to the wrong server.
++	 */
+ 	if (!slist_sorted)
+ 	{
+ 		slist_sorted = true;
+@@ -4851,18 +4874,21 @@ static void M_ServerList_Draw (cb_context_t *cbx)
+ 	}
+ 
+ 	if (hostCacheCount > SERVER_LIST_MAX_ON_SCREEN)
+-		M_DrawScrollbar (cbx, MENU_SCROLLBAR_X, 40, (float)(slist_first) / (hostCacheCount - SERVER_LIST_MAX_ON_SCREEN), SERVER_LIST_MAX_ON_SCREEN - 2);
+-	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, 32, 8, SERVER_LIST_MAX_ON_SCREEN, slist_first);
++		M_DrawScrollbar (
++			cbx, MENU_SCROLLBAR_X, SERVER_LIST_TOP_Y, (float)(slist_first) / (hostCacheCount - SERVER_LIST_MAX_ON_SCREEN), SERVER_LIST_MAX_ON_SCREEN - 2);
++	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, SERVER_LIST_TOP_Y, 8, SERVER_LIST_MAX_ON_SCREEN, slist_first);
+ 
+ 	p = Draw_CachePic ("gfx/p_multi.lmp");
+ 	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
+-
++	// Column widths are NET_SlistPrintServer's, kept in step by hand: name 13,
++	// map 11, users 5, ping 4.
++	M_PrintWhite (cbx, 28 - CHARACTER_SIZE, SERVER_LIST_HEADER_Y, "Server        Map         Users Ping");
+ 	for (n = 0; n < SERVER_LIST_MAX_ON_SCREEN && n < hostCacheCount; n++)
+ 	{
+-		M_Print (cbx, 28 - CHARACTER_SIZE, 32 + 8 * n, NET_SlistPrintServer (slist_first + n));
++		M_Print (cbx, 28 - CHARACTER_SIZE, SERVER_LIST_TOP_Y + 8 * n, NET_SlistPrintServer (slist_first + n));
+ 	}
+ 
+-	Draw_Character (cbx, 16 - CHARACTER_SIZE, 32 + (slist_cursor - slist_first) * 8, 12 + ((int)(realtime * 4) & 1));
++	Draw_Character (cbx, 16 - CHARACTER_SIZE, SERVER_LIST_TOP_Y + (slist_cursor - slist_first) * 8, 12 + ((int)(realtime * 4) & 1));
+ 
+ 	if (*m_return_reason)
+ 		M_PrintWhite (cbx, 16, 148, m_return_reason);
+diff --git a/Quake/net.h b/Quake/net.h
+--- a/Quake/net.h
++++ b/Quake/net.h
+@@ -113,6 +113,10 @@ void		NET_Slist_f (void);
+ void		NET_SlistSort (void);
+ const char *NET_SlistPrintServer (size_t n);
+ const char *NET_SlistPrintServerName (size_t n);
++// vkquake-ios R6.3: the measured round-trip in milliseconds as text, or "--".
++// menu.c cannot see hostcache_t (it does not include net_defs.h), so the ping
++// reaches the menu through this accessor exactly as the name and map already do.
++const char *NET_SlistPingText (size_t n);
+ 
+ /* FIXME: driver related, but public:
+  */
+diff --git a/Quake/net_defs.h b/Quake/net_defs.h
+--- a/Quake/net_defs.h
++++ b/Quake/net_defs.h
+@@ -263,6 +263,14 @@ typedef struct
+ 	int				 maxusers;
+ 	int				 driver;
+ 	int				 ldriver;
++	// vkquake-ios R6.3: round-trip time of the slist query that produced this
++	// entry, in milliseconds, or -1 when it could not be measured. The slist
++	// query is already a datagram round trip, so this costs one timestamp at the
++	// send and one subtraction at the reply — no protocol extension, and nothing
++	// the far end has to support. MUST be assigned on EVERY fill path: hostcache[]
++	// is never memset (NET_Slist_f resets only hostCacheCount), so a new slot
++	// silently inherits the previous search's bytes.
++	int				 ping_ms;
+ 	struct qsockaddr addr;
+ } hostcache_t;
+ 
+diff --git a/Quake/net_dgrm.c b/Quake/net_dgrm.c
+--- a/Quake/net_dgrm.c
++++ b/Quake/net_dgrm.c
+@@ -1637,10 +1637,61 @@ static struct
+ 	int				 driver;
+ 	qboolean		 requery;
+ 	qboolean		 master;
++	// vkquake-ios R6.3: when this host's CCREQ_SERVER_INFO / getinfo went out.
++	// The unicast query is per-host, so the only correct place for the clock is
++	// here rather than in one global. 0 means "never queried in this session".
++	double			 sendtime;
+ 	struct qsockaddr addr;
+ }		   *hostlist;
+ size_t		hostlist_count;
+ size_t		hostlist_max;
++
++/*
++====================
++_Datagram_SlistPing -- vkquake-ios R6.3
++
++The round trip, in milliseconds, for a reply that has just arrived from `addr`.
++
++Two clocks, because there are two kinds of query. An internet search unicasts a
++query per host (from hostlist[], max four per 100 ms poll) so each host has its own
++send time and the RTT is exact. A LAN search only ever broadcasts, so no per-host
++record exists and the broadcast time is the only honest reference — on a LAN that
++is sub-millisecond anyway.
++
++Returns -1 when neither clock can answer, which is what puts a row's ping column
++at "--" and sinks it below every measured server in the sort.
++====================
++*/
++static double slist_broadcast_time;
++
++static int _Datagram_SlistPing (struct qsockaddr *addr)
++{
++	const double now = Sys_DoubleTime ();
++	double		 sent = 0.0;
++	size_t		 u;
++	double		 rtt;
++
++	for (u = 0; u < hostlist_count; u++)
++	{
++		if (hostlist[u].sendtime > 0.0 && dfunc.AddrCompare (addr, &hostlist[u].addr) == 0)
++		{
++			sent = hostlist[u].sendtime;
++			break;
++		}
++	}
++	if (sent <= 0.0)
++		sent = slist_broadcast_time;
++	if (sent <= 0.0)
++		return -1;
++
++	rtt = (now - sent) * 1000.0;
++	if (rtt < 0.0)
++		return -1; // a clock that ran backwards is not a measurement
++	if (rtt > 9999.0)
++		rtt = 9999.0;
++	return (int)(rtt + 0.5);
++}
++
+ static void _Datagram_AddPossibleHost (struct qsockaddr *addr, qboolean master)
+ {
+ 	size_t u;
+@@ -1660,6 +1711,7 @@ static void _Datagram_AddPossibleHost (struct qsockaddr *addr, qboolean master)
+ 	hostlist[hostlist_count].requery = true;
+ 	hostlist[hostlist_count].master = master;
+ 	hostlist[hostlist_count].driver = net_landriverlevel;
++	hostlist[hostlist_count].sendtime = 0.0;
+ 	hostlist_count++;
+ }
+ 
+@@ -1725,6 +1777,7 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
+ 		MSG_WriteString (&net_message, "QUAKE");
+ 		MSG_WriteByte (&net_message, NET_PROTOCOL_VERSION);
+ 		*((int *)net_message.data) = BigLong (NETFLAG_CTL | (net_message.cursize & NETFLAG_LENGTH_MASK));
++		slist_broadcast_time = Sys_DoubleTime (); // R6.3: the LAN clock starts here
+ 		dfunc.Broadcast (dfunc.controlSock, net_message.data, net_message.cursize);
+ 		SZ_Clear (&net_message);
+ 
+@@ -1864,6 +1917,9 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
+ 				memcpy (&hostcache[n].addr, &readaddr, sizeof (struct qsockaddr));
+ 				hostcache[n].driver = net_driverlevel;
+ 				hostcache[n].ldriver = net_landriverlevel;
++				// R6.3: unconditional. hostcache[] is never zeroed, so a slot reused
++				// from a previous search would otherwise report that search's ping.
++				hostcache[n].ping_ms = _Datagram_SlistPing (&readaddr);
+ 				q_strlcpy (hostcache[n].cname, dfunc.AddrToString (&readaddr, false), sizeof (hostcache[n].cname));
+ 
+ 				// check for a name conflict
+@@ -1946,6 +2002,8 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
+ 		memcpy (&hostcache[n].addr, &readaddr, sizeof (struct qsockaddr));
+ 		hostcache[n].driver = net_driverlevel;
+ 		hostcache[n].ldriver = net_landriverlevel;
++		// R6.3: unconditional, for the same reason as the infoResponse path above.
++		hostcache[n].ping_ms = _Datagram_SlistPing (&readaddr);
+ 		q_strlcpy (hostcache[n].cname, dfunc.AddrToString (&readaddr, false), sizeof (hostcache[n].cname));
+ 
+ 		// check for a name conflict
+@@ -1982,6 +2040,7 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
+ 			if (hostlist[i].requery && hostlist[i].driver == net_landriverlevel)
+ 			{
+ 				hostlist[i].requery = false;
++				hostlist[i].sendtime = Sys_DoubleTime (); // R6.3: this host's clock starts here
+ 				_Datagram_SendServerQuery (&hostlist[i].addr, hostlist[i].master);
+ 				sentsomething = true;
+ 				n--;
+diff --git a/Quake/net_loop.c b/Quake/net_loop.c
+--- a/Quake/net_loop.c
++++ b/Quake/net_loop.c
+@@ -55,6 +55,11 @@ qboolean Loop_SearchForHosts (qboolean xmit)
+ 	hostcache[0].users = net_activeconnections;
+ 	hostcache[0].maxusers = svs.maxclients;
+ 	hostcache[0].driver = net_driverlevel;
++	// vkquake-ios R6.3: the loopback server IS this process — the round trip is
++	// zero, and it is a measurement rather than a missing one, so it reads "0" and
++	// sorts to the top rather than showing "--" at the bottom. Assigned here
++	// because hostcache[] is never zeroed between searches.
++	hostcache[0].ping_ms = 0;
+ 	strcpy (hostcache[0].cname, "local");
+ 	return false;
+ }
+diff --git a/Quake/net_main.c b/Quake/net_main.c
+--- a/Quake/net_main.c
++++ b/Quake/net_main.c
+@@ -275,10 +275,14 @@ static void NET_Port_f (void)
+ 	}
+ }
+ 
++// vkquake-ios R6.3: the ping column costs cells, and the menu row is already
++// wider than the 320-unit menu canvas. Name 15->13 and map 15->11 pays for
++// " %4s" of milliseconds and brings the row back inside the canvas. The console
++// and the menu use the SAME widths so the two lists look like the same list.
+ static void PrintSlistHeader (void)
+ {
+-	Con_Printf ("Server          Map             Users\n");
+-	Con_Printf ("--------------- --------------- -----\n");
++	Con_Printf ("Server        Map         Users Ping\n");
++	Con_Printf ("------------- ----------- ----- ----\n");
+ 	slistLastShown = 0;
+ }
+ 
+@@ -289,9 +293,11 @@ static void PrintSlist (void)
+ 	for (n = slistLastShown; n < hostCacheCount; n++)
+ 	{
+ 		if (hostcache[n].maxusers)
+-			Con_Printf ("%-15.15s %-15.15s %2u/%2u\n", hostcache[n].name, hostcache[n].map, hostcache[n].users, hostcache[n].maxusers);
++			Con_Printf (
++				"%-13.13s %-11.11s %2u/%2u %4s\n", hostcache[n].name, hostcache[n].map, hostcache[n].users, hostcache[n].maxusers,
++				NET_SlistPingText (n));
+ 		else
+-			Con_Printf ("%-15.15s %-15.15s\n", hostcache[n].name, hostcache[n].map);
++			Con_Printf ("%-13.13s %-11.11s       %4s\n", hostcache[n].name, hostcache[n].map, NET_SlistPingText (n));
+ 	}
+ 	slistLastShown = n;
+ }
+@@ -324,6 +330,48 @@ void NET_Slist_f (void)
+ 	hostCacheCount = 0;
+ }
+ 
++/*
++====================
++NET_SlistPingText -- vkquake-ios R6.3
++
++The ping column, as it is rendered in both the console list and the menu. One
++definition, so the two surfaces cannot disagree. "--" is an honest answer for a
++server whose RTT we could not measure; it is not 0 and not 999.
++====================
++*/
++const char *NET_SlistPingText (size_t idx)
++{
++	static char text[8];
++
++	if (idx >= hostCacheCount || hostcache[idx].ping_ms < 0)
++		return "--";
++	q_snprintf (text, sizeof (text), "%d", q_min (hostcache[idx].ping_ms, 9999));
++	return text;
++}
++
++/*
++====================
++NET_SlistSort -- vkquake-ios R6.3: ping ascending, then name
++
++the user asked for the list to sort itself by ping. Unmeasured servers (ping_ms
++< 0) sort AFTER every measured one rather than first, which is what a -1 would do
++numerically — that inversion is the whole reason the comparator is written with an
++explicit key rather than a subtraction. Name remains the tie-break, so an
++all-LAN list (every RTT the same sub-millisecond 0) keeps the alphabetical order
++it has always had instead of becoming arbitrary.
++
++Deliberately still called ONCE per entry into the list screen, from
++M_ServerList_Draw's slist_sorted latch. See the note there: re-sorting a list the
++user is already looking at is a defect on this port, not a feature.
++====================
++*/
++static int NET_SlistSortKey (size_t idx)
++{
++	// INT_MAX rather than a large literal: any measured ping, however awful,
++	// still outranks "never answered".
++	return (hostcache[idx].ping_ms < 0) ? INT_MAX : hostcache[idx].ping_ms;
++}
++
+ void NET_SlistSort (void)
+ {
+ 	if (hostCacheCount > 1)
+@@ -334,7 +382,10 @@ void NET_SlistSort (void)
+ 		{
+ 			for (j = i + 1; j < hostCacheCount; j++)
+ 			{
+-				if (strcmp (hostcache[j].name, hostcache[i].name) < 0)
++				const int ki = NET_SlistSortKey (i);
++				const int kj = NET_SlistSortKey (j);
++				const qboolean before = (kj != ki) ? (kj < ki) : (strcmp (hostcache[j].name, hostcache[i].name) < 0);
++				if (before)
+ 				{
+ 					memcpy (&temp, &hostcache[j], sizeof (hostcache_t));
+ 					memcpy (&hostcache[j], &hostcache[i], sizeof (hostcache_t));
+@@ -352,14 +403,19 @@ const char *NET_SlistPrintServer (size_t idx)
+ 	if (idx >= hostCacheCount)
+ 		return "";
+ 
++	// R6.3: no trailing '\n'. M_Print has no newline handling — it blits every
++	// byte it is given — so the old format drew a stray glyph at x=324 on every
++	// row, off the right of the 320-unit canvas. The console printer above does
++	// its own newline, and this string is drawn, not printed.
+ 	if (hostcache[idx].maxusers)
+ 	{
+ 		q_snprintf (
+-			string, sizeof (string), "%-17.17s %-15.15s %2u/%2u\n", hostcache[idx].name, hostcache[idx].map, hostcache[idx].users, hostcache[idx].maxusers);
++			string, sizeof (string), "%-13.13s %-11.11s %2u/%2u %4s", hostcache[idx].name, hostcache[idx].map, hostcache[idx].users,
++			hostcache[idx].maxusers, NET_SlistPingText (idx));
+ 	}
+ 	else
+ 	{
+-		q_snprintf (string, sizeof (string), "%-19.19s %-17.17s\n", hostcache[idx].name, hostcache[idx].map);
++		q_snprintf (string, sizeof (string), "%-13.13s %-11.11s       %4s", hostcache[idx].name, hostcache[idx].map, NET_SlistPingText (idx));
+ 	}
+ 
+ 	return string;

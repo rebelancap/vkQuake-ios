@@ -1,0 +1,40 @@
+vkquake-ios overlay 0016: warn when the rerelease localization table
+resolved to a placeholder.
+
+Upstream 050b9f19 now reads localization/loc_<lang>.txt through
+COM_LoadFile (the pak-aware VFS) before the loose-file and kpf paths, so
+the pak-vs-kpf ordering this overlay used to carry is gone -- it IS
+upstream now. What upstream still does not do is say anything when the
+one broken data combination shows up.
+
+That combination is pre-2026 game paks (no localization/ entry) sitting
+next to a 2026-or-later QuakeEX.kpf, whose loc_*.txt are 27-byte
+`placeholder = "placeholder"` stubs. LOC_LoadFile "succeeds" with a
+single entry, LOC_GetString then returns every key verbatim, and the
+player sees $qc_item_health on screen with nothing in the log to explain
+it. Both clean vintages already work; this is purely a report.
+
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -4148,6 +4148,21 @@
+ 	}
+ 
+ 	Con_Printf ("Loaded %d strings from '%s'\n", localization.numentries, file);
++
++	// vkquake-ios: diagnose the one game-data combination that otherwise fails
++	// SILENTLY -- pre-2026 paks (no localization/ entry) next to a 2026-or-later
++	// QuakeEX.kpf, whose loc_*.txt are 27-byte `placeholder = "placeholder"` stubs.
++	// LOC_LoadFile "succeeds" with a single entry, LOC_GetString then returns every
++	// key verbatim, and the player sees $qc_item_health on screen with nothing in
++	// the log to explain it. The two CLEAN vintages are already handled by the
++	// search order upstream, so this is purely a report: in this mixed case there
++	// are no strings anywhere to recover.
++	if (localization.numentries <= 2)
++		Con_Warning (
++			"localized text is UNAVAILABLE: '%s' resolved to a placeholder.\n"
++			"Your game paks predate the 2026 update but QuakeEX.kpf is from it or later.\n"
++			"Re-copy the WHOLE rerelease folder (id1/pak0.pak carries the strings now).\n",
++			file);
+ }
+ 
+ /*

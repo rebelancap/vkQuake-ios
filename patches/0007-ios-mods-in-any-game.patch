@@ -1,6 +1,21 @@
+diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
+--- a/Quake/host_cmd.c
++++ b/Quake/host_cmd.c
+@@ -648,8 +648,10 @@ static void Modlist_SetNameFromMapDB (modinfo_t *info, const char *mapdb, const
+ 
+ static void Modlist_Add (const char *base, const char *name)
+ {
++#ifndef VKQ_IOS
+ 	if ((strlen (name) == 3) && (q_tolower (name[0]) == 'i') && (q_tolower (name[1]) == 'd') && (name[2] == '1'))
+ 		return;
++#endif // iOS keeps id1 in the mod list so you can return to base Quake from a mod
+ 	if (COM_ModForbiddenChars (name))
+ 		return;
+ 	char path[MAX_OSPATH];
+diff --git a/Quake/menu.c b/Quake/menu.c
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -637,12 +637,24 @@
+@@ -691,12 +691,24 @@ void M_Main_Draw (cb_context_t *cbx)
  	qpic_t *p;
  	qpic_t *menu2 = Get_Menu2 ();
  	int		main_items = MAIN_ITEMS + (menu2 ? 1 : 0);
@@ -25,7 +40,7 @@
  
  	f = (int)(realtime * 10) % 6;
  
-@@ -653,6 +665,12 @@
+@@ -707,6 +719,12 @@ void M_Main_Draw (cb_context_t *cbx)
  void M_Main_Key (int key)
  {
  	qpic_t *menu2 = Get_Menu2 ();
@@ -38,7 +53,7 @@
  
  	switch (key)
  	{
-@@ -671,14 +689,14 @@
+@@ -725,14 +743,14 @@ void M_Main_Key (int key)
  
  	case K_DOWNARROW:
  		S_LocalSound ("misc/menu1.wav");
@@ -55,7 +70,7 @@
  		break;
  
  	case K_ENTER:
-@@ -710,6 +728,13 @@
+@@ -764,6 +782,13 @@ void M_Main_Key (int key)
  				M_Menu_Quit_f ();
  			break;
  		case 5:
@@ -69,16 +84,3 @@
  			M_Menu_Quit_f ();
  			break;
  		}
---- a/Quake/host_cmd.c
-+++ b/Quake/host_cmd.c
-@@ -349,8 +349,10 @@
- 
- static void Modlist_Add (const char *base, const char *name)
- {
-+#ifndef VKQ_IOS
- 	if ((strlen (name) == 3) && (q_tolower (name[0]) == 'i') && (q_tolower (name[1]) == 'd') && (name[2] == '1'))
- 		return;
-+#endif // iOS keeps id1 in the mod list so you can return to base Quake from a mod
- 	if (COM_ModForbiddenChars (name))
- 		return;
- 	char path[MAX_OSPATH];

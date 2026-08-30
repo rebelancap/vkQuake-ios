@@ -1,11 +1,34 @@
+diff --git a/Quake/cl_main.c b/Quake/cl_main.c
+--- a/Quake/cl_main.c
++++ b/Quake/cl_main.c
+@@ -1053,6 +1053,18 @@ void CL_AccumulateCmd (void)
+ 		IN_Move (&cl.pendingcmd);
+ 	}
+ 
++#ifdef VKQ_VISIONOS
++	// vkquake-ios overlay 0018 (VR, charter A6): the SENT view angles become the
++	// head's. Runs AFTER every input path so a stick/touch/gyro turn is folded
++	// into the tracking-space body yaw instead of fighting the head — the server
++	// then sees ordinary view angles and stock progs, mods and multiplayer all
++	// aim where the player is looking. No-op outside VR.
++	{
++		extern void VKQ_VR_ApplyHeadAim (void);
++		VKQ_VR_ApplyHeadAim ();
++	}
++#endif
++
+ 	cl.pendingcmd.seconds = cl.mtime[0] - cl.pendingcmd.servertime;
+ }
+ 
+diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
 --- a/Quake/gl_rmain.c
 +++ b/Quake/gl_rmain.c
-@@ -284,7 +284,67 @@
+@@ -295,6 +295,66 @@ void R_SetFrustum (float fovx, float fovy)
  	}
  }
  
 +#ifdef VKQ_VISIONOS
- /*
++/*
 +===============
 +R_SetVRFrustum -- vkquake-ios overlay 0018
 +
@@ -64,11 +87,10 @@
 +}
 +#endif
 +
-+/*
+ /*
  =============
  GL_FrustumMatrix
- =============
-@@ -352,8 +412,21 @@
+@@ -363,7 +423,20 @@ static void R_SetupMatrices ()
  	{
  		extern int	 vkq_stereo3d_active, vkq_stereo3d_eye;
  		extern float vkq_stereo3d_sep, vkq_stereo3d_conv;
@@ -79,7 +101,7 @@
 +		// fov or view angles.
 +		extern int vkq_vr_use;
 +		if (vkq_vr_use && vkq_stereo3d_eye)
- 		{
++		{
 +			extern void VKQ_VR_ComposeView (int eye, float out[16]);
 +			extern void VKQ_VR_GetProjection (int eye, float out[16]);
 +			const int	e = (vkq_stereo3d_eye == 2) ? 1 : 0;
@@ -87,11 +109,10 @@
 +			VKQ_VR_GetProjection (e, vulkan_globals.projection_matrix);
 +		}
 +		else if (vkq_stereo3d_active && vkq_stereo3d_eye)
-+		{
+ 		{
  			const float e = (vkq_stereo3d_eye == 2 ? 1.0f : -1.0f) * 0.5f * vkq_stereo3d_sep;
  			vulkan_globals.view_matrix[3 * 4 + 0] -= e;
- 			vulkan_globals.projection_matrix[2 * 4 + 0] = -vulkan_globals.projection_matrix[0 * 4 + 0] * e / vkq_stereo3d_conv;
-@@ -425,7 +498,23 @@
+@@ -443,7 +516,23 @@ static void R_SetupViewBeforeMark (void *unused)
  	}
  	// johnfitz
  
@@ -113,15 +134,15 @@
  	R_SetFrustum (r_fovx, r_fovy); // johnfitz -- use r_fov* vars
 +#endif
  	R_SetupMatrices ();
+ 	R_PrepareDebugEntityInfo ();
  
- 	// johnfitz -- cheat-protect some draw modes
+diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
-@@ -139,6 +139,26 @@
- SDL_Mutex	  *draw_qcvm_mutex;
+@@ -148,6 +148,26 @@ SDL_Mutex	  *draw_qcvm_mutex;
  
  void SCR_ScreenShot_f (void);
-+
+ 
 +#ifdef VKQ_VISIONOS
 +// overlay 0018 R1.1 — why this VR frame is on the panel instead of in the eyes.
 +// Kept next to nothing else on purpose: SCR_VRPresentMode (which sets it), the
@@ -141,14 +162,14 @@
 +// needs telling what the panel is waiting for.
 +#define VKQ_VR_REASON_NO_GAME_IN_PROGRESS(r) ((r) >= VKQ_VR_REASON_NOGAME && (r) <= VKQ_VR_REASON_DEMO)
 +#endif
- 
++
  /*
  ===============================================================================
-@@ -1614,6 +1634,43 @@
- 	}
+ 
+@@ -1905,6 +1925,43 @@ void SCR_DrawWeaponWheel (cb_context_t *cbx)
  }
  #endif // VKQ_IOS
-+
+ 
 +#ifdef VKQ_VISIONOS
 +/*
 +==================
@@ -185,10 +206,11 @@
 +	Draw_String (cbx, (320 - w) / 2, y + CHARACTER_SIZE, l2);
 +}
 +#endif
- 
++
  /*
  ==================
-@@ -1631,6 +1688,21 @@
+ SCR_DrawGUI
+@@ -1921,6 +1978,21 @@ static void SCR_DrawGUI (void *unused)
  	R_BeginDebugUtilsLabel (cbx, "2D");
  	SCR_TileClear (cbx);
  
@@ -208,9 +230,9 @@
 +#endif
 +
  	const qboolean cscqhud = (scr_style.value < 1.0f) && cl.qcvm.extfuncs.CSQC_DrawHud;
- 	qboolean	   use_mutex = r_showbboxes.value && cscqhud;
  
-@@ -1681,6 +1753,11 @@
+ 	if (cscqhud && setjmp (screen_error))
+@@ -1970,6 +2042,11 @@ static void SCR_DrawGUI (void *unused)
  		M_Draw (cbx);
  	}
  
@@ -219,10 +241,10 @@
 +	SCR_DrawVRHint (cbx);
 +#endif
 +
- 	if (use_mutex)
- 		SDL_UnlockMutex (draw_qcvm_mutex);
- 
-@@ -1730,9 +1807,141 @@
+ 	SDL_UnlockMutex (draw_qcvm_mutex);
+ 	R_EndDebugUtilsLabel (cbx);
+ }
+@@ -2022,9 +2099,141 @@ static void SCR_UpdateScreenOnce (qboolean use_tasks);
  // disparity, which shows as judder while moving. The eye global is set
  // synchronously between renders: the tasks path joins draw_done inside each
  // render, so frame N's matrices are computed before eye N+1 is selected.
@@ -364,9 +386,10 @@
  	if (vkq_stereo3d_active && vkq_stereo3d_both)
  	{
  		vkq_stereo3d_eye = 1;
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -179,6 +179,15 @@
+@@ -181,6 +181,15 @@ static vulkan_memory_t vkq_stereo_present_memory[2];
  static VkImageView	   vkq_stereo_present_view[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
  static VkFramebuffer   vkq_stereo_present_fb[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
  static int			   vkq_stereo_present_w = 0, vkq_stereo_present_h = 0; // actual image extent
@@ -382,7 +405,7 @@
  #endif
  static vulkan_memory_t	oit_accum_buffer_memory;
  static vulkan_memory_t	oit_reveal_buffer_memory;
-@@ -1616,7 +1625,14 @@
+@@ -1636,7 +1645,14 @@ static void GL_CreateRenderPasses ()
  			attachment_descriptions[1].samples = vulkan_globals.sample_count;
  			attachment_descriptions[1].format = vulkan_globals.depth_format;
  			attachment_descriptions[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -397,7 +420,7 @@
  			attachment_descriptions[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
  			attachment_descriptions[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
  
-@@ -2036,6 +2052,12 @@
+@@ -2056,6 +2072,12 @@ static void GL_CreateDepthBuffer (void)
  	image_create_info.samples = vulkan_globals.sample_count;
  	image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
  	image_create_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -410,7 +433,7 @@
  
  	assert (depth_buffer == VK_NULL_HANDLE);
  	err = vkCreateImage (vulkan_globals.device, &image_create_info, NULL, &depth_buffer);
-@@ -3205,6 +3227,49 @@
+@@ -3253,6 +3275,49 @@ static void GL_CreateFrameBuffers (void)
  
  		vkq_stereo_present_w = (int)vid.width;
  		vkq_stereo_present_h = (int)vid.height;
@@ -460,11 +483,10 @@
  	}
  #endif
  }
-@@ -3361,6 +3426,19 @@
- 			vkDestroyImageView (vulkan_globals.device, stereo_view, NULL);
+@@ -3410,6 +3475,19 @@ static void GL_DestroyRenderResources (void)
  		vkDestroyImage (vulkan_globals.device, stereo_image, NULL);
  		R_FreeVulkanMemory (&vkq_stereo_present_memory[vkq_eye_i], &num_vulkan_misc_allocations);
-+	}
+ 	}
 +	// overlay 0018 (VR): the per-eye depth snapshots ride the same lifetime. NULL
 +	// the handle BEFORE destroying so the compositor thread can never be handed a
 +	// texture that is going away (a mid-space vid restart races its blit).
@@ -477,10 +499,11 @@
 +			continue;
 +		vkDestroyImage (vulkan_globals.device, vkq_depth_img, NULL);
 +		R_FreeVulkanMemory (&vkq_vr_depth_memory[vkq_eye_i], &num_vulkan_misc_allocations);
- 	}
++	}
  #endif
  
-@@ -3715,6 +3793,7 @@
+ 	for (int i = 0; i < DOUBLE_BUFFERED; ++i)
+@@ -3782,6 +3860,7 @@ typedef struct end_rendering_parms_s
  #ifdef VKQ_VISIONOS
  	uint32_t	 stereo3d	   : 1; // overlay 0010: route GUI+postprocess to the present image
  	uint32_t	 stereo3d_eye  : 2; // eye this frame rendered (latched for the compositor)
@@ -488,12 +511,10 @@
  #endif
  	float		 time;
  	VkClearValue color_clear_value;
-@@ -4230,7 +4309,69 @@
- 		vkCmdNextSubpass (render_passes_cb, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
- 		vkCmdExecuteCommands (render_passes_cb, 1, &vulkan_globals.secondary_cb_contexts[SCBX_POST_PROCESS]->cb);
+@@ -4310,6 +4389,68 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
  		vkCmdEndRenderPass (render_passes_cb);
-+	}
-+
+ 	}
+ 
 +#ifdef VKQ_VISIONOS
 +	// overlay 0018 (VR, charter A5): snapshot THIS eye's scene depth so the
 +	// compositor's per-view blit can write real per-pixel depth and reproject
@@ -553,12 +574,13 @@
 +			render_passes_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
 +			NULL, 0, NULL, 2, vkq_depth_barrier);
 +		vkq_vr_depth_ready[vkq_stereo_eye_idx] = 1;
- 	}
++	}
 +#endif
- 
++
  	VkBuffer screenshot_buffer = VK_NULL_HANDLE;
  	ZEROED_STRUCT (vulkan_memory_t, screenshot_memory);
-@@ -4389,6 +4530,12 @@
+ 	if (take_screenshot)
+@@ -4473,6 +4614,12 @@ task_handle_t GL_EndRendering (qboolean use_tasks, qboolean swapchain)
  	// actually rendered even if the shell has already advanced to the next eye.
  	parms.stereo3d = vkq_stereo3d_active ? 1u : 0u;
  	parms.stereo3d_eye = (uint32_t)(vkq_stereo3d_eye & 3);
@@ -571,11 +593,10 @@
  #endif
  	task_handle_t end_rendering_task = INVALID_TASK_HANDLE;
  	if (use_tasks)
-@@ -5735,5 +5882,282 @@
- {
+@@ -5887,4 +6034,281 @@ void VKQ_SetWindowSize (int w, int h)
  	if (w >= 320 && h >= 240)
  		SDL_SetWindowSize (draw_context, w, h);
-+}
+ }
 +
 +// ============================================================================
 +// vkquake-ios overlay 0018 — first-person VR (docs/VR-CHARTER.md R1).
@@ -643,7 +664,7 @@
 +	long long ns = (long long)now.tv_nsec + (long long)ms * 1000000ll;
 +	ts->tv_sec = now.tv_sec + (time_t) (ns / 1000000000ll);
 +	ts->tv_nsec = (long)(ns % 1000000000ll);
- }
++}
 +
 +// --- shell side --------------------------------------------------------------
 +
@@ -854,25 +875,3 @@
 +	last_sent = cl.viewangles[YAW];
 +}
  #endif
---- a/Quake/cl_main.c
-+++ b/Quake/cl_main.c
-@@ -1040,7 +1040,19 @@
- 
- 		// accumulate movement from other devices
- 		IN_Move (&cl.pendingcmd);
-+	}
-+
-+#ifdef VKQ_VISIONOS
-+	// vkquake-ios overlay 0018 (VR, charter A6): the SENT view angles become the
-+	// head's. Runs AFTER every input path so a stick/touch/gyro turn is folded
-+	// into the tracking-space body yaw instead of fighting the head — the server
-+	// then sees ordinary view angles and stock progs, mods and multiplayer all
-+	// aim where the player is looking. No-op outside VR.
-+	{
-+		extern void VKQ_VR_ApplyHeadAim (void);
-+		VKQ_VR_ApplyHeadAim ();
- 	}
-+#endif
- 
- 	cl.pendingcmd.seconds = cl.mtime[0] - cl.pendingcmd.servertime;
- }

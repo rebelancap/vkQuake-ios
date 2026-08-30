@@ -1,6 +1,7 @@
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -6434,8 +6434,19 @@
+@@ -6585,8 +6585,19 @@ void VKQ_VR_NoteDischarge (int serverWeapon)
  // here, so the match gate can see the switch it would otherwise be blind to.
  static void vkq_vr_fire_note_pending (int itembit)
  {
@@ -21,7 +22,7 @@
  }
  
  void VKQ_VR_FireReset (void)
-@@ -6477,6 +6488,52 @@
+@@ -6628,6 +6639,52 @@ static int vkq_vr_fire_schedule (double now, int aim, int off, unsigned bAim, un
  	const int activeW = cl.stats[STAT_ACTIVEWEAPON];
  	int		  ownerW, issued = 0, fire = 0;
  
@@ -74,7 +75,7 @@
  	// --- resolve the pending switch ------------------------------------------
  	// A pending impulse is one we cannot see the result of yet. It clears when
  	// the server confirms it, and it EXPIRES so that an impulse the progs
-@@ -6498,8 +6555,7 @@
+@@ -6649,8 +6706,7 @@ static int vkq_vr_fire_schedule (double now, int aim, int off, unsigned bAim, un
  	// cannot be closed from the client.)
  	if (vkq_vr_fire_owner >= 0 && activeW && activeW != vkq_vr_held_item_get (vkq_vr_fire_owner) && vkq_vr_fire_pending == 0)
  	{
@@ -84,7 +85,7 @@
  	}
  
  	// --- ownership ------------------------------------------------------------
-@@ -6594,8 +6650,10 @@
+@@ -6745,8 +6801,10 @@ static int vkq_vr_fire_schedule (double now, int aim, int off, unsigned bAim, un
  		if (imp > 0 && (in_impulse == 0 || in_impulse == imp))
  		{
  			in_impulse = imp;
@@ -97,7 +98,7 @@
  			issued = 1;
  		}
  		else if (in_impulse != 0)
-@@ -6603,8 +6661,7 @@
+@@ -6754,8 +6812,7 @@ static int vkq_vr_fire_schedule (double now, int aim, int off, unsigned bAim, un
  			// Somebody else's impulse is going out this frame. It may well change
  			// the weapon, so this frame CANNOT fire: an attack that rides out
  			// beside a foreign switch is precisely the cross-fire.
@@ -107,7 +108,7 @@
  		}
  	}
  
-@@ -6654,11 +6711,11 @@
+@@ -6805,11 +6862,11 @@ void VKQ_VR_FireDebugString (char *out, int len)
  		return;
  	q_snprintf (
  		out, len,
@@ -121,14 +122,13 @@
  		vkq_vr_fire_handoffs, vkq_vr_fire_shots[0], vkq_vr_fire_shots[1], vkq_vr_fire_crossfire,
  		vkqvr_dualclock.value < 0.5f ? "off (cvar)" : (VKQ_VR_ClockAvailable () ? "on" : "unavailable (this progs has no attack_finished)"),
  		cl.stats[STAT_SHELLS], cl.stats[STAT_NAILS], cl.stats[STAT_ROCKETS], cl.stats[STAT_CELLS]);
+diff --git a/Quake/sv_phys.c b/Quake/sv_phys.c
 --- a/Quake/sv_phys.c
 +++ b/Quake/sv_phys.c
-@@ -1201,12 +1201,64 @@
- 	if (vkq_vr_af_ofs < 0)
- 		return NULL;
+@@ -2366,10 +2366,62 @@ static float *vkq_vr_attack_finished (edict_t *ent)
  	return &GetEdictFieldValue (ent, vkq_vr_af_ofs)->_float;
-+}
-+
+ }
+ 
 +/*
 + * R6.6 — THE DEAD TRIGGER. This is the root cause, and it is here.
 + *
@@ -173,8 +173,8 @@
 +		vkq_vr_af_cur = 0;
 +	}
 +	vkq_vr_af_lastt = t;
- }
- 
++}
++
 +static float vkq_vr_clock_sane (float v, float t)
 +{
 +	return (v > t + VKQ_VR_AF_MAX_AHEAD) ? 0.0f : v;
@@ -188,7 +188,7 @@
  }
  
  int VKQ_VR_ClockAvailable (void) { return vkq_vr_af_ofs >= 0; }
-@@ -1248,11 +1300,14 @@
+@@ -2411,11 +2463,14 @@ int VKQ_VR_ClockReady (int hand)
  	if (imp < 1 || imp > 8)
  		return 1;
  	t = (float)sv.qcvm.time;
@@ -205,7 +205,7 @@
  }
  
  // Before the think: put the clock belonging to the weapon that is about to act
-@@ -1267,6 +1322,19 @@
+@@ -2430,6 +2485,19 @@ static void VKQ_VR_PreThink (edict_t *ent, int num)
  	af = vkq_vr_attack_finished (ent);
  	if (!af)
  		return;
@@ -225,7 +225,7 @@
  	if (vkqvr_dualclock.value >= 0.5f && vkq_vr_dual_wield ())
  	{
  		// WHICH weapon is about to act, from the server's own state only: the
-@@ -1277,9 +1345,13 @@
+@@ -2440,9 +2508,13 @@ static void VKQ_VR_PreThink (edict_t *ent, int num)
  		const int imp = (pend >= 1 && pend <= 8) ? pend : VKQ_VR_WeaponImpulse ((int)ent->v.weapon);
  		if (imp >= 1 && imp <= 8 && imp != vkq_vr_af_cur)
  		{

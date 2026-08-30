@@ -1,6 +1,217 @@
+diff --git a/Quake/cl_parse.c b/Quake/cl_parse.c
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -1877,7 +1877,28 @@ void CL_ParseServerMessage (void)
+ 		case svc_print:
+ 			str = MSG_ReadString ();
+ 			if (!cls.demoseeking)
++			{
++#ifdef VKQ_VISIONOS
++				// overlay 0024 (VR R6.1 item 2) — MARK THIS AS THE GAME TALKING.
++				//
++				// Every QuakeC sprint/bprint reaches the client here and nowhere
++				// else: "You got the Rocket Launcher", the key pickups, the
++				// obituaries, a mod's own messages. Con_Printf is also how the
++				// engine talks to its console about resolutions, demos, cvars and
++				// (in a dev build) every command a bridge sends — and on a flat
++				// screen the notify overlay showing both is vanilla behaviour
++				// nobody minds in a corner. On a head-locked VR panel it is not:
++				// the first probe run put "vkqvrhandbtn: right buttons = 0x00"
++				// and a whole BODYNOW dump in front of the player in 3-inch
++				// letters. So the VR feed takes the marked lines only.
++				extern int con_vr_gameprint;
++				con_vr_gameprint++;
++				Con_Printf ("%s", str);
++				con_vr_gameprint--;
++#else
+ 				Con_Printf ("%s", str);
++#endif
++			}
+ 			break;
+ 
+ 		case svc_centerprint:
+diff --git a/Quake/console.c b/Quake/console.c
+--- a/Quake/console.c
++++ b/Quake/console.c
+@@ -67,6 +67,14 @@ char con_redirect_buffer[8192];
+ #define NUM_CON_TIMES 4
+ float con_times[NUM_CON_TIMES]; // realtime time the line was generated
+ 								// for transparent notify lines
++#ifdef VKQ_VISIONOS
++// overlay 0024 (VR R6.1 item 2). Nonzero while cl_parse.c is handling an
++// svc_print, i.e. while the text being printed is the GAME talking to the
++// player rather than the engine talking to its console. Recorded per notify
++// slot, and it is the only thing the VR message panel will show.
++int			con_vr_gameprint = 0;
++static byte con_notify_game[NUM_CON_TIMES];
++#endif
+ 
+ int con_vislines;
+ 
+@@ -1177,7 +1185,12 @@ static void Con_Print (const char *txt)
+ 			Con_Linefeed ();
+ 			// mark time for transparent overlay
+ 			if (con_current >= 0)
++			{
+ 				con_times[con_current % NUM_CON_TIMES] = realtime;
++#ifdef VKQ_VISIONOS
++				con_notify_game[con_current % NUM_CON_TIMES] = con_vr_gameprint ? 1 : 0;
++#endif
++			}
+ 		}
+ 
+ 		switch (c)
+@@ -2206,6 +2219,90 @@ void Con_DrawNotify (cb_context_t *cbx)
+ 	}
+ }
+ 
++#ifdef VKQ_VISIONOS
++/*
++==================
++VKQ_VR_NotifyText -- overlay 0024 (VR R6.1 item 2)
++
++The console NOTIFY lines — the second class of in-game message, and the reason
++this round covers a class rather than one symptom.
++
++the user's example ("this door is opened elsewhere") is a centerprint, but the
++messages a Quake player reads most often are not: "You got the Rocket Launcher",
++"You got the Silver Key", a death message, "secret found" — every one of those
++is an sprint/bprint, i.e. an svc_print that lands here and is drawn by
++Con_DrawNotify. In VR those were invisible for exactly the same reason
++centerprints were, and fixing only the one the user named would have left the
++common case broken.
++
++DUPLICATION IS NOT A RISK, and it is worth writing down why rather than adding a
++filter for it: Con_LogCenterPrint echoes every centerprint into the console and
++then calls Con_ClearNotify(), so the echo is deliberately removed from the
++notify window by the same function that wrote it. The two feeds cannot show the
++same text at the same time.
++
++ONE TERM IS ADDED to Con_DrawNotify's walk, and it is the difference between a
++feature and a nuisance: only lines marked `con_notify_game` — printed while
++cl_parse.c was handling an svc_print, i.e. while the GAME was talking — are
++returned. Everything else the console says (resolutions, demo chatter, a dev
++build's bridge command echoes) stays in the console. The first simulator probe of
++this feature made the case better than any argument: it put a BODYNOW
++diagnostics dump and "vkqvrhandbtn: right buttons = 0x00" on a head-locked panel
++in three-inch letters. On a flat screen that overlay is a corner nobody minds;
++at 1.75 m across 34 degrees it is the whole view.
++
++Otherwise the walk is Con_DrawNotify's term for term, including the
++`con_notifytime / (viewsize >= 130 ? 4 : 1)` scaling — one predicate, so the VR
++panel and the flat overlay agree about what is still current. Trailing padding
++is trimmed (console lines are con_linewidth wide and space-filled) and the high
++bit is KEPT: it selects Quake's alternate charset, and the shell's glyph atlas
++is the full 256, so a coloured line reads in VR the way it reads flat.
++==================
++*/
++int VKQ_VR_NotifyText (char *out, int len)
++{
++	int i, n = 0;
++	if (!out || len <= 0)
++		return 0;
++	out[0] = 0;
++	if (!con_initialized || con_text == NULL)
++		return 0;
++	for (i = con_current - NUM_CON_TIMES + 1; i <= con_current; i++)
++	{
++		const char *text;
++		float		time;
++		int			last, x;
++		if (i < 0)
++			continue;
++		time = con_times[i % NUM_CON_TIMES];
++		if (time == 0)
++			continue;
++		if (!con_notify_game[i % NUM_CON_TIMES])
++			continue; // engine chatter stays in the console — see the note above
++		time = realtime - time;
++		if (time > con_notifytime.value / (scr_viewsize.value >= 130 ? 4 : 1))
++			continue;
++		text = con_text + (i % con_totallines) * con_linewidth;
++		for (last = con_linewidth - 1; last >= 0 && (text[last] & 0x7F) <= ' '; last--)
++			;
++		if (last < 0)
++			continue; // a blank line carries no message
++		for (x = 0; x <= last; x++)
++		{
++			if (n >= len - 2)
++				break;
++			out[n++] = text[x];
++		}
++		if (n < len - 1)
++			out[n++] = '\n';
++	}
++	if (n > 0 && out[n - 1] == '\n')
++		n--; // no trailing blank row on the panel
++	out[n] = 0;
++	return n > 0;
++}
++#endif
++
+ /*
+ ================
+ Con_DrawInput -- johnfitz -- modified to allow insert editing
+diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -280,6 +280,52 @@ static void SCR_CheckDrawCenterString (cb_context_t *cbx)
+ 	SCR_DrawCenterString (cbx);
+ }
+ 
++#ifdef VKQ_VISIONOS
++/*
++==================
++VKQ_VR_CenterPrintText -- overlay 0024 (VR R6.1 item 2)
++
++The engine's live centerprint, handed to the shell so it can put it on a
++head-locked panel inside the VR space.
++
++the user, on 1.0.7.9: "when you get a message from the game (like if you try to
++open a door, and it'll say this is opened elsewhere) - hear the message sound,
++but can't read it." He is right and the cause is charter A9 working as designed:
++VR world frames suppress the ENTIRE engine 2D composite (SCR_DrawGUI's
++vkq_vr_suppress_2d early return), and SCR_CheckDrawCenterString lives inside it.
++The sound is a server event and survives; the text was drawn into a layer nobody
++was showing.
++
++The predicate below is SCR_CheckDrawCenterString's, term for term, minus the
++intermission clause: an intermission in VR is not a world frame at all
++(SCR_VRPresentMode -> REASON_INTERMISSION), so the whole flat composite —
++finale text included — is already on the world-locked panel and drawing it a
++second time on a head-locked one would double it. Keeping the predicate a copy
++of the drawer's rather than a fresh opinion is deliberate: the two must agree
++about what "there is a message right now" means, or VR and 2D will disagree
++about whether the player was told something.
++==================
++*/
++int VKQ_VR_CenterPrintText (char *out, int len)
++{
++	if (!out || len <= 0)
++		return 0;
++	out[0] = 0;
++	if (scr_centertime_off <= cl.time)
++		return 0;
++	if (cl.intermission)
++		return 0;
++	if (key_dest != key_game)
++		return 0;
++	if (cl.paused && (!cls.demoplayback || cls.demospeed > 0.f))
++		return 0;
++	if (!scr_centerstring[0])
++		return 0;
++	q_strlcpy (out, scr_centerstring, len);
++	return 1;
++}
++#endif
++
+ //=============================================================================
+ 
+ /*
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -5985,7 +5985,14 @@
+@@ -6136,7 +6136,14 @@ static int				  vkq_vr_yaw_init = 0;	 // adopt the player's facing on the first
  // (charter §7 — the archived-cvar trap that R1 already paid for once).
  cvar_t vkqvr_aimhand = {"vkqvr_aimhand", "1", CVAR_NONE};	  // 0 = left, 1 = right
  cvar_t vkqvr_movedir = {"vkqvr_movedir", "0", CVAR_NONE};	  // 0 head, 1 aim hand, 2 off hand
@@ -16,7 +227,7 @@
  cvar_t vkqvr_turnspeed = {"vkqvr_turnspeed", "140", CVAR_NONE};
  cvar_t vkqvr_deadzone = {"vkqvr_deadzone", "0.15", CVAR_NONE};
  cvar_t vkqvr_laser = {"vkqvr_laser", "1", CVAR_NONE};		 // 0 off, 1 beam+dot, 2 dot only
-@@ -6210,7 +6217,10 @@
+@@ -6361,7 +6368,10 @@ void VKQ_VR_RegisterCvars (void)
  // the console +cmd/-cmd path is normally the only writer. Driving them directly
  // is what makes a Sense trigger indistinguishable from a bound gamepad button
  // to CL_KeyState and CL_FinishMove.
@@ -28,7 +239,7 @@
  extern int		 in_impulse;
  extern cvar_t	 cl_forwardspeed, cl_movespeedkey, cl_alwaysrun;
  
-@@ -6242,6 +6252,8 @@
+@@ -6393,6 +6403,8 @@ void			VKQ_VR_ImmersiveReset (const char *why);
  // overlay 0023 (R6 part A) — the fire scheduler drives the same button latch the
  // rest of the input path does, and is defined above it.
  static void vkq_vr_hold (kbutton_t *b, qboolean down);
@@ -37,18 +248,17 @@
  
  // The hand a shot leaves from THIS frame. Normally the aim hand; in Immersive
  // dual wield it is whichever trigger is firing, so aim, muzzle, crosshair and
-@@ -6651,7 +6663,38 @@
- 		vkqvr_dualclock.value < 0.5f ? "off (cvar)" : (VKQ_VR_ClockAvailable () ? "on" : "unavailable (this progs has no attack_finished)"),
+@@ -6803,6 +6815,37 @@ void VKQ_VR_FireDebugString (char *out, int len)
  		cl.stats[STAT_SHELLS], cl.stats[STAT_NAILS], cl.stats[STAT_ROCKETS], cl.stats[STAT_CELLS]);
  }
-+
+ 
 +/*
 +==================
 +VKQ_VR_InputDebugString -- overlay 0024 (VR R6.1)
 +
 +The fixed Sense layout, as a line — because three of this round's four items are
 +input decisions and none of them is visible in a screenshot.
- 
++
 +  jump / down   the two kbuttons the layout drives. `down` is R6.1 item 1: swim
 +                down, on B, on either hand. A press must move it to 1 and a
 +                release back to 0, which is the whole assertion.
@@ -76,7 +286,7 @@
  // How far the wish vector was rotated this frame (charter A6's movement
  // direction). Published for the diagnostics line the simulator asserts on —
  // "the movement rotated" is otherwise invisible in a screenshot.
-@@ -7440,11 +7483,15 @@
+@@ -7591,11 +7634,15 @@ extern int vkq_ios_modal_active; // gl_screen.c — SCR_ModalMessage is blocking
  void VKQ_VR_UIInputPump (void)
  {
  	extern int	  VKQ_Sense_UISample (unsigned *btn, float *stick);
@@ -93,11 +303,10 @@
  	unsigned		btn[2] = {0u, 0u}, pressed;
  	float			stick[4] = {0.0f, 0.0f, 0.0f, 0.0f};
  	float			x, y;
-@@ -7478,6 +7525,31 @@
- 	pressed = (btn[0] & ~prev[0]) | (btn[1] & ~prev[1]);
+@@ -7630,6 +7677,31 @@ void VKQ_VR_UIInputPump (void)
  	prev[0] = btn[0];
  	prev[1] = btn[1];
-+
+ 
 +	/*
 +	 * R6.2 item 3 — THE SHEET-CLOSE GESTURE IS GONE, DELIBERATELY.
 +	 *
@@ -122,10 +331,11 @@
 +	 */
 +	if (sheet)
 +		return; // suppress MENU keys only: arrows/enter/escape would drive a screen nobody can see
- 
++
  	// Chirality-appropriate and hand-agnostic: trigger or A on EITHER controller
  	// is yes/select, B or menu on either is no/back. A player who put the pair
-@@ -7572,6 +7644,7 @@
+ 	// down left-handed still gets out of the dialog.
+@@ -7723,6 +7795,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  				vkq_vr_owned_buttons = 0;
  				vkq_vr_hold (&in_attack, false);
  				vkq_vr_hold (&in_jump, false);
@@ -133,7 +343,7 @@
  				// R3 release-on-doff (charter A7): the controllers have gone, so
  				// every grip goes with them and Immersive hands the weapon back.
  				// Never leave a player axe-locked because a battery died.
-@@ -7600,6 +7673,7 @@
+@@ -7751,6 +7824,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		// Nothing below this line may reach gameplay while a menu is up.
  		vkq_vr_hold (&in_attack, false);
  		vkq_vr_hold (&in_jump, false);
@@ -141,7 +351,7 @@
  		// A menu opening mid-hold must not leave a grip latched, or Immersive
  		// would stow on the release the player made to press a menu button.
  		vkq_vr_grip_release_all ("menu opened");
-@@ -7661,6 +7735,34 @@
+@@ -7812,6 +7886,34 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		VKQ_VR_Haptic (aim, 0.5f, 0.05f, "recenter");
  	}
  
@@ -176,7 +386,7 @@
  	// MOVE — same units and speed rule as IN_JoyMove, so a Sense stick and a
  	// gamepad stick move the player identically.
  	mx = vkq_vr_stick_axis (ls[0]);
-@@ -7742,9 +7844,35 @@
+@@ -7893,9 +7995,35 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  			cycleArmed = 1;
  	}
  
@@ -213,7 +423,7 @@
  	VKQ_VR_UpdateHolsters (now);
  	(void)ry;
  	(void)rOff;
-@@ -8613,10 +8741,101 @@
+@@ -8764,10 +8892,101 @@ static qmodel_t *vkq_vr_weapon_model (int itembit)
  
  static qboolean vkq_vr_owns (int itembit) { return itembit != 0 && (cl.items & itembit) != 0; }
  
@@ -316,7 +526,7 @@
  	for (i = 0; i < 2; i++)
  	{
  		if (vkq_vr_holster_item[i] && !vkq_vr_owns (vkq_vr_holster_item[i]))
-@@ -8624,9 +8843,37 @@
+@@ -8775,9 +8994,37 @@ static void vkq_vr_v2_validate (void)
  		if (vkq_vr_held_item[i] && !vkq_vr_owns (vkq_vr_held_item[i]))
  			vkq_vr_held_item[i] = 0;
  	}
@@ -357,17 +567,10 @@
  }
  
  void VKQ_VR_ImmersiveReset (const char *why)
-@@ -8778,6 +9025,50 @@
- 			const byte idx = p->data[y * w + x];
- 			out[y * maxw + x] = (idx == 255) ? 0u : (d_8to24table[idx] | 0xFF000000u);
- 		}
-+	if (ow)
-+		*ow = w;
-+	if (oh)
-+		*oh = h;
-+	return 1;
-+}
-+
+@@ -8936,6 +9183,50 @@ int VKQ_VR_HudIcon (const char *name, unsigned *out, int maxw, int maxh, int *ow
+ 	return 1;
+ }
+ 
 +/*
 +==================
 +VKQ_VR_Conchars -- overlay 0024 (VR R6.1 item 2)
@@ -405,10 +608,17 @@
 +	for (y = 0; y < h; y++)
 +		for (x = 0; x < w; x++)
 +			out[y * maxw + x] = d_8to24table_conchars[data[y * w + x]];
- 	if (ow)
- 		*ow = w;
- 	if (oh)
-@@ -8881,7 +9172,7 @@
++	if (ow)
++		*ow = w;
++	if (oh)
++		*oh = h;
++	return 1;
++}
++
+ /*
+ ==================
+ VKQ_VR_HudIcons -- overlay 0022 (VR R5 item 5)
+@@ -9032,7 +9323,7 @@ void VKQ_VR_CycleWeapon (qboolean next)
  			continue;
  		if (cand == vkq_vr_held_item_get (hand ^ 1) || cand == vkq_vr_holster_item[0] || cand == vkq_vr_holster_item[1])
  			continue;
@@ -417,7 +627,7 @@
  		in_impulse = vkq_vr_weapon_impulse (cand);
  		vkq_vr_fire_note_pending (cand);
  		vkq_vr_holster_note ("cycle -> imp%d (%s hand)", in_impulse, hand ? "right" : "left");
-@@ -9194,11 +9485,11 @@
+@@ -9345,11 +9636,11 @@ void VKQ_VR_HolsterDebugString (char *out, int len)
  	if (!out || len <= 0)
  		return;
  	q_snprintf (
@@ -431,7 +641,7 @@
  		vkq_vr_shoot_hand < 0 ? "-" : (vkq_vr_shoot_hand ? "right" : "left"), vkq_vr_zone_log);
  }
  
-@@ -9301,7 +9592,10 @@
+@@ -9452,7 +9743,10 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  	// death or a new game, so it is a "per life" behaviour without a death hook.
  	if (!vkq_vr_v2_started && !vkq_vr_held_item[0] && !vkq_vr_held_item[1] && cl.stats[STAT_ACTIVEWEAPON] && vkq_vr_owns (cl.stats[STAT_ACTIVEWEAPON]))
  	{
@@ -443,7 +653,7 @@
  		vkq_vr_v2_started = 1;
  	}
  	if (!cl.stats[STAT_ACTIVEWEAPON] || cl.stats[STAT_HEALTH] <= 0)
-@@ -9365,7 +9659,7 @@
+@@ -9516,7 +9810,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  				}
  				else
  				{
@@ -452,7 +662,7 @@
  					*slot = 0;
  					VKQ_VR_Haptic (hand, 0.7f, 0.04f, "take");
  					vkq_vr_holster_note ("TAKE imp%d from %s -> %s hand", vkq_vr_weapon_impulse (vkq_vr_held_item[hand]), vkq_vr_zone_names[zone],
-@@ -9374,7 +9668,7 @@
+@@ -9525,7 +9819,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  			}
  			else if (held && !*slot)
  			{
@@ -461,7 +671,7 @@
  				vkq_vr_held_item[hand] = 0;
  				VKQ_VR_Haptic (hand, 0.5f, 0.04f, "stow");
  				vkq_vr_holster_note ("STOW imp%d into %s", vkq_vr_weapon_impulse (*slot), vkq_vr_zone_names[zone]);
-@@ -9390,8 +9684,8 @@
+@@ -9541,8 +9835,8 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  				else
  				{
  					int t = *slot;
@@ -472,222 +682,13 @@
  					VKQ_VR_Haptic (hand, 0.8f, 0.05f, "swap");
  					vkq_vr_holster_note ("SWAP %s: imp%d out, imp%d in", vkq_vr_zone_names[zone], vkq_vr_weapon_impulse (*slot),
  						vkq_vr_weapon_impulse (t));
---- a/Quake/gl_screen.c
-+++ b/Quake/gl_screen.c
-@@ -269,7 +269,53 @@
- 		return;
- 
- 	SCR_DrawCenterString (cbx);
-+}
-+
-+#ifdef VKQ_VISIONOS
-+/*
-+==================
-+VKQ_VR_CenterPrintText -- overlay 0024 (VR R6.1 item 2)
-+
-+The engine's live centerprint, handed to the shell so it can put it on a
-+head-locked panel inside the VR space.
-+
-+the user, on 1.0.7.9: "when you get a message from the game (like if you try to
-+open a door, and it'll say this is opened elsewhere) - hear the message sound,
-+but can't read it." He is right and the cause is charter A9 working as designed:
-+VR world frames suppress the ENTIRE engine 2D composite (SCR_DrawGUI's
-+vkq_vr_suppress_2d early return), and SCR_CheckDrawCenterString lives inside it.
-+The sound is a server event and survives; the text was drawn into a layer nobody
-+was showing.
-+
-+The predicate below is SCR_CheckDrawCenterString's, term for term, minus the
-+intermission clause: an intermission in VR is not a world frame at all
-+(SCR_VRPresentMode -> REASON_INTERMISSION), so the whole flat composite —
-+finale text included — is already on the world-locked panel and drawing it a
-+second time on a head-locked one would double it. Keeping the predicate a copy
-+of the drawer's rather than a fresh opinion is deliberate: the two must agree
-+about what "there is a message right now" means, or VR and 2D will disagree
-+about whether the player was told something.
-+==================
-+*/
-+int VKQ_VR_CenterPrintText (char *out, int len)
-+{
-+	if (!out || len <= 0)
-+		return 0;
-+	out[0] = 0;
-+	if (scr_centertime_off <= cl.time)
-+		return 0;
-+	if (cl.intermission)
-+		return 0;
-+	if (key_dest != key_game)
-+		return 0;
-+	if (cl.paused && (!cls.demoplayback || cls.demospeed > 0.f))
-+		return 0;
-+	if (!scr_centerstring[0])
-+		return 0;
-+	q_strlcpy (out, scr_centerstring, len);
-+	return 1;
- }
-+#endif
- 
- //=============================================================================
- 
---- a/Quake/console.c
-+++ b/Quake/console.c
-@@ -60,6 +60,14 @@
- #define NUM_CON_TIMES 4
- float con_times[NUM_CON_TIMES]; // realtime time the line was generated
- 								// for transparent notify lines
-+#ifdef VKQ_VISIONOS
-+// overlay 0024 (VR R6.1 item 2). Nonzero while cl_parse.c is handling an
-+// svc_print, i.e. while the text being printed is the GAME talking to the
-+// player rather than the engine talking to its console. Recorded per notify
-+// slot, and it is the only thing the VR message panel will show.
-+int			con_vr_gameprint = 0;
-+static byte con_notify_game[NUM_CON_TIMES];
-+#endif
- 
- int con_vislines;
- 
-@@ -430,7 +438,12 @@
- 			Con_Linefeed ();
- 			// mark time for transparent overlay
- 			if (con_current >= 0)
-+			{
- 				con_times[con_current % NUM_CON_TIMES] = realtime;
-+#ifdef VKQ_VISIONOS
-+				con_notify_game[con_current % NUM_CON_TIMES] = con_vr_gameprint ? 1 : 0;
-+#endif
-+			}
- 		}
- 
- 		switch (c)
-@@ -1138,7 +1151,91 @@
- 	}
- }
- 
-+#ifdef VKQ_VISIONOS
- /*
-+==================
-+VKQ_VR_NotifyText -- overlay 0024 (VR R6.1 item 2)
-+
-+The console NOTIFY lines — the second class of in-game message, and the reason
-+this round covers a class rather than one symptom.
-+
-+the user's example ("this door is opened elsewhere") is a centerprint, but the
-+messages a Quake player reads most often are not: "You got the Rocket Launcher",
-+"You got the Silver Key", a death message, "secret found" — every one of those
-+is an sprint/bprint, i.e. an svc_print that lands here and is drawn by
-+Con_DrawNotify. In VR those were invisible for exactly the same reason
-+centerprints were, and fixing only the one the user named would have left the
-+common case broken.
-+
-+DUPLICATION IS NOT A RISK, and it is worth writing down why rather than adding a
-+filter for it: Con_LogCenterPrint echoes every centerprint into the console and
-+then calls Con_ClearNotify(), so the echo is deliberately removed from the
-+notify window by the same function that wrote it. The two feeds cannot show the
-+same text at the same time.
-+
-+ONE TERM IS ADDED to Con_DrawNotify's walk, and it is the difference between a
-+feature and a nuisance: only lines marked `con_notify_game` — printed while
-+cl_parse.c was handling an svc_print, i.e. while the GAME was talking — are
-+returned. Everything else the console says (resolutions, demo chatter, a dev
-+build's bridge command echoes) stays in the console. The first simulator probe of
-+this feature made the case better than any argument: it put a BODYNOW
-+diagnostics dump and "vkqvrhandbtn: right buttons = 0x00" on a head-locked panel
-+in three-inch letters. On a flat screen that overlay is a corner nobody minds;
-+at 1.75 m across 34 degrees it is the whole view.
-+
-+Otherwise the walk is Con_DrawNotify's term for term, including the
-+`con_notifytime / (viewsize >= 130 ? 4 : 1)` scaling — one predicate, so the VR
-+panel and the flat overlay agree about what is still current. Trailing padding
-+is trimmed (console lines are con_linewidth wide and space-filled) and the high
-+bit is KEPT: it selects Quake's alternate charset, and the shell's glyph atlas
-+is the full 256, so a coloured line reads in VR the way it reads flat.
-+==================
-+*/
-+int VKQ_VR_NotifyText (char *out, int len)
-+{
-+	int i, n = 0;
-+	if (!out || len <= 0)
-+		return 0;
-+	out[0] = 0;
-+	if (!con_initialized || con_text == NULL)
-+		return 0;
-+	for (i = con_current - NUM_CON_TIMES + 1; i <= con_current; i++)
-+	{
-+		const char *text;
-+		float		time;
-+		int			last, x;
-+		if (i < 0)
-+			continue;
-+		time = con_times[i % NUM_CON_TIMES];
-+		if (time == 0)
-+			continue;
-+		if (!con_notify_game[i % NUM_CON_TIMES])
-+			continue; // engine chatter stays in the console — see the note above
-+		time = realtime - time;
-+		if (time > con_notifytime.value / (scr_viewsize.value >= 130 ? 4 : 1))
-+			continue;
-+		text = con_text + (i % con_totallines) * con_linewidth;
-+		for (last = con_linewidth - 1; last >= 0 && (text[last] & 0x7F) <= ' '; last--)
-+			;
-+		if (last < 0)
-+			continue; // a blank line carries no message
-+		for (x = 0; x <= last; x++)
-+		{
-+			if (n >= len - 2)
-+				break;
-+			out[n++] = text[x];
-+		}
-+		if (n < len - 1)
-+			out[n++] = '\n';
-+	}
-+	if (n > 0 && out[n - 1] == '\n')
-+		n--; // no trailing blank row on the panel
-+	out[n] = 0;
-+	return n > 0;
-+}
-+#endif
-+
-+/*
- ================
- Con_DrawInput -- johnfitz -- modified to allow insert editing
- 
---- a/Quake/cl_parse.c
-+++ b/Quake/cl_parse.c
-@@ -1815,7 +1815,28 @@
- 		case svc_print:
- 			str = MSG_ReadString ();
- 			if (!cls.demoseeking)
-+			{
-+#ifdef VKQ_VISIONOS
-+				// overlay 0024 (VR R6.1 item 2) — MARK THIS AS THE GAME TALKING.
-+				//
-+				// Every QuakeC sprint/bprint reaches the client here and nowhere
-+				// else: "You got the Rocket Launcher", the key pickups, the
-+				// obituaries, a mod's own messages. Con_Printf is also how the
-+				// engine talks to its console about resolutions, demos, cvars and
-+				// (in a dev build) every command a bridge sends — and on a flat
-+				// screen the notify overlay showing both is vanilla behaviour
-+				// nobody minds in a corner. On a head-locked VR panel it is not:
-+				// the first probe run put "vkqvrhandbtn: right buttons = 0x00"
-+				// and a whole BODYNOW dump in front of the player in 3-inch
-+				// letters. So the VR feed takes the marked lines only.
-+				extern int con_vr_gameprint;
-+				con_vr_gameprint++;
-+				Con_Printf ("%s", str);
-+				con_vr_gameprint--;
-+#else
- 				Con_Printf ("%s", str);
-+#endif
-+			}
- 			break;
- 
- 		case svc_centerprint:
+diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
 --- a/Quake/host_cmd.c
 +++ b/Quake/host_cmd.c
-@@ -1054,6 +1054,30 @@
- 		return;
+@@ -1495,6 +1495,30 @@ static void Host_Map_f (void)
  
  	cls.demonum = -1; // stop demo loop in case this fails
-+
+ 
 +#ifdef VKQ_VISIONOS
 +	/*
 +	 * R6.4 item 3 — A NEW GAME EMPTIES THE BELT.
@@ -711,6 +712,7 @@
 +		VKQ_VR_ImmersiveReset ("new game");
 +	}
 +#endif
- 
++
  	CL_Disconnect ();
  	Host_ShutdownServer (false);
+ 

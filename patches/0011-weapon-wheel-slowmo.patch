@@ -9,9 +9,10 @@ accumtime and would otherwise keep monsters and physics at full speed.
 Gated to a local single-player server so multiplayer and demos are
 untouched.
 
+diff --git a/Quake/host.c b/Quake/host.c
 --- a/Quake/host.c
 +++ b/Quake/host.c
-@@ -68,6 +68,16 @@
+@@ -70,6 +70,16 @@ cvar_t host_maxfps = {"host_maxfps", "200", CVAR_ARCHIVE};	// johnfitz
  cvar_t host_phys_max_ticrate = {"host_phys_max_ticrate", "0", CVAR_NONE}; // vso = [0 = disabled; MAX_PHYSICS_FREQ]
  
  cvar_t host_timescale = {"host_timescale", "0", CVAR_NONE}; // johnfitz
@@ -28,7 +29,7 @@ untouched.
  cvar_t max_edicts = {"max_edicts", "32000", CVAR_NONE};		// vso -- changed from 8192 to 32000 = MAX_EDICTS, because there is no performance impact to do so
  cvar_t cl_nocsqc = {"cl_nocsqc", "0", CVAR_NONE};			// spike -- blocks the loading of any csqc modules
  
-@@ -363,6 +373,9 @@
+@@ -367,6 +377,9 @@ void Host_InitLocal (void)
  	Cvar_RegisterVariable (&host_phys_max_ticrate); // vso
  	Cvar_SetCallback (&host_phys_max_ticrate, Phys_Ticrate_f);
  	Cvar_RegisterVariable (&host_timescale); // johnfitz
@@ -38,11 +39,10 @@ untouched.
  
  	Cvar_RegisterVariable (&cl_nocsqc);	 // spike
  	Cvar_RegisterVariable (&max_edicts); // johnfitz
-@@ -740,6 +753,25 @@
- 		host_frametime = host_framerate.value;
+@@ -745,6 +758,25 @@ qboolean Host_FilterTime (float time)
  	else if (host_maxfps.value)								  // don't allow really long or short frames
  		host_frametime = CLAMP (0.0001, host_frametime, 0.1); // johnfitz -- use CLAMP
-+
+ 
 +#ifdef VKQ_IOS
 +	// Weapon-wheel slow motion, eased with the REAL delta so the ramp is
 +	// frame-rate independent. Single player only: on a remote server the world
@@ -61,10 +61,11 @@ untouched.
 +		host_frametime *= vkq_wheel_scale;
 +	}
 +#endif
- 
++
  	return true;
  }
-@@ -1036,6 +1068,12 @@
+ 
+@@ -1104,6 +1136,12 @@ static void _Host_Frame (double time)
  				host_frametime *= host_timescale.value;
  			else if (host_framerate.value)
  				host_frametime = host_framerate.value;

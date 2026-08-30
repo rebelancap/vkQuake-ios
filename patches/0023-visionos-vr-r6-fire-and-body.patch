@@ -1,6 +1,7 @@
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -6121,6 +6121,30 @@
+@@ -6272,6 +6272,30 @@ cvar_t vkqvr_holscale = {"vkqvr_holscale", "0.80", CVAR_NONE};
  // slider that moved only the drawn model would re-create the bug it exists to
  // work around.
  cvar_t vkqvr_holfwd = {"vkqvr_holfwd", "0", CVAR_NONE};
@@ -31,7 +32,7 @@
  
  void VKQ_VR_RegisterCvars (void)
  {
-@@ -6146,6 +6170,9 @@
+@@ -6297,6 +6321,9 @@ void VKQ_VR_RegisterCvars (void)
  	Cvar_RegisterVariable (&vkqvr_xhairthick);
  	Cvar_RegisterVariable (&vkqvr_holscale);
  	Cvar_RegisterVariable (&vkqvr_holfwd);
@@ -41,7 +42,7 @@
  	Cvar_RegisterVariable (&vkqvr_flick_y);
  	Cvar_RegisterVariable (&vkqvr_flick_x);
  	Cvar_RegisterVariable (&vkqvr_flick_off);
-@@ -6194,7 +6221,7 @@
+@@ -6345,7 +6372,7 @@ void	 VKQ_VR_AimAngles (float out[3]);
  float	 VKQ_VR_WeaponMuzzle (void);
  qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
  qboolean VKQ_VR_AimRay (vec3_t org, vec3_t dir);
@@ -50,7 +51,7 @@
  // overlay 0020 — R3's grip machine, driven from VKQ_VR_ApplyHandInput below and
  // defined at the end of the file with the rest of the holster geometry.
  static void VKQ_VR_UpdateHolsters (double now);
-@@ -6212,13 +6239,419 @@
+@@ -6363,6 +6390,9 @@ static void		vkq_vr_holster_note (const char *fmt, ...) FUNC_PRINTF (1, 2);
  void			VKQ_VR_CycleWeapon (qboolean next);
  int				VKQ_VR_HideViewent (void);
  void			VKQ_VR_ImmersiveReset (const char *why);
@@ -60,10 +61,10 @@
  
  // The hand a shot leaves from THIS frame. Normally the aim hand; in Immersive
  // dual wield it is whichever trigger is firing, so aim, muzzle, crosshair and
- // the barrel-true projectile origin all follow the hand that pulled. One
+@@ -6370,6 +6400,409 @@ void			VKQ_VR_ImmersiveReset (const char *why);
  // accessor, so they cannot disagree.
  static int vkq_vr_active_hand (void) { return (vkq_vr_shoot_hand >= 0) ? vkq_vr_shoot_hand : vkq_vr_aim_hand (); }
-+
+ 
 +// ============================================================================
 +// overlay 0023 — R6 part A: THE FIRE SCHEDULER
 +//
@@ -232,7 +233,7 @@
 +		}
 +	}
 +}
- 
++
 +// Anything OUTSIDE the scheduler that sends a weapon-select impulse says so
 +// here, so the match gate can see the switch it would otherwise be blind to.
 +static void vkq_vr_fire_note_pending (int itembit)
@@ -470,7 +471,7 @@
  // How far the wish vector was rotated this frame (charter A6's movement
  // direction). Published for the diagnostics line the simulator asserts on —
  // "the movement rotated" is otherwise invisible in a screenshot.
-@@ -6368,6 +6801,117 @@
+@@ -6519,6 +6952,117 @@ void VKQ_VR_GetStats (int *met, int *engine_timeouts, int *shell_timeouts)
  // yaw is what the base view matrix rotates by; the head angles are what the SENT
  // viewangles carry, so the server aims where the player is actually looking.
  void  VKQ_VR_SetHeadAngles (float pitch, float yaw) { vkq_vr_head_pitch = pitch, vkq_vr_head_yaw = yaw; }
@@ -588,7 +589,7 @@
  void  VKQ_VR_SetBodyYaw (float yaw) { vkq_vr_body_yaw = anglemod (yaw); }
  float VKQ_VR_GetBodyYaw (void) { return vkq_vr_body_yaw; }
  void  VKQ_VR_SetHeightOffset (float units) { vkq_vr_height_ofs = units; }
-@@ -7076,41 +7620,37 @@
+@@ -7227,41 +7771,37 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  	// hand. An empty hand's trigger is SUPPRESSED — never fire an invisible
  	// weapon — and the off-hand trigger falls back to jump when that hand is
  	// empty, so the layout does not lose a button just because you are carrying
@@ -648,7 +649,7 @@
  	}
  
  	// Right stick click = recenter (hold-free: nothing else is on that click).
-@@ -7118,7 +7658,7 @@
+@@ -7269,7 +7809,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  	{
  		extern void VKQ_VR_Recenter (void);
  		VKQ_VR_Recenter ();
@@ -657,7 +658,7 @@
  	}
  
  	// MOVE — same units and speed rule as IN_JoyMove, so a Sense stick and a
-@@ -7153,7 +7693,7 @@
+@@ -7304,7 +7844,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  			{
  				cl.viewangles[YAW] -= (rs[0] > 0.0f ? 1.0f : -1.0f) * vkqvr_snapturn.value;
  				snapArmed = 0;
@@ -666,7 +667,7 @@
  			}
  			if (fabsf (rs[0]) < 0.4f)
  				snapArmed = 1;
-@@ -7196,7 +7736,7 @@
+@@ -7347,7 +7887,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		{
  			VKQ_VR_CycleWeapon (rs[1] > 0.0f);
  			cycleArmed = 0;
@@ -675,7 +676,7 @@
  		}
  		if (ay < (emptyHand ? 0.30f : fo))
  			cycleArmed = 1;
-@@ -7811,6 +8351,12 @@
+@@ -7962,6 +8502,12 @@ void VKQ_VR_CrosshairDebugString (char *out, int len)
  // and stature stays correct on the way.
  // ---------------------------------------------------------------------------
  #define VKQ_VR_QUAKE_EYE_UNITS 46.0f // 24 hull mins + 22 view_ofs, above the floor
@@ -688,7 +689,7 @@
  
  static float vkq_vr_standing_eye_m = 0.0f; // published by the shell each frame
  
-@@ -7840,14 +8386,42 @@
+@@ -7991,14 +8537,42 @@ void VKQ_VR_UpdateEyeRise (void)
  {
  	float  want, limit, dt;
  	double now;
@@ -732,7 +733,7 @@
  	else
  		want = vkqvr_eyerise.value; // no tracked height yet: the measured default
  	want = CLAMP (-16.0f, want, 48.0f);
-@@ -7891,8 +8465,8 @@
+@@ -8042,8 +8616,8 @@ void VKQ_VR_EyeHeightDebugString (char *out, int len)
  	total = VKQ_VR_QUAKE_EYE_UNITS + vkq_vr_eye_rise + vkq_vr_height_ofs;
  	q_snprintf (
  		out, len,
@@ -743,7 +744,7 @@
  		total / (vkq_vr_worldscale > 1.0f ? vkq_vr_worldscale : 39.37f), vkq_vr_eye_rise, vkq_vr_eye_rise_raw, vkq_vr_eye_rise_limit, vkq_vr_height_ofs);
  }
  
-@@ -7986,35 +8560,15 @@
+@@ -8137,35 +8711,15 @@ static float  vkq_vr_hol_scale[2];
  static int	  vkq_vr_hol_live[2];
  
  static qboolean vkq_vr_immersive (void) { return vkqvr_style.value >= 0.5f; }
@@ -786,7 +787,7 @@
  
  static const char *vkq_vr_weapon_modelname (int itembit)
  {
-@@ -8285,6 +8839,10 @@
+@@ -8436,6 +8990,10 @@ void VKQ_VR_HudIcons (char *health, char *armour, char *ammo0, char *ammo1, int
  }
  
  int VKQ_VR_HeldItem (int hand) { return vkq_vr_held_item_get (hand); }
@@ -797,7 +798,7 @@
  int VKQ_VR_HolsterItem (int zone) { return (zone >= 0 && zone < 2) ? vkq_vr_holster_item[zone] : 0; }
  
  /*
-@@ -8307,6 +8865,9 @@
+@@ -8458,6 +9016,9 @@ void VKQ_VR_CycleWeapon (qboolean next)
  	if (!vkq_vr_immersive ())
  	{
  		in_impulse = next ? 10 : 12;
@@ -807,7 +808,7 @@
  		return;
  	}
  	for (i = 0; i < 8; i++)
-@@ -8322,6 +8883,7 @@
+@@ -8473,6 +9034,7 @@ void VKQ_VR_CycleWeapon (qboolean next)
  			continue;
  		vkq_vr_held_item[hand] = cand;
  		in_impulse = vkq_vr_weapon_impulse (cand);
@@ -815,7 +816,7 @@
  		vkq_vr_holster_note ("cycle -> imp%d (%s hand)", in_impulse, hand ? "right" : "left");
  		return;
  	}
-@@ -8344,7 +8906,7 @@
+@@ -8495,7 +9057,7 @@ reads as "stowed" at a glance and nothing sticks into the player's leg.
  */
  int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  {
@@ -824,7 +825,7 @@
  	int		  n = 0, z;
  	vkq_vr_hol_live[0] = vkq_vr_hol_live[1] = 0;
  	if (!vkq_vr_active || !vkq_vr_have || !vkq_vr_immersive () || max <= 0)
-@@ -8404,7 +8966,15 @@
+@@ -8555,7 +9117,15 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  		// Muzzle DOWN: the model's +x faces the floor and its up faces the way
  		// the body does, so the weapon hangs the way one hangs on a belt.
  		fwd[0] = 0.0f, fwd[1] = 0.0f, fwd[2] = -1.0f;
@@ -841,7 +842,7 @@
  		right[2] = 0.0f;
  		if (VectorLength (right) < 0.01f)
  			right[0] = 1.0f, right[1] = 0.0f, right[2] = 0.0f;
-@@ -8420,7 +8990,7 @@
+@@ -8571,7 +9141,7 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  		// exact here and need no inference: pitch 90 (barrel down), yaw = the
  		// body yaw, roll 0 — which reproduces this basis by construction.
  		ang[PITCH] = 90.0f;
@@ -850,7 +851,7 @@
  		ang[ROLL] = 0.0f;
  		// Holster scale: smaller than in the hand, so a stowed weapon reads as
  		// stowed and two of them do not collide with the player's own legs — but
-@@ -8538,25 +9108,35 @@
+@@ -8689,25 +9259,35 @@ static void vkq_vr_zone_centre (int z, float out[3])
  	// the same amount, because both read this function. +Z is BACK in the player
  	// frame, so a positive (forward) setting subtracts.
  	const float fwd = -CLAMP (-0.4f, vkqvr_holfwd.value, 0.4f) * ws;
@@ -892,7 +893,7 @@
  }
  
  static float vkq_vr_zone_radius (int z)
-@@ -8653,6 +9233,7 @@
+@@ -8804,6 +9384,7 @@ static void vkq_vr_grip_release_all (const char *why)
  		if (vkq_vr_stowed)
  		{
  			in_impulse = vkq_vr_stowed;
@@ -900,7 +901,7 @@
  			handedBack = vkq_vr_stowed;
  		}
  		vkq_vr_out = 1;
-@@ -8670,6 +9251,10 @@
+@@ -8821,6 +9402,10 @@ static void vkq_vr_grip_release_all (const char *why)
  
  void VKQ_VR_HolsterReset (void)
  {
@@ -911,7 +912,7 @@
  	memset (vkq_vr_grip, 0, sizeof (vkq_vr_grip));
  	vkq_vr_grip[0].zoneAt = vkq_vr_grip[0].zoneNow = -1;
  	vkq_vr_grip[1].zoneAt = vkq_vr_grip[1].zoneNow = -1;
-@@ -8754,7 +9339,7 @@
+@@ -8905,7 +9490,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  		{
  			if (zone >= 0)
  			{
@@ -920,7 +921,7 @@
  				vkq_vr_holster_note ("%s hand at %s (%s)", hand ? "right" : "left", vkq_vr_zone_names[zone],
  					vkq_vr_holster_item[zone] ? "occupied" : "empty");
  			}
-@@ -8775,14 +9360,14 @@
+@@ -8926,14 +9511,14 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  				// TAKE — unless the other hand already has that weapon out.
  				if (*slot == vkq_vr_held_item[hand ^ 1])
  				{
@@ -937,7 +938,7 @@
  					vkq_vr_holster_note ("TAKE imp%d from %s -> %s hand", vkq_vr_weapon_impulse (vkq_vr_held_item[hand]), vkq_vr_zone_names[zone],
  						hand ? "right" : "left");
  				}
-@@ -8791,7 +9376,7 @@
+@@ -8942,7 +9527,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  			{
  				*slot = held;
  				vkq_vr_held_item[hand] = 0;
@@ -946,7 +947,7 @@
  				vkq_vr_holster_note ("STOW imp%d into %s", vkq_vr_weapon_impulse (*slot), vkq_vr_zone_names[zone]);
  			}
  			else if (held && *slot)
-@@ -8799,7 +9384,7 @@
+@@ -8950,7 +9535,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  				// SWAP (our addition to the user's spec — see VR-R4-NOTES).
  				if (*slot == vkq_vr_held_item[hand ^ 1])
  				{
@@ -955,7 +956,7 @@
  					vkq_vr_holster_note ("swap refused: imp%d already in the other hand", vkq_vr_weapon_impulse (*slot));
  				}
  				else
-@@ -8807,7 +9392,7 @@
+@@ -8958,7 +9543,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  					int t = *slot;
  					*slot = held;
  					vkq_vr_held_item[hand] = t;
@@ -964,7 +965,7 @@
  					vkq_vr_holster_note ("SWAP %s: imp%d out, imp%d in", vkq_vr_zone_names[zone], vkq_vr_weapon_impulse (*slot),
  						vkq_vr_weapon_impulse (t));
  				}
-@@ -8823,10 +9408,27 @@
+@@ -8974,10 +9559,27 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  	// Keep the server consistent, silently. It always has an active weapon; if
  	// nothing is in the aim hand we simply do not draw one, and if the aim hand
  	// holds something the server does not, we ask for it.
@@ -993,7 +994,7 @@
  	}
  }
  
-@@ -8883,7 +9485,7 @@
+@@ -9034,7 +9636,7 @@ static void VKQ_VR_UpdateHolsters (double now)
  		{
  			if (zone >= 0)
  			{
@@ -1002,7 +1003,7 @@
  				vkq_vr_holster_note ("%s hand entered %s", hand == aim ? "aim" : "off", vkq_vr_zone_names[zone]);
  			}
  			g->zoneNow = zone;
-@@ -8910,7 +9512,8 @@
+@@ -9061,7 +9663,8 @@ static void VKQ_VR_UpdateHolsters (double now)
  				// there is no reason for a gap.
  				const int imp = vkq_vr_zone_impulse (g->zoneAt);
  				in_impulse = imp;
@@ -1012,7 +1013,7 @@
  				vkq_vr_holster_note ("select imp%d from %s (%.2fs)", imp, vkq_vr_zone_names[g->zoneAt], held);
  			}
  			g->zoneAt = -1;
-@@ -8923,7 +9526,7 @@
+@@ -9074,7 +9677,7 @@ static void VKQ_VR_UpdateHolsters (double now)
  			{
  				vkq_vr_zone_set_impulse (g->zoneAt, imp);
  				g->assigned = 1;
@@ -1021,13 +1022,72 @@
  				vkq_vr_holster_note ("ASSIGNED imp%d to %s", imp, vkq_vr_zone_names[g->zoneAt]);
  			}
  		}
+diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
+--- a/Quake/host_cmd.c
++++ b/Quake/host_cmd.c
+@@ -975,6 +975,55 @@ Host_God_f
+ Sets client to godmode
+ ==================
+ */
++#ifdef VKQ_IOS
++/*
++==================
++vkquake-ios overlay 0023 — R6 part C6: the Cheats rows read GROUND TRUTH.
++
++A settings switch that only remembers what it last sent is a lie the first time
++anything else changes the state — a fresh level clears FL_GODMODE, an old save
++restores it, and the console `god` command exists. The local server is always
++in-process on this platform, so the flag on the player edict is readable
++directly and the switch shows what the game IS rather than what the UI asked
++for. The setter uses `god 1`/`god 0` (johnfitz's explicit form, right below)
++rather than the bare toggle, so re-asserting can never invert the state.
++==================
++*/
++static edict_t *VKQ_iOS_LocalPlayerEdict (void)
++{
++	if (!sv.active || !svs.clients || svs.maxclients < 1 || !svs.clients[0].active)
++		return NULL;
++	return svs.clients[0].edict;
++}
++
++int VKQ_iOS_CheatsAvailable (void)
++{
++	// Cheats are refused in deathmatch by the engine itself; saying so up front
++	// keeps the row from looking broken.
++	return (VKQ_iOS_LocalPlayerEdict () != NULL && !deathmatch.value) ? 1 : 0;
++}
++
++int VKQ_iOS_GodModeActive (void)
++{
++	edict_t *e = VKQ_iOS_LocalPlayerEdict ();
++	return (e && ((int)e->v.flags & FL_GODMODE)) ? 1 : 0;
++}
++
++void VKQ_iOS_SetGodMode (int on)
++{
++	if (!VKQ_iOS_CheatsAvailable ())
++		return;
++	Cbuf_AddText (on ? "god 1\n" : "god 0\n");
++}
++
++// Which level is loaded, for the once-per-spawn re-assert. A fresh spawn clears
++// FL_GODMODE, so a switch left ON has to say so again — but ONLY on a level
++// change, never continuously: a player who types `god` in the console mid-level
++// means it, and a tick that argued with them every frame would be a bug wearing
++// a feature's clothes.
++const char *VKQ_iOS_LevelName (void) { return sv.active ? sv.name : ""; }
++#endif
++
+ static void Host_God_f (void)
+ {
+ 	if (cmd_source != src_client)
+diff --git a/Quake/sv_phys.c b/Quake/sv_phys.c
 --- a/Quake/sv_phys.c
 +++ b/Quake/sv_phys.c
-@@ -1105,7 +1105,211 @@
- 		return;
+@@ -2269,6 +2269,210 @@ static void VKQ_VR_RestoreOrigin (edict_t *ent)
  	VectorCopy (vkq_vr_origin_backup, ent->v.origin);
  	vkq_vr_origin_shifted = 0;
-+}
+ }
 +
 +/*
 +================
@@ -1175,7 +1235,7 @@
 +	ent = svs.clients[0].edict;
 +	val = GetEdictFieldValue (ent, vkq_vr_af_ofs);
 +	return (!val || val->_float <= t) ? 1 : 0;
- }
++}
 +
 +// Before the think: put the clock belonging to the weapon that is about to act
 +// onto the edict, and remember the value so "a shot left" is a comparison.
@@ -1235,7 +1295,7 @@
  #endif
  
  static void SV_Physics_Client (edict_t *ent, int num)
-@@ -1144,13 +1348,13 @@
+@@ -2314,13 +2518,13 @@ static void SV_Physics_Client (edict_t *ent, int num)
  		// overlay 0020: the nailgun's repeat fire runs off the PLAYER's own
  		// .think, so the muzzle has to be standing in for the body here too
  		// (QuakeQuest makes the same second wrap, for the same reason).
@@ -1252,7 +1312,7 @@
  #else
  		if (!SV_RunThink (ent))
  			return;
-@@ -1198,9 +1402,9 @@
+@@ -2366,9 +2570,9 @@ static void SV_Physics_Client (edict_t *ent, int num)
  	// this is THE window in which the player edict stands at the muzzle. Note it
  	// is AFTER SV_LinkEdict above — the shifted origin is never linked, never
  	// collided against and never networked.
@@ -1264,63 +1324,3 @@
  #else
  	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
  #endif
---- a/Quake/host_cmd.c
-+++ b/Quake/host_cmd.c
-@@ -676,8 +676,57 @@
- Host_God_f
- 
- Sets client to godmode
-+==================
-+*/
-+#ifdef VKQ_IOS
-+/*
-+==================
-+vkquake-ios overlay 0023 — R6 part C6: the Cheats rows read GROUND TRUTH.
-+
-+A settings switch that only remembers what it last sent is a lie the first time
-+anything else changes the state — a fresh level clears FL_GODMODE, an old save
-+restores it, and the console `god` command exists. The local server is always
-+in-process on this platform, so the flag on the player edict is readable
-+directly and the switch shows what the game IS rather than what the UI asked
-+for. The setter uses `god 1`/`god 0` (johnfitz's explicit form, right below)
-+rather than the bare toggle, so re-asserting can never invert the state.
- ==================
- */
-+static edict_t *VKQ_iOS_LocalPlayerEdict (void)
-+{
-+	if (!sv.active || !svs.clients || svs.maxclients < 1 || !svs.clients[0].active)
-+		return NULL;
-+	return svs.clients[0].edict;
-+}
-+
-+int VKQ_iOS_CheatsAvailable (void)
-+{
-+	// Cheats are refused in deathmatch by the engine itself; saying so up front
-+	// keeps the row from looking broken.
-+	return (VKQ_iOS_LocalPlayerEdict () != NULL && !deathmatch.value) ? 1 : 0;
-+}
-+
-+int VKQ_iOS_GodModeActive (void)
-+{
-+	edict_t *e = VKQ_iOS_LocalPlayerEdict ();
-+	return (e && ((int)e->v.flags & FL_GODMODE)) ? 1 : 0;
-+}
-+
-+void VKQ_iOS_SetGodMode (int on)
-+{
-+	if (!VKQ_iOS_CheatsAvailable ())
-+		return;
-+	Cbuf_AddText (on ? "god 1\n" : "god 0\n");
-+}
-+
-+// Which level is loaded, for the once-per-spawn re-assert. A fresh spawn clears
-+// FL_GODMODE, so a switch left ON has to say so again — but ONLY on a level
-+// change, never continuously: a player who types `god` in the console mid-level
-+// means it, and a tick that argued with them every frame would be a bug wearing
-+// a feature's clothes.
-+const char *VKQ_iOS_LevelName (void) { return sv.active ? sv.name : ""; }
-+#endif
-+
- static void Host_God_f (void)
- {
- 	if (cmd_source != src_client)

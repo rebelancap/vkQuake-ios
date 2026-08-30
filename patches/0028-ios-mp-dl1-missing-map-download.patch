@@ -1,395 +1,7 @@
---- a/meson.build
-+++ b/meson.build
-@@ -203,6 +203,13 @@
-     'Quake/cl_demo.c',
-     'Quake/cl_input.c',
-     'Quake/cl_main.c',
-+    # vkquake-ios overlay 0028 (MP-DL1): the missing-map downloader. The whole
-+    # translation unit is #ifdef VKQ_IOS, so on the macOS oracle it compiles to an
-+    # empty object — it is listed unconditionally anyway because the iOS/visionOS
-+    # builds derive their source list from the oracle's object list
-+    # (scripts/build-sim.sh, scripts/build-ios.sh) and a conditional entry here
-+    # would silently drop the file from the device build.
-+    'Quake/cl_mapdl.c',
-     'Quake/cl_parse.c',
-     'Quake/cl_tent.c',
-     'Quake/cmd.c',
---- a/Quake/client.h
-+++ b/Quake/client.h
-@@ -365,6 +365,31 @@
- void CL_Disconnect_f (void);
- void CL_NextDemo (void);
- 
-+#ifdef VKQ_IOS
-+//
-+// cl_mapdl.c — vkquake-ios overlay 0028: fetch a map the server is running and
-+// we do not have, then rejoin. See the header comment in cl_mapdl.c for why
-+// there are two sources and what this deliberately refuses to do.
-+//
-+// The address the player last connected with, stashed at CL_EstablishConnection
-+// because that is the only place it is known as a STRING. By the time the
-+// missing-map check runs, cls.netcon holds a socket, not the "1.2.3.4:26000"
-+// (or hostname) the player chose — and the rejoin has to reproduce their choice
-+// exactly, not a reverse-resolved approximation of it.
-+extern char cl_connect_target[256];
-+
-+void	 CL_MapDownload_Init (void);
-+void	 CL_MapDownload_Frame (void);
-+qboolean CL_MapDownload_Begin (const char *modelname, const char *servergamedir, const char *target);
-+void	 CL_MapDownload_Cancel (void);
-+// menu-facing view of the state machine (menu.c draws, cl_mapdl.c decides)
-+int			CL_MapDownload_State (void);
-+qboolean	CL_MapDownload_Prompting (void);
-+qboolean	CL_MapDownload_Failed (void);
-+const char *CL_MapDownload_Line1 (void);
-+const char *CL_MapDownload_Line2 (void);
-+#endif
-+
- void SV_UpdateInfo (int edict, const char *keyname, const char *value);
- 
- //
---- a/Quake/common.h
-+++ b/Quake/common.h
-@@ -439,6 +439,14 @@
- #define FS_ENT_NONE		 (0)
- #define FS_ENT_FILE		 (1 << 0)
- #define FS_ENT_DIRECTORY (1 << 1)
-+
-+#ifdef VKQ_IOS
-+/* vkquake-ios overlay 0028 — zip extraction for the map downloader. Defined in
-+ * common.c because that is where miniz already lives (exactly one copy). Both
-+ * refuse to write outside `boundary` and never overwrite an existing file. */
-+int		 COM_UnzipToDir (const char *zippath, const char *destdir, const char *boundary, char *err, size_t errlen);
-+qboolean COM_FindExtractedFile (const char *root, const char *basename, char *out, size_t outlen);
-+#endif
- 
- /* The following FS_*() stdio replacements are necessary if one is
-  * to perform non-sequential reads on files reopened on pak files
---- a/Quake/menu.h
-+++ b/Quake/menu.h
-@@ -46,6 +46,13 @@
- 	m_search,
- 	m_slist,
- 	m_mods,
-+#ifdef VKQ_IOS
-+	// vkquake-ios overlay 0028 — the missing-map consent/progress screen. Last in
-+	// the enum so the numeric value of every stock state is unchanged (config
-+	// files and the touch layer both index nothing by m_state, but a renumbering
-+	// that "obviously" changes nothing is how the previous port lost a day).
-+	m_mapdl,
-+#endif
- };
- 
- extern enum m_state_e m_state;
-@@ -72,6 +79,9 @@
- void M_Menu_Main_f (void);
- void M_Menu_Options_f (void);
- void M_Menu_Quit_f (void);
-+#ifdef VKQ_IOS
-+void M_Menu_MapDownload_f (void); // overlay 0028; raised by cl_mapdl.c
-+#endif
- 
- void M_Print (cb_context_t *cbx, int cx, int cy, const char *str);
- 
---- a/Quake/common.c
-+++ b/Quake/common.c
-@@ -3266,10 +3266,293 @@
- 		return 0;
- 	return SDL_RWread ((SDL_RWops *)opaque, buf, 1, n);
- #endif
-+}
-+
-+#ifdef VKQ_IOS
-+/*
-+===========================================================================
-+vkquake-ios overlay 0028 — ZIP EXTRACTION FOR THE MAP DOWNLOADER
-+
-+Here, and not in the shell, for one reason: this translation unit already
-+`#include "miniz.c"` stb-style, so a second copy linked into the app would give
-+the binary two miniz code paths with two sets of allocator hooks (miniz's
-+MZ_MALLOC is wired to Mem_Alloc a hundred lines above). One zip reader, one
-+allocator, one place to audit.
-+
-+Everything below is written as if the archive were hostile, because it is only
-+ever fed archives fetched from the public internet:
-+
-+  - ZIP SLIP. Every entry name is validated before a path is built from it, not
-+    after: no absolute paths, no drive letters, no backslashes, no "." or ".."
-+    component, no control bytes. The assembled path is then re-checked against
-+    BOTH the destination directory and an outer boundary (the Documents root),
-+    so an entry has to defeat a syntactic check and a containment check.
-+  - NO OVERWRITING, EVER. An entry whose destination already exists is skipped
-+    and the skip is logged by name. The player's own files — including a map
-+    they installed by hand — are never replaced by something a server's map name
-+    caused us to download.
-+  - No archive writing APIs are compiled in (miniz.h: MINIZ_NO_ARCHIVE_WRITING_APIS),
-+    so this is read-only by construction.
-+===========================================================================
-+*/
-+#include <dirent.h>
-+
-+// mz_file_write_func: sequential writes into an already-open FILE *.
-+static size_t COM_ZipWriteFunc (void *opaque, mz_uint64 ofs, const void *buf, size_t n)
-+{
-+	(void)ofs; // extract_to_callback delivers in order and we never seek
-+	return fwrite (buf, 1, n, (FILE *)opaque);
- }
- 
- /*
-+ * Validate one zip entry name and copy it out. Returns false for anything that
-+ * could escape the destination or name something that is not a plain relative
-+ * path. Also collapses repeated slashes, which are legal in a zip and would
-+ * otherwise produce an empty component.
-+ */
-+static qboolean COM_ZipSafeName (const char *name, char *out, size_t outlen)
-+{
-+	const char *s = name;
-+	char	   *w = out;
-+	size_t		comp = 0;
-+
-+	if (!name || !*name || strlen (name) >= outlen)
-+		return false;
-+	if (*name == '/' || *name == '\\')
-+		return false; // absolute
-+	if (strchr (name, ':'))
-+		return false; // drive letter / alternate stream
-+	if (strchr (name, '\\'))
-+		return false; // windows separator: normalising it is not our job
-+	for (s = name; *s; s++)
-+		if ((unsigned char)*s < 0x20)
-+			return false; // control bytes have no business in a path
-+
-+	// component walk
-+	s = name;
-+	while (*s)
-+	{
-+		const char *e = strchr (s, '/');
-+		size_t		len = e ? (size_t)(e - s) : strlen (s);
-+		if (len == 0)
-+		{ // "//" or a trailing slash (directory entry): skip the empty component
-+			if (!e)
-+				break;
-+			s = e + 1;
-+			continue;
-+		}
-+		if (len == 1 && s[0] == '.')
-+			return false;
-+		if (len == 2 && s[0] == '.' && s[1] == '.')
-+			return false;
-+		if (comp++)
-+			*w++ = '/';
-+		if ((size_t)(w - out) + len >= outlen)
-+			return false;
-+		memcpy (w, s, len);
-+		w += len;
-+		if (!e)
-+			break;
-+		s = e + 1;
-+	}
-+	*w = 0;
-+	return out[0] != 0;
-+}
-+
-+// "is `path` inside `root`" as a textual containment test. Both sides are
-+// engine-built absolute paths with no symlink component, so a prefix test is the
-+// honest check here; realpath() would be theatre on paths we assembled ourselves.
-+static qboolean COM_PathInside (const char *root, const char *path)
-+{
-+	size_t n = strlen (root);
-+	if (!n || strncmp (path, root, n))
-+		return false;
-+	return path[n] == '/' || path[n] == 0;
-+}
-+
-+// mkdir every parent component of `path` (which names a FILE) beneath `root`.
-+static void COM_MakeParents (const char *root, const char *path)
-+{
-+	char   tmp[MAX_OSPATH];
-+	char  *p;
-+	size_t rootlen = strlen (root);
-+
-+	q_strlcpy (tmp, path, sizeof (tmp));
-+	for (p = tmp + rootlen + 1; *p; p++)
-+	{
-+		if (*p != '/')
-+			continue;
-+		*p = 0;
-+		Sys_mkdir (tmp);
-+		*p = '/';
-+	}
-+}
-+
-+/*
- ================
-+COM_UnzipToDir
-+
-+Extract `zippath` into `destdir`, refusing to write anything outside `boundary`.
-+Existing files are SKIPPED (and logged), never replaced.
-+Returns the number of files written, or -1 with a reason in `err`.
-+================
-+*/
-+int COM_UnzipToDir (const char *zippath, const char *destdir, const char *boundary, char *err, size_t errlen)
-+{
-+#ifdef USE_SDL3
-+	SDL_IOStream *rw = SDL_IOFromFile (zippath, "rb");
-+#else
-+	SDL_RWops *rw = SDL_RWFromFile (zippath, "rb");
-+#endif
-+	mz_zip_archive ar;
-+	Sint64		   sz;
-+	mz_uint		   i, count;
-+	int			   written = 0;
-+
-+	memset (&ar, 0, sizeof (ar));
-+	if (!rw)
-+	{
-+		q_strlcpy (err, "could not open the downloaded package", errlen);
-+		return -1;
-+	}
-+#ifdef USE_SDL3
-+	sz = SDL_GetIOSize (rw);
-+#else
-+	sz = SDL_RWsize (rw);
-+#endif
-+	if (sz <= 0)
-+	{
-+		q_strlcpy (err, "the downloaded package is empty", errlen);
-+		goto fail;
-+	}
-+	if (!COM_PathInside (boundary, destdir))
-+	{
-+		q_strlcpy (err, "internal: extract path is outside the game folder", errlen);
-+		goto fail;
-+	}
-+	ar.m_pRead = mz_zip_file_read_func;
-+	ar.m_pIO_opaque = rw;
-+	if (!mz_zip_reader_init (&ar, sz, 0))
-+	{
-+		q_strlcpy (err, "the downloaded file is not a zip archive", errlen);
-+		goto fail;
-+	}
-+
-+	count = mz_zip_reader_get_num_files (&ar);
-+	for (i = 0; i < count; i++)
-+	{
-+		mz_zip_archive_file_stat st;
-+		char					  rel[MAX_OSPATH], full[MAX_OSPATH];
-+
-+		if (!mz_zip_reader_file_stat (&ar, i, &st))
-+			continue;
-+		if (!COM_ZipSafeName (st.m_filename, rel, sizeof (rel)))
-+		{
-+			Con_Warning ("mapdl: rejected unsafe zip entry \"%s\"\n", st.m_filename);
-+			continue;
-+		}
-+		q_snprintf (full, sizeof (full), "%s/%s", destdir, rel);
-+		// Belt and braces: the name passed the syntactic check, now the assembled
-+		// path must also still be under both roots.
-+		if (!COM_PathInside (destdir, full) || !COM_PathInside (boundary, full))
-+		{
-+			Con_Warning ("mapdl: rejected escaping zip entry \"%s\"\n", st.m_filename);
-+			continue;
-+		}
-+		if (mz_zip_reader_is_file_a_directory (&ar, i))
-+		{
-+			COM_MakeParents (destdir, full);
-+			Sys_mkdir (full);
-+			continue;
-+		}
-+		if (Sys_FileType (full) & FS_ENT_FILE)
-+		{
-+			Con_Printf ("mapdl: skip (exists) %s\n", rel);
-+			continue;
-+		}
-+		COM_MakeParents (destdir, full);
-+		{
-+			FILE *out = fopen (full, "wb");
-+			if (!out)
-+			{
-+				Con_Warning ("mapdl: could not write %s\n", rel);
-+				continue;
-+			}
-+			if (!mz_zip_reader_extract_to_callback (&ar, i, COM_ZipWriteFunc, out, 0))
-+			{
-+				fclose (out);
-+				remove (full);
-+				Con_Warning ("mapdl: failed to extract %s\n", rel);
-+				continue;
-+			}
-+			fclose (out);
-+			written++;
-+			Con_DPrintf ("mapdl: extracted %s\n", rel);
-+		}
-+	}
-+	mz_zip_reader_end (&ar);
-+#ifdef USE_SDL3
-+	SDL_CloseIO (rw);
-+#else
-+	SDL_RWclose (rw);
-+#endif
-+	return written;
-+
-+fail:
-+	mz_zip_reader_end (&ar);
-+#ifdef USE_SDL3
-+	SDL_CloseIO (rw);
-+#else
-+	SDL_RWclose (rw);
-+#endif
-+	return -1;
-+}
-+
-+/*
-+================
-+COM_FindExtractedFile
-+
-+Depth-limited search under `root` for a file with exactly this basename. The map
-+downloader uses it after extraction, because package layouts on the community
-+archive are not uniform and the only authority on where the .bsp landed is the
-+filesystem.
-+================
-+*/
-+qboolean COM_FindExtractedFile (const char *root, const char *basename, char *out, size_t outlen)
-+{
-+	static int	   depth = 0;
-+	DIR			  *d;
-+	struct dirent *e;
-+	qboolean	   found = false;
-+
-+	if (depth > 6)
-+		return false;
-+	d = opendir (root);
-+	if (!d)
-+		return false;
-+	depth++;
-+	while (!found && (e = readdir (d)) != NULL)
-+	{
-+		char sub[MAX_OSPATH];
-+		if (!strcmp (e->d_name, ".") || !strcmp (e->d_name, ".."))
-+			continue;
-+		q_snprintf (sub, sizeof (sub), "%s/%s", root, e->d_name);
-+		if (Sys_FileType (sub) & FS_ENT_DIRECTORY)
-+			found = COM_FindExtractedFile (sub, basename, out, outlen);
-+		else if (!q_strcasecmp (e->d_name, basename))
-+		{
-+			q_strlcpy (out, sub, outlen);
-+			found = true;
-+		}
-+	}
-+	depth--;
-+	closedir (d);
-+	return found;
-+}
-+#endif // VKQ_IOS
-+
-+/*
-+================
- LOC_LoadFile
- ================
- */
+diff --git a/Quake/cl_main.c b/Quake/cl_main.c
 --- a/Quake/cl_main.c
 +++ b/Quake/cl_main.c
-@@ -54,6 +54,10 @@
+@@ -55,6 +55,10 @@ cvar_t cl_confirmquit = {"cl_confirmquit", "0", CVAR_ARCHIVE};
  
  client_static_t cls;
  client_state_t	cl;
@@ -400,7 +12,7 @@
  // FIXME: put these on hunk?
  lightstyle_t	cl_lightstyle[MAX_LIGHTSTYLES];
  dlight_t		cl_dlights[MAX_DLIGHTS];
-@@ -231,6 +235,22 @@
+@@ -232,6 +236,22 @@ void CL_EstablishConnection (const char *host)
  		Host_Error ("CL_Connect: connect failed");
  	Con_DPrintf ("CL_EstablishConnection: connected to %s\n", host);
  
@@ -423,7 +35,7 @@
  	cls.demonum = -1; // not in the demo loop now
  	cls.state = ca_connected;
  	cls.signon = 0;						   // need all the signon messages before playing
-@@ -1477,6 +1497,13 @@
+@@ -1510,6 +1530,13 @@ void CL_Init (void)
  	}
  #endif
  
@@ -437,225 +49,8 @@
  	Cvar_RegisterVariable (&cl_name);
  	Cvar_RegisterVariable (&cl_topcolor);
  	Cvar_RegisterVariable (&cl_bottomcolor);
---- a/Quake/cl_parse.c
-+++ b/Quake/cl_parse.c
-@@ -1068,6 +1068,35 @@
- 			const char			*missing = COM_SkipPath (model_precache[i]);
- 			const qboolean		 ismap = !q_strncasecmp (model_precache[i], "maps/", 5);
- 
-+#ifdef VKQ_IOS
-+			/*
-+			 * vkquake-ios overlay 0028 (MP-DL1) — OFFER TO FETCH THE MAP.
-+			 *
-+			 * The whole feature hangs off this one branch, and it hangs off it
-+			 * NARROWLY on purpose: only a missing map under maps/ — and only the FIRST
-+			 * missing file, since we are inside the loop's first failure — starts a
-+			 * download. A missing progs model keeps R6.5's clean failure below,
-+			 * because "the server is running a mod you do not have" is a request to
-+			 * install arbitrary game content chosen by a stranger, which is a
-+			 * different program from "fetch the one map file everybody in this
-+			 * server already has".
-+			 *
-+			 * CL_MapDownload_Begin does the deciding (cl_mapdownload 0/1/2, the
-+			 * once-per-map retry limiter, the name validation) and puts the menu on
-+			 * its own screen if it takes the job. Either way we fall through to the
-+			 * same teardown: the connection is dead regardless, and a rejoin is a
-+			 * fresh `connect`, which is also exactly what a mid-game changelevel to
-+			 * a missing map needs — that path re-enters here with no menu
-+			 * interaction behind it, and cl_connect_target still holds the address.
-+			 */
-+			if (ismap && CL_MapDownload_Begin (model_precache[i], gamedir, cl_connect_target))
-+			{
-+				// The menu screen and key_dest are already set by the downloader.
-+				// Host_EndGame, not Host_Error, for R6.5's reasons (see below).
-+				Host_EndGame ("Fetching a map this server needs\n");
-+			}
-+#endif
-+
- 			Con_Printf ("\nThis server is running %s \"%s\", which you do not have.\n", ismap ? "a map" : "a model", missing);
- 			Con_Printf ("vkQuake cannot download game content from servers; you need the file installed.\n\n");
- 
---- a/Quake/host.c
-+++ b/Quake/host.c
-@@ -1025,6 +1025,20 @@
- 
- 	// process console commands
- 	Cbuf_Execute ();
-+
-+#ifdef VKQ_IOS
-+	/*
-+	 * overlay 0028 — advance the missing-map download.
-+	 *
-+	 * Here, in the HOST FRAME, and deliberately not in the menu draw where the
-+	 * obvious home would be. M_Draw returns immediately unless key_dest is
-+	 * key_menu, so a player who pulls the console down to watch the transfer —
-+	 * which is precisely what the simulator harness does to screenshot it — would
-+	 * freeze the transfer at whatever byte it had reached, and it would look like
-+	 * a network stall. It costs one predicate per frame while idle.
-+	 */
-+	CL_MapDownload_Frame ();
-+#endif
- 
- 	NET_Poll ();
- 
---- a/Quake/menu.c
-+++ b/Quake/menu.c
-@@ -73,6 +73,10 @@
- static void M_MPGameOptions_Key (int key);
- static void M_Search_Key (int key);
- static void M_ServerList_Key (int key);
-+#ifdef VKQ_IOS
-+static void M_MapDownload_Draw (cb_context_t *cbx); // overlay 0028
-+static void M_MapDownload_Key (int key);
-+#endif
- static void M_Options_Key (int key);
- static void M_Keys_Key (int key);
- static void M_Help_Key (int key);
-@@ -3788,7 +3792,118 @@
- 	}
- }
- 
-+#ifdef VKQ_IOS
- //=============================================================================
-+/* MISSING-MAP DOWNLOAD MENU -- vkquake-ios overlay 0028 (MP-DL1) */
-+
-+/*
-+ * The screen that replaces R6.5's dead end. It draws state that lives in
-+ * cl_mapdl.c and owns none of it: every row this menu can activate is issued as
-+ * a console command, so the same decision can be made from a controller bind,
-+ * the console, an automation harness, or this menu, and there is exactly one
-+ * implementation of "yes" behind all four.
-+ *
-+ * Two rows in the consent state, one while a transfer is running. The rows are
-+ * drawn at the Options-menu rhythm (8px pitch, flashing character cursor) with
-+ * M_Mouse_UpdateListCursor over them, which is what makes them work under a
-+ * finger: patch 0009 feeds the menu cursor from SDL finger events and fires a
-+ * synthetic K_MOUSE1 two frames after the lift.
-+ */
-+static int mapdl_cursor;
-+
-+#define MAPDL_TOP_Y 96
-+
-+void M_Menu_MapDownload_f (void)
-+{
-+	M_MenuChanged ();
-+	IN_Deactivate (true);
-+	key_dest = key_menu;
-+	m_state = m_mapdl;
-+	mapdl_cursor = 0;
-+	m_return_reason[0] = 0;
-+}
-+
-+static int M_MapDownload_Rows (void)
-+{
-+	// Prompt: Download / Cancel. Anything else: a single row, which is Cancel
-+	// while work is in flight and Back once it has failed.
-+	return CL_MapDownload_Prompting () ? 2 : 1;
-+}
-+
-+static void M_MapDownload_Draw (cb_context_t *cbx)
-+{
-+	qpic_t	 *p;
-+	const int rows = M_MapDownload_Rows ();
-+	qboolean  failed = CL_MapDownload_Failed ();
-+
-+	p = Draw_CachePic ("gfx/p_multi.lmp");
-+	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
-+
-+	M_PrintWhite (cbx, 40, 48, "This server needs a map");
-+	M_PrintWhite (cbx, 40, 56, "you do not have:");
-+	M_Print (cbx, 40, 72, CL_MapDownload_Line1 ());
-+	M_Print (cbx, 40, 84, CL_MapDownload_Line2 ());
-+
-+	M_Mouse_UpdateListCursor (&mapdl_cursor, 40, 320, MAPDL_TOP_Y, CHARACTER_SIZE, rows, 0);
-+	if (mapdl_cursor >= rows)
-+		mapdl_cursor = rows - 1;
-+	if (rows == 2)
-+	{
-+		M_Print (cbx, MENU_LABEL_X, MAPDL_TOP_Y, "Download");
-+		M_Print (cbx, MENU_LABEL_X, MAPDL_TOP_Y + CHARACTER_SIZE, "Cancel");
-+	}
-+	else
-+	{
-+		M_Print (cbx, MENU_LABEL_X, MAPDL_TOP_Y, failed ? "Back" : "Cancel");
-+	}
-+	Draw_Character (cbx, MENU_CURSOR_X, MAPDL_TOP_Y + mapdl_cursor * CHARACTER_SIZE, 12 + ((int)(realtime * 4) & 1));
-+}
-+
-+static void M_MapDownload_Key (int key)
-+{
-+	const int rows = M_MapDownload_Rows ();
-+
-+	switch (key)
-+	{
-+	case K_MOUSE2:
-+	case K_ESCAPE:
-+	case K_BBUTTON:
-+		// Escape is CANCEL in every state, which is what makes this screen safe to
-+		// land on: the worst case is exactly overlay 0026's behaviour.
-+		S_LocalSound ("misc/menu1.wav");
-+		Cbuf_AddText ("mapdl_cancel\n");
-+		break;
-+
-+	case K_DOWNARROW:
-+		S_LocalSound ("misc/menu1.wav");
-+		if (++mapdl_cursor >= rows)
-+			mapdl_cursor = 0;
-+		break;
-+
-+	case K_UPARROW:
-+		S_LocalSound ("misc/menu1.wav");
-+		if (--mapdl_cursor < 0)
-+			mapdl_cursor = rows - 1;
-+		break;
-+
-+	case K_MOUSE1:
-+	case K_ENTER:
-+	case K_KP_ENTER:
-+	case K_ABUTTON:
-+		m_entersound = true;
-+		if (rows == 2 && mapdl_cursor == 0)
-+			Cbuf_AddText ("mapdl_accept\n");
-+		else
-+			Cbuf_AddText ("mapdl_cancel\n");
-+		break;
-+
-+	default:
-+		break;
-+	}
-+}
-+#endif // VKQ_IOS
-+
-+//=============================================================================
- /* Credits menu -- used by the 2021 re-release */
- 
- static void M_Menu_Credits_f (void) {}
-@@ -4004,6 +4119,12 @@
- 	case m_slist:
- 		M_ServerList_Draw (cbx);
- 		break;
-+
-+#ifdef VKQ_IOS
-+	case m_mapdl: // overlay 0028
-+		M_MapDownload_Draw (cbx);
-+		break;
-+#endif
- 	}
- 
- 	if (m_entersound)
-@@ -4101,6 +4222,12 @@
- 	case m_slist:
- 		M_ServerList_Key (key);
- 		return;
-+
-+#ifdef VKQ_IOS
-+	case m_mapdl: // overlay 0028
-+		M_MapDownload_Key (key);
-+		return;
-+#endif
- 	}
- }
- 
+diff --git a/Quake/cl_mapdl.c b/Quake/cl_mapdl.c
+new file mode 100644
 --- /dev/null
 +++ b/Quake/cl_mapdl.c
 @@ -0,0 +1,1026 @@
@@ -1685,3 +1080,614 @@
 +}
 +
 +#endif // VKQ_IOS
+diff --git a/Quake/cl_parse.c b/Quake/cl_parse.c
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -1132,6 +1132,35 @@ static void CL_ParseServerInfo (void)
+ 			const char			*missing = COM_SkipPath (model_precache[i]);
+ 			const qboolean		 ismap = !q_strncasecmp (model_precache[i], "maps/", 5);
+ 
++#ifdef VKQ_IOS
++			/*
++			 * vkquake-ios overlay 0028 (MP-DL1) — OFFER TO FETCH THE MAP.
++			 *
++			 * The whole feature hangs off this one branch, and it hangs off it
++			 * NARROWLY on purpose: only a missing map under maps/ — and only the FIRST
++			 * missing file, since we are inside the loop's first failure — starts a
++			 * download. A missing progs model keeps R6.5's clean failure below,
++			 * because "the server is running a mod you do not have" is a request to
++			 * install arbitrary game content chosen by a stranger, which is a
++			 * different program from "fetch the one map file everybody in this
++			 * server already has".
++			 *
++			 * CL_MapDownload_Begin does the deciding (cl_mapdownload 0/1/2, the
++			 * once-per-map retry limiter, the name validation) and puts the menu on
++			 * its own screen if it takes the job. Either way we fall through to the
++			 * same teardown: the connection is dead regardless, and a rejoin is a
++			 * fresh `connect`, which is also exactly what a mid-game changelevel to
++			 * a missing map needs — that path re-enters here with no menu
++			 * interaction behind it, and cl_connect_target still holds the address.
++			 */
++			if (ismap && CL_MapDownload_Begin (model_precache[i], gamedir, cl_connect_target))
++			{
++				// The menu screen and key_dest are already set by the downloader.
++				// Host_EndGame, not Host_Error, for R6.5's reasons (see below).
++				Host_EndGame ("Fetching a map this server needs\n");
++			}
++#endif
++
+ 			Con_Printf ("\nThis server is running %s \"%s\", which you do not have.\n", ismap ? "a map" : "a model", missing);
+ 			Con_Printf ("vkQuake cannot download game content from servers; you need the file installed.\n\n");
+ 
+diff --git a/Quake/client.h b/Quake/client.h
+--- a/Quake/client.h
++++ b/Quake/client.h
+@@ -365,6 +365,31 @@ void CL_Disconnect (void);
+ void CL_Disconnect_f (void);
+ void CL_NextDemo (void);
+ 
++#ifdef VKQ_IOS
++//
++// cl_mapdl.c — vkquake-ios overlay 0028: fetch a map the server is running and
++// we do not have, then rejoin. See the header comment in cl_mapdl.c for why
++// there are two sources and what this deliberately refuses to do.
++//
++// The address the player last connected with, stashed at CL_EstablishConnection
++// because that is the only place it is known as a STRING. By the time the
++// missing-map check runs, cls.netcon holds a socket, not the "1.2.3.4:26000"
++// (or hostname) the player chose — and the rejoin has to reproduce their choice
++// exactly, not a reverse-resolved approximation of it.
++extern char cl_connect_target[256];
++
++void	 CL_MapDownload_Init (void);
++void	 CL_MapDownload_Frame (void);
++qboolean CL_MapDownload_Begin (const char *modelname, const char *servergamedir, const char *target);
++void	 CL_MapDownload_Cancel (void);
++// menu-facing view of the state machine (menu.c draws, cl_mapdl.c decides)
++int			CL_MapDownload_State (void);
++qboolean	CL_MapDownload_Prompting (void);
++qboolean	CL_MapDownload_Failed (void);
++const char *CL_MapDownload_Line1 (void);
++const char *CL_MapDownload_Line2 (void);
++#endif
++
+ void SV_UpdateInfo (int edict, const char *keyname, const char *value);
+ 
+ //
+diff --git a/Quake/common.c b/Quake/common.c
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -3855,6 +3855,289 @@ static size_t mz_zip_file_read_func (void *opaque, mz_uint64 ofs, void *buf, siz
+ #endif
+ }
+ 
++#ifdef VKQ_IOS
++/*
++===========================================================================
++vkquake-ios overlay 0028 — ZIP EXTRACTION FOR THE MAP DOWNLOADER
++
++Here, and not in the shell, for one reason: this translation unit already
++`#include "miniz.c"` stb-style, so a second copy linked into the app would give
++the binary two miniz code paths with two sets of allocator hooks (miniz's
++MZ_MALLOC is wired to Mem_Alloc a hundred lines above). One zip reader, one
++allocator, one place to audit.
++
++Everything below is written as if the archive were hostile, because it is only
++ever fed archives fetched from the public internet:
++
++  - ZIP SLIP. Every entry name is validated before a path is built from it, not
++    after: no absolute paths, no drive letters, no backslashes, no "." or ".."
++    component, no control bytes. The assembled path is then re-checked against
++    BOTH the destination directory and an outer boundary (the Documents root),
++    so an entry has to defeat a syntactic check and a containment check.
++  - NO OVERWRITING, EVER. An entry whose destination already exists is skipped
++    and the skip is logged by name. The player's own files — including a map
++    they installed by hand — are never replaced by something a server's map name
++    caused us to download.
++  - No archive writing APIs are compiled in (miniz.h: MINIZ_NO_ARCHIVE_WRITING_APIS),
++    so this is read-only by construction.
++===========================================================================
++*/
++#include <dirent.h>
++
++// mz_file_write_func: sequential writes into an already-open FILE *.
++static size_t COM_ZipWriteFunc (void *opaque, mz_uint64 ofs, const void *buf, size_t n)
++{
++	(void)ofs; // extract_to_callback delivers in order and we never seek
++	return fwrite (buf, 1, n, (FILE *)opaque);
++}
++
++/*
++ * Validate one zip entry name and copy it out. Returns false for anything that
++ * could escape the destination or name something that is not a plain relative
++ * path. Also collapses repeated slashes, which are legal in a zip and would
++ * otherwise produce an empty component.
++ */
++static qboolean COM_ZipSafeName (const char *name, char *out, size_t outlen)
++{
++	const char *s = name;
++	char	   *w = out;
++	size_t		comp = 0;
++
++	if (!name || !*name || strlen (name) >= outlen)
++		return false;
++	if (*name == '/' || *name == '\\')
++		return false; // absolute
++	if (strchr (name, ':'))
++		return false; // drive letter / alternate stream
++	if (strchr (name, '\\'))
++		return false; // windows separator: normalising it is not our job
++	for (s = name; *s; s++)
++		if ((unsigned char)*s < 0x20)
++			return false; // control bytes have no business in a path
++
++	// component walk
++	s = name;
++	while (*s)
++	{
++		const char *e = strchr (s, '/');
++		size_t		len = e ? (size_t)(e - s) : strlen (s);
++		if (len == 0)
++		{ // "//" or a trailing slash (directory entry): skip the empty component
++			if (!e)
++				break;
++			s = e + 1;
++			continue;
++		}
++		if (len == 1 && s[0] == '.')
++			return false;
++		if (len == 2 && s[0] == '.' && s[1] == '.')
++			return false;
++		if (comp++)
++			*w++ = '/';
++		if ((size_t)(w - out) + len >= outlen)
++			return false;
++		memcpy (w, s, len);
++		w += len;
++		if (!e)
++			break;
++		s = e + 1;
++	}
++	*w = 0;
++	return out[0] != 0;
++}
++
++// "is `path` inside `root`" as a textual containment test. Both sides are
++// engine-built absolute paths with no symlink component, so a prefix test is the
++// honest check here; realpath() would be theatre on paths we assembled ourselves.
++static qboolean COM_PathInside (const char *root, const char *path)
++{
++	size_t n = strlen (root);
++	if (!n || strncmp (path, root, n))
++		return false;
++	return path[n] == '/' || path[n] == 0;
++}
++
++// mkdir every parent component of `path` (which names a FILE) beneath `root`.
++static void COM_MakeParents (const char *root, const char *path)
++{
++	char   tmp[MAX_OSPATH];
++	char  *p;
++	size_t rootlen = strlen (root);
++
++	q_strlcpy (tmp, path, sizeof (tmp));
++	for (p = tmp + rootlen + 1; *p; p++)
++	{
++		if (*p != '/')
++			continue;
++		*p = 0;
++		Sys_mkdir (tmp);
++		*p = '/';
++	}
++}
++
++/*
++================
++COM_UnzipToDir
++
++Extract `zippath` into `destdir`, refusing to write anything outside `boundary`.
++Existing files are SKIPPED (and logged), never replaced.
++Returns the number of files written, or -1 with a reason in `err`.
++================
++*/
++int COM_UnzipToDir (const char *zippath, const char *destdir, const char *boundary, char *err, size_t errlen)
++{
++#ifdef USE_SDL3
++	SDL_IOStream *rw = SDL_IOFromFile (zippath, "rb");
++#else
++	SDL_RWops *rw = SDL_RWFromFile (zippath, "rb");
++#endif
++	mz_zip_archive ar;
++	Sint64		   sz;
++	mz_uint		   i, count;
++	int			   written = 0;
++
++	memset (&ar, 0, sizeof (ar));
++	if (!rw)
++	{
++		q_strlcpy (err, "could not open the downloaded package", errlen);
++		return -1;
++	}
++#ifdef USE_SDL3
++	sz = SDL_GetIOSize (rw);
++#else
++	sz = SDL_RWsize (rw);
++#endif
++	if (sz <= 0)
++	{
++		q_strlcpy (err, "the downloaded package is empty", errlen);
++		goto fail;
++	}
++	if (!COM_PathInside (boundary, destdir))
++	{
++		q_strlcpy (err, "internal: extract path is outside the game folder", errlen);
++		goto fail;
++	}
++	ar.m_pRead = mz_zip_file_read_func;
++	ar.m_pIO_opaque = rw;
++	if (!mz_zip_reader_init (&ar, sz, 0))
++	{
++		q_strlcpy (err, "the downloaded file is not a zip archive", errlen);
++		goto fail;
++	}
++
++	count = mz_zip_reader_get_num_files (&ar);
++	for (i = 0; i < count; i++)
++	{
++		mz_zip_archive_file_stat st;
++		char					  rel[MAX_OSPATH], full[MAX_OSPATH];
++
++		if (!mz_zip_reader_file_stat (&ar, i, &st))
++			continue;
++		if (!COM_ZipSafeName (st.m_filename, rel, sizeof (rel)))
++		{
++			Con_Warning ("mapdl: rejected unsafe zip entry \"%s\"\n", st.m_filename);
++			continue;
++		}
++		q_snprintf (full, sizeof (full), "%s/%s", destdir, rel);
++		// Belt and braces: the name passed the syntactic check, now the assembled
++		// path must also still be under both roots.
++		if (!COM_PathInside (destdir, full) || !COM_PathInside (boundary, full))
++		{
++			Con_Warning ("mapdl: rejected escaping zip entry \"%s\"\n", st.m_filename);
++			continue;
++		}
++		if (mz_zip_reader_is_file_a_directory (&ar, i))
++		{
++			COM_MakeParents (destdir, full);
++			Sys_mkdir (full);
++			continue;
++		}
++		if (Sys_FileType (full) & FS_ENT_FILE)
++		{
++			Con_Printf ("mapdl: skip (exists) %s\n", rel);
++			continue;
++		}
++		COM_MakeParents (destdir, full);
++		{
++			FILE *out = fopen (full, "wb");
++			if (!out)
++			{
++				Con_Warning ("mapdl: could not write %s\n", rel);
++				continue;
++			}
++			if (!mz_zip_reader_extract_to_callback (&ar, i, COM_ZipWriteFunc, out, 0))
++			{
++				fclose (out);
++				remove (full);
++				Con_Warning ("mapdl: failed to extract %s\n", rel);
++				continue;
++			}
++			fclose (out);
++			written++;
++			Con_DPrintf ("mapdl: extracted %s\n", rel);
++		}
++	}
++	mz_zip_reader_end (&ar);
++#ifdef USE_SDL3
++	SDL_CloseIO (rw);
++#else
++	SDL_RWclose (rw);
++#endif
++	return written;
++
++fail:
++	mz_zip_reader_end (&ar);
++#ifdef USE_SDL3
++	SDL_CloseIO (rw);
++#else
++	SDL_RWclose (rw);
++#endif
++	return -1;
++}
++
++/*
++================
++COM_FindExtractedFile
++
++Depth-limited search under `root` for a file with exactly this basename. The map
++downloader uses it after extraction, because package layouts on the community
++archive are not uniform and the only authority on where the .bsp landed is the
++filesystem.
++================
++*/
++qboolean COM_FindExtractedFile (const char *root, const char *basename, char *out, size_t outlen)
++{
++	static int	   depth = 0;
++	DIR			  *d;
++	struct dirent *e;
++	qboolean	   found = false;
++
++	if (depth > 6)
++		return false;
++	d = opendir (root);
++	if (!d)
++		return false;
++	depth++;
++	while (!found && (e = readdir (d)) != NULL)
++	{
++		char sub[MAX_OSPATH];
++		if (!strcmp (e->d_name, ".") || !strcmp (e->d_name, ".."))
++			continue;
++		q_snprintf (sub, sizeof (sub), "%s/%s", root, e->d_name);
++		if (Sys_FileType (sub) & FS_ENT_DIRECTORY)
++			found = COM_FindExtractedFile (sub, basename, out, outlen);
++		else if (!q_strcasecmp (e->d_name, basename))
++		{
++			q_strlcpy (out, sub, outlen);
++			found = true;
++		}
++	}
++	depth--;
++	closedir (d);
++	return found;
++}
++#endif // VKQ_IOS
++
+ /*
+ ================
+ LOC_LoadFile
+diff --git a/Quake/common.h b/Quake/common.h
+--- a/Quake/common.h
++++ b/Quake/common.h
+@@ -467,6 +467,14 @@ size_t COM_SanitizeDescriptionString (char *dst, size_t dstsize, const char *src
+ #define FS_ENT_FILE		 (1 << 0)
+ #define FS_ENT_DIRECTORY (1 << 1)
+ 
++#ifdef VKQ_IOS
++/* vkquake-ios overlay 0028 — zip extraction for the map downloader. Defined in
++ * common.c because that is where miniz already lives (exactly one copy). Both
++ * refuse to write outside `boundary` and never overwrite an existing file. */
++int		 COM_UnzipToDir (const char *zippath, const char *destdir, const char *boundary, char *err, size_t errlen);
++qboolean COM_FindExtractedFile (const char *root, const char *basename, char *out, size_t outlen);
++#endif
++
+ /* The following FS_*() stdio replacements are necessary if one is
+  * to perform non-sequential reads on files reopened on pak files
+  * because we need the bookkeeping about file start/end positions.
+diff --git a/Quake/host.c b/Quake/host.c
+--- a/Quake/host.c
++++ b/Quake/host.c
+@@ -1094,6 +1094,20 @@ static void _Host_Frame (double time)
+ 	if (host_framecount == 0)
+ 		SCR_EndStartupLoadingPlaque ();
+ 
++#ifdef VKQ_IOS
++	/*
++	 * overlay 0028 — advance the missing-map download.
++	 *
++	 * Here, in the HOST FRAME, and deliberately not in the menu draw where the
++	 * obvious home would be. M_Draw returns immediately unless key_dest is
++	 * key_menu, so a player who pulls the console down to watch the transfer —
++	 * which is precisely what the simulator harness does to screenshot it — would
++	 * freeze the transfer at whatever byte it had reached, and it would look like
++	 * a network stall. It costs one predicate per frame while idle.
++	 */
++	CL_MapDownload_Frame ();
++#endif
++
+ 	NET_Poll ();
+ 
+ 	if (cl.sendprespawn)
+diff --git a/Quake/menu.c b/Quake/menu.c
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -77,6 +77,10 @@ static void M_LanConfig_Key (int key);
+ static void M_MPGameOptions_Key (int key);
+ static void M_Search_Key (int key);
+ static void M_ServerList_Key (int key);
++#ifdef VKQ_IOS
++static void M_MapDownload_Draw (cb_context_t *cbx); // overlay 0028
++static void M_MapDownload_Key (int key);
++#endif
+ static void M_Options_Key (int key);
+ static void M_Keys_Key (int key);
+ static void M_Help_Key (int key);
+@@ -4930,6 +4934,117 @@ static void M_ServerList_Key (int k)
+ 	}
+ }
+ 
++#ifdef VKQ_IOS
++//=============================================================================
++/* MISSING-MAP DOWNLOAD MENU -- vkquake-ios overlay 0028 (MP-DL1) */
++
++/*
++ * The screen that replaces R6.5's dead end. It draws state that lives in
++ * cl_mapdl.c and owns none of it: every row this menu can activate is issued as
++ * a console command, so the same decision can be made from a controller bind,
++ * the console, an automation harness, or this menu, and there is exactly one
++ * implementation of "yes" behind all four.
++ *
++ * Two rows in the consent state, one while a transfer is running. The rows are
++ * drawn at the Options-menu rhythm (8px pitch, flashing character cursor) with
++ * M_Mouse_UpdateListCursor over them, which is what makes them work under a
++ * finger: patch 0009 feeds the menu cursor from SDL finger events and fires a
++ * synthetic K_MOUSE1 two frames after the lift.
++ */
++static int mapdl_cursor;
++
++#define MAPDL_TOP_Y 96
++
++void M_Menu_MapDownload_f (void)
++{
++	M_MenuChanged ();
++	IN_Deactivate (true);
++	key_dest = key_menu;
++	m_state = m_mapdl;
++	mapdl_cursor = 0;
++	m_return_reason[0] = 0;
++}
++
++static int M_MapDownload_Rows (void)
++{
++	// Prompt: Download / Cancel. Anything else: a single row, which is Cancel
++	// while work is in flight and Back once it has failed.
++	return CL_MapDownload_Prompting () ? 2 : 1;
++}
++
++static void M_MapDownload_Draw (cb_context_t *cbx)
++{
++	qpic_t	 *p;
++	const int rows = M_MapDownload_Rows ();
++	qboolean  failed = CL_MapDownload_Failed ();
++
++	p = Draw_CachePic ("gfx/p_multi.lmp");
++	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
++
++	M_PrintWhite (cbx, 40, 48, "This server needs a map");
++	M_PrintWhite (cbx, 40, 56, "you do not have:");
++	M_Print (cbx, 40, 72, CL_MapDownload_Line1 ());
++	M_Print (cbx, 40, 84, CL_MapDownload_Line2 ());
++
++	M_Mouse_UpdateListCursor (&mapdl_cursor, 40, 320, MAPDL_TOP_Y, CHARACTER_SIZE, rows, 0);
++	if (mapdl_cursor >= rows)
++		mapdl_cursor = rows - 1;
++	if (rows == 2)
++	{
++		M_Print (cbx, MENU_LABEL_X, MAPDL_TOP_Y, "Download");
++		M_Print (cbx, MENU_LABEL_X, MAPDL_TOP_Y + CHARACTER_SIZE, "Cancel");
++	}
++	else
++	{
++		M_Print (cbx, MENU_LABEL_X, MAPDL_TOP_Y, failed ? "Back" : "Cancel");
++	}
++	Draw_Character (cbx, MENU_CURSOR_X, MAPDL_TOP_Y + mapdl_cursor * CHARACTER_SIZE, 12 + ((int)(realtime * 4) & 1));
++}
++
++static void M_MapDownload_Key (int key)
++{
++	const int rows = M_MapDownload_Rows ();
++
++	switch (key)
++	{
++	case K_MOUSE2:
++	case K_ESCAPE:
++	case K_BBUTTON:
++		// Escape is CANCEL in every state, which is what makes this screen safe to
++		// land on: the worst case is exactly overlay 0026's behaviour.
++		S_LocalSound ("misc/menu1.wav");
++		Cbuf_AddText ("mapdl_cancel\n");
++		break;
++
++	case K_DOWNARROW:
++		S_LocalSound ("misc/menu1.wav");
++		if (++mapdl_cursor >= rows)
++			mapdl_cursor = 0;
++		break;
++
++	case K_UPARROW:
++		S_LocalSound ("misc/menu1.wav");
++		if (--mapdl_cursor < 0)
++			mapdl_cursor = rows - 1;
++		break;
++
++	case K_MOUSE1:
++	case K_ENTER:
++	case K_KP_ENTER:
++	case K_ABUTTON:
++		m_entersound = true;
++		if (rows == 2 && mapdl_cursor == 0)
++			Cbuf_AddText ("mapdl_accept\n");
++		else
++			Cbuf_AddText ("mapdl_cancel\n");
++		break;
++
++	default:
++		break;
++	}
++}
++#endif // VKQ_IOS
++
+ //=============================================================================
+ /* Custom gfx checks (from Ironwail) */
+ 
+@@ -5206,6 +5321,12 @@ void M_Draw (cb_context_t *cbx)
+ 	case m_slist:
+ 		M_ServerList_Draw (cbx);
+ 		break;
++
++#ifdef VKQ_IOS
++	case m_mapdl: // overlay 0028
++		M_MapDownload_Draw (cbx);
++		break;
++#endif
+ 	}
+ 
+ 	if (m_entersound)
+@@ -5311,6 +5432,12 @@ void M_Keydown (int key)
+ 	case m_slist:
+ 		M_ServerList_Key (key);
+ 		return;
++
++#ifdef VKQ_IOS
++	case m_mapdl: // overlay 0028
++		M_MapDownload_Key (key);
++		return;
++#endif
+ 	}
+ }
+ 
+diff --git a/Quake/menu.h b/Quake/menu.h
+--- a/Quake/menu.h
++++ b/Quake/menu.h
+@@ -48,6 +48,13 @@ enum m_state_e
+ 	m_mods,
+ 	m_maps,
+ 	m_skill,
++#ifdef VKQ_IOS
++	// vkquake-ios overlay 0028 — the missing-map consent/progress screen. Last in
++	// the enum so the numeric value of every stock state is unchanged (config
++	// files and the touch layer both index nothing by m_state, but a renumbering
++	// that "obviously" changes nothing is how the previous port lost a day).
++	m_mapdl,
++#endif
+ };
+ 
+ extern enum m_state_e m_state;
+@@ -74,6 +81,9 @@ void	 M_MenuChanged ();
+ void M_Menu_Main_f (void);
+ void M_Menu_Options_f (void);
+ void M_Menu_Quit_f (void);
++#ifdef VKQ_IOS
++void M_Menu_MapDownload_f (void); // overlay 0028; raised by cl_mapdl.c
++#endif
+ 
+ void M_Print (cb_context_t *cbx, int cx, int cy, const char *str);
+ 
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -214,6 +214,13 @@ srcs = [
+     'Quake/cl_demo.c',
+     'Quake/cl_input.c',
+     'Quake/cl_main.c',
++    # vkquake-ios overlay 0028 (MP-DL1): the missing-map downloader. The whole
++    # translation unit is #ifdef VKQ_IOS, so on the macOS oracle it compiles to an
++    # empty object — it is listed unconditionally anyway because the iOS/visionOS
++    # builds derive their source list from the oracle's object list
++    # (scripts/build-sim.sh, scripts/build-ios.sh) and a conditional entry here
++    # would silently drop the file from the device build.
++    'Quake/cl_mapdl.c',
+     'Quake/cl_parse.c',
+     'Quake/cl_tent.c',
+     'Quake/cmd.c',

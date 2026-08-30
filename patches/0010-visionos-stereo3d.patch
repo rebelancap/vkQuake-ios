@@ -1,8 +1,7 @@
-Binary files a/.DS_Store and b/.DS_Store differ
-diff -ruN a/Quake/gl_rmain.c b/Quake/gl_rmain.c
+diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
 --- a/Quake/gl_rmain.c
 +++ b/Quake/gl_rmain.c
-@@ -342,6 +342,25 @@
+@@ -353,6 +353,25 @@ static void R_SetupMatrices ()
  	TranslationMatrix (translation_matrix, -r_refdef.vieworg[0], -r_refdef.vieworg[1], -r_refdef.vieworg[2]);
  	MatrixMultiply (vulkan_globals.view_matrix, translation_matrix);
  
@@ -28,10 +27,10 @@ diff -ruN a/Quake/gl_rmain.c b/Quake/gl_rmain.c
  	// View projection matrix
  	memcpy (vulkan_globals.view_projection_matrix, vulkan_globals.projection_matrix, 16 * sizeof (float));
  	MatrixMultiply (vulkan_globals.view_projection_matrix, vulkan_globals.view_matrix);
-diff -ruN a/Quake/gl_screen.c b/Quake/gl_screen.c
+diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
-@@ -648,10 +648,20 @@
+@@ -658,10 +658,20 @@ static void SCR_DrawFPS (cb_context_t *cbx)
  	{
  		char st[16];
  		int	 x, y;
@@ -52,7 +51,7 @@ diff -ruN a/Quake/gl_screen.c b/Quake/gl_screen.c
  		Draw_String (cbx, x, y, st);
  	}
  }
-@@ -1709,8 +1719,36 @@
+@@ -2001,7 +2011,35 @@ WARNING: be very careful calling this from elsewhere, because the refresh
  needs almost the entire 256k of stack space!
  ==================
  */
@@ -68,7 +67,7 @@ diff -ruN a/Quake/gl_screen.c b/Quake/gl_screen.c
 +// synchronously between renders: the tasks path joins draw_done inside each
 +// render, so frame N's matrices are computed before eye N+1 is selected.
  void SCR_UpdateScreen (qboolean use_tasks)
- {
++{
 +	extern int vkq_stereo3d_active, vkq_stereo3d_eye, vkq_stereo3d_both;
 +	if (vkq_stereo3d_active && vkq_stereo3d_both)
 +	{
@@ -85,11 +84,10 @@ diff -ruN a/Quake/gl_screen.c b/Quake/gl_screen.c
 +#else
 +void SCR_UpdateScreen (qboolean use_tasks)
 +#endif
-+{
+ {
  	if (!scr_initialized || !con_initialized || in_update_screen)
  		return; // not initialized yet
- 
-@@ -1740,6 +1778,16 @@
+@@ -2032,6 +2070,16 @@ void SCR_UpdateScreen (qboolean use_tasks)
  	// decide on the height of the console
  	con_forcedup = !cl.worldmodel || cls.signon != SIGNONS;
  
@@ -106,16 +104,16 @@ diff -ruN a/Quake/gl_screen.c b/Quake/gl_screen.c
  	task_handle_t begin_rendering_task = INVALID_TASK_HANDLE;
  	if (!GL_BeginRendering (use_tasks, &begin_rendering_task, &glwidth, &glheight))
  	{
-@@ -1759,7 +1807,7 @@
+@@ -2051,7 +2099,7 @@ void SCR_UpdateScreen (qboolean use_tasks)
  		task_handle_t setup_frame_task = Task_AllocateAndAssignFunc (SCR_SetupFrame, NULL, 0);
- 		V_RenderView (use_tasks, begin_rendering_task, setup_frame_task, draw_done_task);
  		task_handle_t draw_gui_task = Task_AllocateAndAssignFunc (SCR_DrawGUI, NULL, 0);
+ 		V_RenderView (use_tasks, begin_rendering_task, setup_frame_task, draw_done_task, draw_gui_task);
 -		task_handle_t end_rendering_task = GL_EndRendering (use_tasks, true);
 +		task_handle_t end_rendering_task = GL_EndRendering (use_tasks, vkq_to_swapchain);
  
  		Task_AddDependency (begin_rendering_task, draw_gui_task);
  		Task_AddDependency (setup_frame_task, draw_gui_task);
-@@ -1781,7 +1829,7 @@
+@@ -2073,7 +2121,7 @@ void SCR_UpdateScreen (qboolean use_tasks)
  		S_ExtraUpdate ();
  		SCR_DrawGUI (NULL);
  		SCR_DrawDone (NULL);
@@ -124,10 +122,10 @@ diff -ruN a/Quake/gl_screen.c b/Quake/gl_screen.c
  	}
  
  	in_update_screen = false;
-diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -152,6 +152,34 @@
+@@ -154,6 +154,34 @@ static vulkan_memory_t	depth_buffer_memory;
  static VkImageView		depth_buffer_view;
  static vulkan_memory_t	color_buffers_memory[NUM_COLOR_BUFFERS];
  static VkImageView		color_buffers_view[NUM_COLOR_BUFFERS];
@@ -162,7 +160,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  static vulkan_memory_t	oit_accum_buffer_memory;
  static vulkan_memory_t	oit_reveal_buffer_memory;
  static VkImageView		oit_accum_buffer_view;
-@@ -268,6 +296,10 @@
+@@ -271,6 +299,10 @@ VID_GetCurrentWidth
  static int VID_GetCurrentWidth (void)
  {
  	int w = 0, h = 0;
@@ -173,7 +171,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  #ifdef USE_SDL3
  	SDL_GetWindowSizeInPixels (draw_context, &w, &h);
  #else
-@@ -284,6 +316,10 @@
+@@ -287,6 +319,10 @@ VID_GetCurrentHeight
  static int VID_GetCurrentHeight (void)
  {
  	int w = 0, h = 0;
@@ -184,7 +182,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  #ifdef USE_SDL3
  	SDL_GetWindowSizeInPixels (draw_context, &w, &h);
  #else
-@@ -2702,6 +2738,21 @@
+@@ -2722,6 +2758,21 @@ GL_CreateSwapChain
  */
  static qboolean GL_CreateSwapChain (void)
  {
@@ -206,7 +204,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	uint32_t i;
  	VkResult err;
  
-@@ -3071,6 +3122,91 @@
+@@ -3119,6 +3170,91 @@ static void GL_CreateFrameBuffers (void)
  
  		GL_SetObjectName ((uint64_t)ui_framebuffers[i], VK_OBJECT_TYPE_FRAMEBUFFER, "ui");
  	}
@@ -298,7 +296,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  }
  
  /*
-@@ -3199,6 +3335,35 @@
+@@ -3247,6 +3383,35 @@ static void GL_DestroyRenderResources (void)
  		swapchain_images[i] = VK_NULL_HANDLE;
  	}
  
@@ -334,7 +332,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	for (int i = 0; i < DOUBLE_BUFFERED; ++i)
  	{
  		vkDestroySemaphore (vulkan_globals.device, image_aquired_semaphores[i], NULL);
-@@ -3547,6 +3712,10 @@
+@@ -3614,6 +3779,10 @@ typedef struct end_rendering_parms_s
  	qboolean	 ray_debug	   : 1;
  	uint32_t	 render_scale  : 4;
  	uint32_t	 vid_height	   : 20;
@@ -345,10 +343,10 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	float		 time;
  	VkClearValue color_clear_value;
  	uint8_t		 v_blend[4];
-@@ -3922,7 +4091,15 @@
- #endif
+@@ -4000,7 +4169,15 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
  
  	qboolean swapchain_acquired = parms->swapchain && GL_AcquireNextSwapChainImage ();
+ 	rs_gpuwaitaccum_us += (uint32_t)((Sys_DoubleTime () - display_wait_start) * 1000000.0);
 +#ifdef VKQ_VISIONOS
 +	// overlay 0010: in 3D the postprocess still runs — into the offscreen present
 +	// image instead of a swapchain image (framebuffer routed below).
@@ -361,7 +359,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	{
  		cb_context_t *cbx = vulkan_globals.secondary_cb_contexts[SCBX_POST_PROCESS];
  
-@@ -4041,7 +4218,11 @@
+@@ -4119,7 +4296,11 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
  		ZEROED_STRUCT (VkRenderPassBeginInfo, render_pass_begin_info);
  		render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
  		render_pass_begin_info.renderPass = vulkan_globals.secondary_cb_contexts[SCBX_GUI]->render_pass;
@@ -373,7 +371,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		render_pass_begin_info.renderArea = render_area;
  		render_pass_begin_info.clearValueCount = 0;
  		vkCmdBeginRenderPass (render_passes_cb, &render_pass_begin_info, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-@@ -4133,6 +4314,19 @@
+@@ -4217,6 +4398,19 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
  			num_images_acquired -= 1;
  	}
  
@@ -393,7 +391,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	frame_submitted[cb_index] = true;
  	current_cb_index = (current_cb_index + 1) % DOUBLE_BUFFERED;
  }
-@@ -4189,6 +4383,13 @@
+@@ -4273,6 +4467,13 @@ task_handle_t GL_EndRendering (qboolean use_tasks, qboolean swapchain)
  				-vulkan_globals.view_matrix[9],
  			},
  	};
@@ -407,7 +405,7 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	task_handle_t end_rendering_task = INVALID_TASK_HANDLE;
  	if (use_tasks)
  		end_rendering_task = Task_AllocateAndAssignFunc ((task_func_t)GL_EndRenderingTask, &parms, sizeof (parms));
-@@ -5416,3 +5617,123 @@
+@@ -5567,3 +5768,123 @@ void VID_FocusLost (void)
  		vid.restart_next_frame = true;
  	}
  }
@@ -531,10 +529,10 @@ diff -ruN a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 +		SDL_SetWindowSize (draw_context, w, h);
 +}
 +#endif
-diff -ruN a/Quake/in_sdl3.c b/Quake/in_sdl3.c
+diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
 --- a/Quake/in_sdl3.c
 +++ b/Quake/in_sdl3.c
-@@ -132,12 +132,31 @@
+@@ -132,12 +132,31 @@ void IN_SendKeyEvents (void)
  			VID_FocusGained ();
  			break;
  		case SDL_EVENT_WINDOW_FOCUS_LOST:
@@ -566,10 +564,10 @@ diff -ruN a/Quake/in_sdl3.c b/Quake/in_sdl3.c
  			vid.width = event.window.data1;
  			vid.height = event.window.data2;
  			vid.restart_next_frame = true;
-diff -ruN a/Quake/main_sdl.c b/Quake/main_sdl.c
+diff --git a/Quake/main_sdl.c b/Quake/main_sdl.c
 --- a/Quake/main_sdl.c
 +++ b/Quake/main_sdl.c
-@@ -24,7 +24,7 @@
+@@ -24,7 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  #include "quakedef.h"
  #include <stdio.h>
  
@@ -578,7 +576,7 @@ diff -ruN a/Quake/main_sdl.c b/Quake/main_sdl.c
  // provides the WinMain shim; must be included in the file that defines main ()
  #include <SDL3/SDL_main.h>
  #endif
-@@ -93,7 +93,15 @@
+@@ -93,7 +93,15 @@ void VKQ_iOS_EngineFrame (void)
  }
  #endif
  

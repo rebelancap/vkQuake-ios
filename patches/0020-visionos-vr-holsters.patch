@@ -53,9 +53,10 @@ empty space re-draws. Either style: a long grip hold in a zone reassigns
 it. Tracking loss or a menu releases everything and hands the weapon
 back, so nobody is ever left axe-locked.
 
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -5999,6 +5999,68 @@
+@@ -6150,6 +6150,68 @@ cvar_t vkqvr_gunscale = {"vkqvr_gunscale", "1", CVAR_NONE};
  cvar_t vkqvr_flashscale = {"vkqvr_flashscale", "0.5", CVAR_NONE};
  cvar_t vkqvr_weapon = {"vkqvr_weapon", "1", CVAR_NONE}; // draw the viewmodel at the hand
  
@@ -124,7 +125,7 @@ back, so nobody is ever left axe-locked.
  void VKQ_VR_RegisterCvars (void)
  {
  	Cvar_RegisterVariable (&vkqvr_aimhand);
-@@ -6016,6 +6078,31 @@
+@@ -6167,6 +6229,31 @@ void VKQ_VR_RegisterCvars (void)
  	Cvar_RegisterVariable (&vkqvr_gunscale);
  	Cvar_RegisterVariable (&vkqvr_flashscale);
  	Cvar_RegisterVariable (&vkqvr_weapon);
@@ -156,7 +157,7 @@ back, so nobody is ever left axe-locked.
  }
  
  // cl_input.c's button state and impulse latch: globals with no header, because
-@@ -6032,12 +6119,39 @@
+@@ -6183,13 +6270,40 @@ int		 VKQ_VR_AimHandTracked (void);
  void	 VKQ_VR_AimAngles (float out[3]);
  float	 VKQ_VR_WeaponMuzzle (void);
  qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
@@ -172,7 +173,7 @@ back, so nobody is ever left axe-locked.
  // direction). Published for the diagnostics line the simulator asserts on —
  // "the movement rotated" is otherwise invisible in a screenshot.
  float vkq_vr_movedir_delta = 0.0f;
-+
+ 
 +// overlay 0020 — the world scale the shell is using (units per metre). The
 +// engine needs it because R3's holster zones are body-anchored in METRES and the
 +// hand poses arrive in units: one number, published once per frame, so a
@@ -193,10 +194,11 @@ back, so nobody is ever left axe-locked.
 +static float vkq_vr_eye_rise_raw = 0.0f;   // what the cvar asked for
 +static float vkq_vr_eye_rise_limit = 0.0f; // what the ceiling allows
 +static double vkq_vr_eye_rise_time = 0.0;
- 
++
  // Whether the Sense path is currently driving the shared attack/jump buttons.
  // Latched so that losing the controllers releases them exactly ONCE instead of
-@@ -6224,7 +6338,14 @@
+ // fighting the gamepad for them every frame.
+@@ -6375,7 +6489,14 @@ void VKQ_VR_ComposeView (int eye, float out[16])
  	MatrixMultiply (base, rot);
  	RotationMatrix (rot, VKQ_VR_DEG2RAD (-vkq_vr_body_yaw), 0.0f, 0.0f, 1.0f);
  	MatrixMultiply (base, rot);
@@ -212,7 +214,7 @@ back, so nobody is ever left axe-locked.
  	MatrixMultiply (base, trans);
  
  	memcpy (out, vkq_vr_cur[eye & 1].eye_from_player, 16 * sizeof (float));
-@@ -6288,6 +6409,22 @@
+@@ -6439,6 +6560,22 @@ void VKQ_VR_ApplyHeadAim (void)
  		cl.viewangles[YAW] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
  		cl.viewangles[ROLL] = 0.0f;
  	}
@@ -235,7 +237,7 @@ back, so nobody is ever left axe-locked.
  	last_sent = cl.viewangles[YAW];
  }
  
-@@ -6383,20 +6520,44 @@
+@@ -6534,20 +6671,44 @@ static void vkq_vr_player_to_world_dir (const float *v, vec3_t out)
  }
  
  // The player frame's origin in Quake world: the body's eye point, i.e. exactly
@@ -288,7 +290,7 @@ back, so nobody is ever left axe-locked.
  {
  	const vkq_vr_hand_t *h;
  	vec3_t				 f, r, u, o;
-@@ -6419,7 +6580,7 @@
+@@ -6570,7 +6731,7 @@ static qboolean vkq_vr_hand_world (int hand, qboolean grip, vec3_t org, vec3_t f
  		VectorAdd (o, wp, org);
  	}
  
@@ -297,7 +299,7 @@ back, so nobody is ever left axe-locked.
  	{
  		// Rotate the hand basis about its own axes: pitch about right, yaw about
  		// up, roll about forward. Order pitch -> yaw -> roll, so the pitch knob
-@@ -6454,7 +6615,13 @@
+@@ -6605,7 +6766,13 @@ static qboolean vkq_vr_hand_world (int hand, qboolean grip, vec3_t org, vec3_t f
  		}
  		VectorCopy (nr, r);
  		VectorCopy (nu, u);
@@ -312,7 +314,7 @@ back, so nobody is ever left axe-locked.
  		VectorMA (org, vkqvr_gunfwd.value, f, org);
  		VectorMA (org, vkqvr_gunright.value, r, org);
  		VectorMA (org, vkqvr_gunup.value, u, org);
-@@ -6481,34 +6648,39 @@
+@@ -6632,34 +6799,39 @@ static void vkq_vr_angles_from_basis (const vec3_t fwd, const vec3_t right, cons
  	out[ROLL] = (float)(atan2 (-right[2], up[2]) * 180.0 / M_PI);
  }
  
@@ -363,7 +365,7 @@ back, so nobody is ever left axe-locked.
  // --- input (charter A10's fixed layout) --------------------------------------
  static float vkq_vr_stick_axis (float v)
  {
-@@ -6621,6 +6793,10 @@
+@@ -6772,6 +6944,10 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  				vkq_vr_owned_buttons = 0;
  				vkq_vr_hold (&in_attack, false);
  				vkq_vr_hold (&in_jump, false);
@@ -374,7 +376,7 @@ back, so nobody is ever left axe-locked.
  			}
  			return;
  		}
-@@ -6675,6 +6851,9 @@
+@@ -6826,6 +7002,9 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		// Nothing below this line may reach gameplay while a menu is up.
  		vkq_vr_hold (&in_attack, false);
  		vkq_vr_hold (&in_jump, false);
@@ -384,7 +386,7 @@ back, so nobody is ever left axe-locked.
  		return;
  	}
  
-@@ -6745,6 +6924,11 @@
+@@ -6896,6 +7075,11 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  	}
  	if (fabsf (rs[1]) < 0.4f)
  		cycleArmed = 1;
@@ -396,7 +398,7 @@ back, so nobody is ever left axe-locked.
  	(void)ry;
  	(void)rOff;
  	(void)pOff;
-@@ -6770,7 +6954,7 @@
+@@ -6921,7 +7105,7 @@ void VKQ_VR_ApplyMoveDir (usercmd_t *cmd)
  		return; // aim-hand relative: the server already uses the aim yaw
  	if (mode == 2)
  	{
@@ -405,7 +407,7 @@ back, so nobody is ever left axe-locked.
  			return;
  		ref = (float)(atan2 (fwd[1], fwd[0]) * 180.0 / M_PI);
  	}
-@@ -6794,26 +6978,78 @@
+@@ -6945,26 +7129,78 @@ void VKQ_VR_ApplyMoveDir (usercmd_t *cmd)
  }
  
  // --- weapon at the hand (charter A8) -----------------------------------------
@@ -494,7 +496,7 @@ back, so nobody is ever left axe-locked.
  	const int				  w = cl.stats[STAT_ACTIVEWEAPON];
  	size_t					  i;
  	for (i = 0; i < sizeof (vkq_vr_guns) / sizeof (vkq_vr_guns[0]); i++)
-@@ -6822,36 +7058,74 @@
+@@ -6973,36 +7209,74 @@ static const vkq_vr_gun_t *vkq_vr_gun_entry (void)
  	return &def;
  }
  
@@ -515,11 +517,12 @@ back, so nobody is ever left axe-locked.
  /*
  ==================
 -VKQ_VR_PlaceViewmodel -- overlay 0019
-+VKQ_VR_PlaceViewmodel -- overlay 0019, reworked by 0020
- 
+-
 -Called at the end of V_CalcRefdef. Returns false when nothing is tracked, and
 -V_CalcRefdef's own face-attached placement stands — which is R1's behaviour,
 -unchanged, so a build with no controllers is not a build with a new bug.
++VKQ_VR_PlaceViewmodel -- overlay 0019, reworked by 0020
++
 +Called at the end of V_CalcRefdef. With a tracked aim hand the weapon is mounted
 +in that hand; WITHOUT one it is placed head-attached, R0-style, by this same
 +function — see VKQ_VR_PlaceViewmodelHead. What it must never do is fall through
@@ -579,7 +582,7 @@ back, so nobody is ever left axe-locked.
  	vkq_vr_angles_from_basis (fwd, right, up, ang);
  	VectorMA (org, g->fwd, fwd, org);
  	VectorMA (org, g->right, right, org);
-@@ -6860,7 +7134,7 @@
+@@ -7011,7 +7285,7 @@ qboolean VKQ_VR_PlaceViewmodel (entity_t *view)
  	VectorCopy (org, view->origin);
  	// Entity pitch is stored backwards from view angles (V_CalcRefdef's own
  	// comment, and what CalcGunAngle does to this same entity).
@@ -588,7 +591,7 @@ back, so nobody is ever left axe-locked.
  	view->angles[YAW] = ang[YAW];
  	view->angles[ROLL] = ang[ROLL];
  	view->netstate.scale = (byte)ENTSCALE_ENCODE (g->scale * vkqvr_gunscale.value);
-@@ -6907,18 +7181,513 @@
+@@ -7058,18 +7332,513 @@ void VKQ_VR_AimDebugString (char *out, int len)
  		VKQ_VR_HandsTracked ());
  }
  
@@ -1105,34 +1108,17 @@ back, so nobody is ever left axe-locked.
 +}
 +
  #endif
---- a/Quake/view.c
-+++ b/Quake/view.c
-@@ -867,7 +867,13 @@
- 	// Returns false with no controller tracked, and everything above stands:
- 	// that is exactly R1, so a gamepad player sees no change.
- 	{
-+		extern void		VKQ_VR_UpdateEyeRise (void);
- 		extern qboolean VKQ_VR_PlaceViewmodel (entity_t * v);
-+		// overlay 0020 fix 1: the standing-eye rise is resolved HERE, where
-+		// r_refdef.vieworg is final, and BEFORE the weapon is placed — the eyes,
-+		// the hands, the viewmodel and the laser all read the same number for
-+		// the frame, which is the only way they stay attached to one body.
-+		VKQ_VR_UpdateEyeRise ();
- 		VKQ_VR_PlaceViewmodel (view);
- 	}
- #endif
+diff --git a/Quake/r_part.c b/Quake/r_part.c
 --- a/Quake/r_part.c
 +++ b/Quake/r_part.c
-@@ -1058,21 +1058,58 @@
+@@ -1062,21 +1062,58 @@ texture's centre, which is solid white — so the ribbon is a clean constant
  colour while the dot keeps the texture's soft round falloff.
  ===============
  */
--static void R_DrawVRLaserGeometry (cb_context_t *cbx)
 +// How far a point on the beam is from the eye — the beam and the dot are
 +// sized in ANGLE, not world units, so this is what they are scaled by.
 +static float R_VRLaserEyeDist (const vec3_t p)
- {
--	extern qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal);
++{
 +	vec3_t d;
 +	VectorSubtract (p, r_origin, d);
 +	return VectorLength (d);
@@ -1158,8 +1144,9 @@ back, so nobody is ever left axe-locked.
 +	VectorNormalize (out);
 +}
 +
-+static void R_DrawVRLaserGeometry (cb_context_t *cbx)
-+{
+ static void R_DrawVRLaserGeometry (cb_context_t *cbx)
+ {
+-	extern qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal);
 +	extern qboolean VKQ_VR_LaserSight (vec3_t start, vec3_t end, vec3_t normal, int *hit);
  	extern cvar_t	vkqvr_laser;
 -	vec3_t			start, end, normal, dir, side, up2, a, b;
@@ -1174,6 +1161,8 @@ back, so nobody is ever left axe-locked.
  	const byte		beam_c[4] = {255, 40, 20, 255};
  	const byte		dot_c[4] = {255, 90, 40, 255};
  	const qboolean	want_beam = (vkqvr_laser.value < 1.5f);
+-
+-	if (!VKQ_VR_LaserSight (start, end, normal))
 +	// Constant APPARENT thickness. R2 scaled the half-width by the TOTAL trace
 +	// length (0.35 + len*0.0015), so a trace that escaped into the sky — and sky
 +	// is not solid to this trace, see VKQ_VR_LaserSight — drew a quad 25 units
@@ -1182,17 +1171,15 @@ back, so nobody is ever left axe-locked.
 +	// arc instead, which is both correct and incapable of that failure.
 +	const float		kHalfAngle = 0.0014f; // ~0.16 deg half-width
 +	const float		kDotAngle = 0.0075f;  // the impact dot, likewise
- 
--	if (!VKQ_VR_LaserSight (start, end, normal))
++
 +	if (!VKQ_VR_LaserSight (start, end, normal, &hit))
  		return;
  
  	VectorSubtract (end, start, dir);
-@@ -1080,14 +1117,6 @@
- 	if (len < 1.0f)
+@@ -1085,14 +1122,6 @@ static void R_DrawVRLaserGeometry (cb_context_t *cbx)
  		return;
  	VectorScale (dir, 1.0f / len, dir);
--
+ 
 -	// Ribbon width: face the viewer by crossing the beam with the eye-to-beam
 -	// vector, so it reads as a line from every angle instead of vanishing edge-on.
 -	VectorSubtract (start, r_origin, side);
@@ -1200,10 +1187,11 @@ back, so nobody is ever left axe-locked.
 -	if (VectorLength (up2) < 0.001f)
 -		VectorCopy (vup, up2);
 -	VectorNormalize (up2);
- 
+-
  	v = (basicvertex_t *)R_VertexAllocate (12 * sizeof (basicvertex_t), &vbuf, &voff);
  
-@@ -1103,34 +1132,47 @@
+ #define VKQ_LASER_VERT(P, C)                                                                                                                                 \
+@@ -1107,34 +1136,47 @@ static void R_DrawVRLaserGeometry (cb_context_t *cbx)
  
  	if (want_beam)
  	{
@@ -1234,14 +1222,14 @@ back, so nobody is ever left axe-locked.
  		VKQ_LASER_VERT (a, beam_c);
  		VKQ_LASER_VERT (b, beam_c);
 -		VectorMA (end, -half, up2, a);
-+		VKQ_LASER_VERT (c, beam_c);
- 		VKQ_LASER_VERT (a, beam_c);
+-		VKQ_LASER_VERT (a, beam_c);
 -		VectorMA (start, half, up2, a);
 -		VKQ_LASER_VERT (a, beam_c);
 -		VectorMA (end, -half, up2, a);
 -		VKQ_LASER_VERT (a, beam_c);
 -		VectorMA (end, half, up2, a);
--		VKQ_LASER_VERT (a, beam_c);
++		VKQ_LASER_VERT (c, beam_c);
+ 		VKQ_LASER_VERT (a, beam_c);
 +		VKQ_LASER_VERT (c, beam_c);
 +		VKQ_LASER_VERT (d, beam_c);
  	}
@@ -1268,14 +1256,13 @@ back, so nobody is ever left axe-locked.
  			VectorMA (p, qy[i] * r, vup, p);
  			v[n].position[0] = p[0], v[n].position[1] = p[1], v[n].position[2] = p[2];
  			v[n].texcoord[0] = (qx[i] + 1.0f) * 0.5f;
+diff --git a/Quake/sv_phys.c b/Quake/sv_phys.c
 --- a/Quake/sv_phys.c
 +++ b/Quake/sv_phys.c
-@@ -992,8 +992,122 @@
- SV_Physics_Client
- 
- Player character actions
-+================
-+*/
+@@ -2157,6 +2157,119 @@ static void SV_Physics_ClientWalk (edict_t *ent, sv_client_move_frame_t *move_fr
+ 	if (!ent->free && apply_gravity)
+ 		SV_FinishGravity (ent);
+ }
 +#ifdef VKQ_VISIONOS
 +/*
 +================
@@ -1307,8 +1294,8 @@ back, so nobody is ever left axe-locked.
 +traced from the player's real muzzle height and stopped short of solid, and the
 +shift is magnitude-limited. Failing safe means firing from the body, which is
 +exactly R2's shipped behaviour.
- ================
- */
++================
++*/
 +extern int	  vkq_vr_active;
 +extern cvar_t vkqvr_barrelfire;
 +extern qboolean VKQ_VR_AimRay (vec3_t org, vec3_t dir);
@@ -1389,11 +1376,10 @@ back, so nobody is ever left axe-locked.
 +	vkq_vr_origin_shifted = 0;
 +}
 +#endif
-+
+ 
  static void SV_Physics_Client (edict_t *ent, int num)
  {
- 	if (!svs.clients[num - 1].active)
-@@ -1026,8 +1140,21 @@
+@@ -2197,8 +2310,21 @@ static void SV_Physics_Client (edict_t *ent, int num)
  		break;
  
  	case MOVETYPE_WALK:
@@ -1412,10 +1398,10 @@ back, so nobody is ever left axe-locked.
 +		if (!SV_RunThink (ent))
 +			return;
 +#endif
- 		if (!SV_CheckWater (ent) && !((int)ent->v.flags & FL_WATERJUMP))
- 			SV_AddGravity (ent);
- 		SV_CheckStuck (ent);
-@@ -1066,7 +1193,17 @@
+ 		SV_Physics_ClientWalk (ent, &move_frame);
+ 		break;
+ 
+@@ -2235,7 +2361,17 @@ static void SV_Physics_Client (edict_t *ent, int num)
  
  	pr_global_struct->time = qcvm->time;
  	pr_global_struct->self = EDICT_TO_PROG (ent);
@@ -1425,11 +1411,28 @@ back, so nobody is ever left axe-locked.
 +	// is AFTER SV_LinkEdict above — the shifted origin is never linked, never
 +	// collided against and never networked.
 +	VKQ_VR_ShiftToMuzzle (ent, num);
- 	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
++	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
 +	VKQ_VR_RestoreOrigin (ent);
 +#else
-+	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
+ 	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
 +#endif
  }
  
  //============================================================================
+diff --git a/Quake/view.c b/Quake/view.c
+--- a/Quake/view.c
++++ b/Quake/view.c
+@@ -887,7 +887,13 @@ void V_CalcRefdef (void)
+ 	// Returns false with no controller tracked, and everything above stands:
+ 	// that is exactly R1, so a gamepad player sees no change.
+ 	{
++		extern void		VKQ_VR_UpdateEyeRise (void);
+ 		extern qboolean VKQ_VR_PlaceViewmodel (entity_t * v);
++		// overlay 0020 fix 1: the standing-eye rise is resolved HERE, where
++		// r_refdef.vieworg is final, and BEFORE the weapon is placed — the eyes,
++		// the hands, the viewmodel and the laser all read the same number for
++		// the frame, which is the only way they stay attached to one body.
++		VKQ_VR_UpdateEyeRise ();
+ 		VKQ_VR_PlaceViewmodel (view);
+ 	}
+ #endif

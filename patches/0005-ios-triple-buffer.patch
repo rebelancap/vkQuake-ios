@@ -1,6 +1,7 @@
---- a/Quake/gl_vidsdl.c	2026-07-08 23:48:27
-+++ b/Quake/gl_vidsdl.c	2026-07-09 10:24:15
-@@ -520,6 +520,9 @@
+diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -523,6 +523,9 @@ static qboolean VID_SetMode (int width, int height, float refreshrate, qboolean
  	if (!draw_context)
  	{
  		flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_VULKAN;
@@ -8,9 +9,9 @@
 +		flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY; // native Retina drawable (else renders at 1/3 res)
 +#endif
  
- 		if (vid_borderless.value)
- 			flags |= SDL_WINDOW_BORDERLESS;
-@@ -2841,7 +2844,13 @@
+ #ifdef USE_SDL3
+ 		flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+@@ -2885,7 +2888,13 @@ static qboolean GL_CreateSwapChain (void)
  	swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
  	swapchain_create_info.pNext = NULL;
  	swapchain_create_info.surface = vulkan_surface;

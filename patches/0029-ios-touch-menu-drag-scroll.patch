@@ -31,13 +31,56 @@ simulator, so driving the real handler from the console is the only way to test
 the gesture without a thumb on glass. vkq_slist_fake fills the host cache with a
 deterministic scrollable list for the same reason.
 
+diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
+--- a/Quake/in_sdl3.c
++++ b/Quake/in_sdl3.c
+@@ -28,14 +28,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ 
+ extern cvar_t in_debugkeys;
+ 
+-#ifdef VKQ_IOS
+-// Touch-driven menu cursor position (drawable pixels) + pending tap-click, read by
+-// menu.c M_UpdateMouse. SDL's touch->mouse synthesis is unreliable on this hardware
+-// (SDL_GetMouseState freezes after the first tap), so the menu is fed from finger
+-// events instead — see the SDL_EVENT_FINGER_* handling in IN_Commands below.
+-float vkq_menu_touch_x = 0.0f, vkq_menu_touch_y = 0.0f;
+-int	  vkq_menu_click_pending = 0;
+-#endif
++// The touch-driven menu cursor (SDL's touch->mouse synthesis is unreliable on this
++// hardware — SDL_GetMouseState freezes after the first tap) lives in menu.c now,
++// behind M_TouchEvent; see the SDL_EVENT_FINGER_* handling in IN_Commands below.
+ 
+ static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
+ SDL_Gamepad			 *joy_active_controller = NULL;
+@@ -269,15 +264,15 @@ void IN_SendKeyEvents (void)
+ #ifdef VKQ_IOS
+ 		// Drive the menu cursor from touch directly (SDL's touch->mouse synthesis
+ 		// freezes here). tfinger.x/y are normalized [0,1] in window space; scale to
+-		// drawable pixels for the menu-canvas mapping. Click fires on finger-up, a
+-		// couple frames later (menu.c M_UpdateMouse) once the cursor has tracked.
++		// drawable pixels for the menu-canvas mapping. M_TouchEvent decides what the
++		// gesture MEANS — a tap arms the click that fires a couple frames later
++		// (menu.c M_UpdateMouse), a drag scrolls the list instead and arms nothing.
+ 		case SDL_EVENT_FINGER_DOWN:
+ 		case SDL_EVENT_FINGER_MOTION:
+ 		case SDL_EVENT_FINGER_UP:
+-			vkq_menu_touch_x = event.tfinger.x * (float)glwidth;
+-			vkq_menu_touch_y = event.tfinger.y * (float)glheight;
+-			if (event.type == SDL_EVENT_FINGER_UP)
+-				vkq_menu_click_pending = 2;
++			M_TouchEvent (
++				event.tfinger.x * (float)glwidth, event.tfinger.y * (float)glheight,
++				(event.type == SDL_EVENT_FINGER_DOWN) ? 0 : ((event.type == SDL_EVENT_FINGER_MOTION) ? 1 : 2));
+ 			break;
+ #endif
+ 
+diff --git a/Quake/menu.c b/Quake/menu.c
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -116,6 +116,46 @@
- static int scrollbar_x;
+@@ -123,6 +123,46 @@ static int scrollbar_x;
  static int scrollbar_y;
  static int scrollbar_size;
-+
+ 
 +#ifdef VKQ_IOS
 +// ---------------------------------------------------------------------------
 +// TOUCH: tap vs drag (vkquake-ios 1.1.0.2)
@@ -77,10 +120,11 @@ deterministic scrollable list for the same reason.
 +static qboolean vkq_touch_down;			  // a finger is currently on the glass
 +static qboolean vkq_touch_dragging;		  // ... and it has travelled past the slop
 +#endif
++
+ void		M_ConfigureNetSubsystem (void);
+ static void M_SetSkillMenuMap (const char *name);
  
- void M_ConfigureNetSubsystem (void);
- 
-@@ -192,10 +232,15 @@
+@@ -246,10 +286,15 @@ float M_GetScale ()
  M_PixelToMenuCanvasCoord
  ================
  */
@@ -98,7 +142,7 @@ deterministic scrollable list for the same reason.
  	*x = (*x - (glwidth - 320 * s) / 2) / s;
  	*y = (*y - (glheight - 200 * s) / 2) / s;
  }
-@@ -440,6 +485,13 @@
+@@ -494,6 +539,13 @@ static void M_DrawScrollbar (cb_context_t *cbx, int x, int y, float value, float
  	scrollbar_x = x;
  	scrollbar_y = y - 8;
  	scrollbar_size = (size + 2) * CHARACTER_SIZE;
@@ -112,7 +156,7 @@ deterministic scrollable list for the same reason.
  	value = CLAMP (0.0f, value, 1.0f);
  	Draw_Character (cbx, x, y - CHARACTER_SIZE, 128 + 256);
  	for (int i = 0; i < size; i++)
-@@ -604,6 +656,18 @@
+@@ -658,6 +710,18 @@ M_UpdateCursorForList
  */
  static void M_Mouse_UpdateListCursor (int *cursor, int left, int right, int top, int item_height, int num_items, int scroll_offset)
  {
@@ -131,10 +175,10 @@ deterministic scrollable list for the same reason.
  	if (!scrollbar_grab && !slider_grab && m_mouse_moved && (num_items > 0) && (m_mouse_x >= left) && (m_mouse_x <= right) && (m_mouse_y >= top) &&
  		(m_mouse_y <= (top + item_height * num_items)))
  		*cursor = scroll_offset + CLAMP (0, (m_mouse_y - top) / item_height, num_items - 1);
-@@ -3904,6 +3968,212 @@
- #endif // VKQ_IOS
- 
- //=============================================================================
+@@ -5090,6 +5154,210 @@ void M_CheckMods (void)
+ 	m_skill_usegfx = M_CheckCustomGfx ("gfx/skillmenu.lmp", "gfx/sp_menu.lmp", 14856, sp_hashes, countof (sp_hashes));
+ 	m_skill_usecustomtitle = M_CheckCustomGfx ("gfx/p_skill.lmp", "gfx/ttl_sgl.lmp", 6728, sgl_hashes, countof (sgl_hashes));
+ }
 +#ifdef VKQ_IOS
 +/* TOUCH: tap-to-activate, drag-to-scroll (see the latches at the top of the file) */
 +
@@ -339,12 +383,10 @@ deterministic scrollable list for the same reason.
 +		((float)glwidth - 320.0f * s) / 2.0f, ((float)glheight - 200.0f * s) / 2.0f, glwidth, glheight);
 +}
 +#endif // VKQ_IOS
-+
-+//=============================================================================
- /* Credits menu -- used by the 2021 re-release */
  
- static void M_Menu_Credits_f (void) {}
-@@ -3922,6 +4192,16 @@
+ //=============================================================================
+ /* Credits menu -- used by the 2021 re-release */
+@@ -5111,6 +5379,16 @@ void M_Init (void)
  #ifdef VKQ_IOS
  	Cmd_AddCommand ("vkq_quicksave", VKQ_QuickSave_f);
  	Cmd_AddCommand ("vkq_quickload", VKQ_QuickLoad_f);
@@ -361,7 +403,7 @@ deterministic scrollable list for the same reason.
  #endif
  	Cmd_AddCommand ("menu_multiplayer", M_Menu_MultiPlayer_f);
  	Cmd_AddCommand ("menu_setup", M_Menu_Setup_f);
-@@ -3945,8 +4225,7 @@
+@@ -5136,8 +5414,7 @@ void M_UpdateMouse (void)
  	// synthesis is unreliable here — SDL_GetMouseState freezes at the first tap's
  	// position (so every menu tap stuck on the first item, Single Player). Drive the
  	// menu straight from finger events (in_sdl3.c), already in drawable pixels.
@@ -371,7 +413,7 @@ deterministic scrollable list for the same reason.
  	float		 new_mouse_y = vkq_menu_touch_y;
  #elif defined(USE_SDL3)
  	float new_mouse_x;
-@@ -3972,11 +4251,18 @@
+@@ -5163,11 +5440,18 @@ void M_UpdateMouse (void)
  	// A tap (finger up) sets a 2-frame pending click: the position was applied above
  	// and the menu draw updates the highlighted row this frame, so firing MOUSE1 a
  	// couple frames later lands the click on the row you touched, not a stale one.
@@ -393,7 +435,7 @@ deterministic scrollable list for the same reason.
  	}
  #endif
  
-@@ -4007,6 +4293,13 @@
+@@ -5201,6 +5485,13 @@ void M_UpdateMouse (void)
  
  void M_Draw (cb_context_t *cbx)
  {
@@ -407,9 +449,10 @@ deterministic scrollable list for the same reason.
  	if (m_state == m_none || key_dest != key_menu)
  		return;
  
+diff --git a/Quake/menu.h b/Quake/menu.h
 --- a/Quake/menu.h
 +++ b/Quake/menu.h
-@@ -75,6 +75,11 @@
+@@ -77,6 +77,11 @@ void	 M_ToggleMenu_f (void);
  float	 M_GetScale ();
  void	 M_UpdateMouse ();
  void	 M_MenuChanged ();
@@ -421,56 +464,13 @@ deterministic scrollable list for the same reason.
  
  void M_Menu_Main_f (void);
  void M_Menu_Options_f (void);
---- a/Quake/in_sdl3.c
-+++ b/Quake/in_sdl3.c
-@@ -28,14 +28,9 @@
- 
- extern cvar_t in_debugkeys;
- 
--#ifdef VKQ_IOS
--// Touch-driven menu cursor position (drawable pixels) + pending tap-click, read by
--// menu.c M_UpdateMouse. SDL's touch->mouse synthesis is unreliable on this hardware
--// (SDL_GetMouseState freezes after the first tap), so the menu is fed from finger
--// events instead — see the SDL_EVENT_FINGER_* handling in IN_Commands below.
--float vkq_menu_touch_x = 0.0f, vkq_menu_touch_y = 0.0f;
--int	  vkq_menu_click_pending = 0;
--#endif
-+// The touch-driven menu cursor (SDL's touch->mouse synthesis is unreliable on this
-+// hardware — SDL_GetMouseState freezes after the first tap) lives in menu.c now,
-+// behind M_TouchEvent; see the SDL_EVENT_FINGER_* handling in IN_Commands below.
- 
- static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
- SDL_Gamepad			 *joy_active_controller = NULL;
-@@ -263,15 +258,15 @@
- #ifdef VKQ_IOS
- 		// Drive the menu cursor from touch directly (SDL's touch->mouse synthesis
- 		// freezes here). tfinger.x/y are normalized [0,1] in window space; scale to
--		// drawable pixels for the menu-canvas mapping. Click fires on finger-up, a
--		// couple frames later (menu.c M_UpdateMouse) once the cursor has tracked.
-+		// drawable pixels for the menu-canvas mapping. M_TouchEvent decides what the
-+		// gesture MEANS — a tap arms the click that fires a couple frames later
-+		// (menu.c M_UpdateMouse), a drag scrolls the list instead and arms nothing.
- 		case SDL_EVENT_FINGER_DOWN:
- 		case SDL_EVENT_FINGER_MOTION:
- 		case SDL_EVENT_FINGER_UP:
--			vkq_menu_touch_x = event.tfinger.x * (float)glwidth;
--			vkq_menu_touch_y = event.tfinger.y * (float)glheight;
--			if (event.type == SDL_EVENT_FINGER_UP)
--				vkq_menu_click_pending = 2;
-+			M_TouchEvent (
-+				event.tfinger.x * (float)glwidth, event.tfinger.y * (float)glheight,
-+				(event.type == SDL_EVENT_FINGER_DOWN) ? 0 : ((event.type == SDL_EVENT_FINGER_MOTION) ? 1 : 2));
- 			break;
- #endif
- 
+diff --git a/Quake/net_main.c b/Quake/net_main.c
 --- a/Quake/net_main.c
 +++ b/Quake/net_main.c
-@@ -431,7 +431,66 @@
- 	if (idx >= hostCacheCount)
- 		return "";
+@@ -433,6 +433,65 @@ const char *NET_SlistPrintServerName (size_t idx)
  	return hostcache[idx].cname;
-+}
-+
+ }
+ 
 +#ifdef VKQ_IOS
 +/*
 +====================
@@ -527,12 +527,13 @@ deterministic scrollable list for the same reason.
 +	}
 +	hostCacheCount = want;
 +	Con_Printf ("vkq_slist_fake: host cache holds %d entr%s\n", (int)hostCacheCount, hostCacheCount == 1 ? "y" : "ies");
- }
++}
 +#endif
- 
++
  static void Slist_Send (void *unused)
  {
-@@ -925,6 +984,9 @@
+ 	for (net_driverlevel = 0; net_driverlevel < net_numdrivers; net_driverlevel++)
+@@ -925,6 +984,9 @@ void NET_Init (void)
  	Cvar_RegisterVariable (&hostname);
  
  	Cmd_AddCommand ("slist", NET_Slist_f);
