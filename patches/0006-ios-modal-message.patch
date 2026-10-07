@@ -18,7 +18,7 @@ diff --git a/Quake/common.c b/Quake/common.c
 diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
-@@ -543,6 +543,10 @@ void SCR_LoadPics (void)
+@@ -543,6 +543,10 @@
  SCR_Init
  ==================
  */
@@ -29,7 +29,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  void SCR_Init (void)
  {
  	// johnfitz -- new cvars
-@@ -600,6 +604,9 @@ void SCR_Init (void)
+@@ -600,6 +604,9 @@
  		CFG_CloseConfig ();
  	}
  
@@ -39,7 +39,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  	Cmd_AddCommand ("screenshot", SCR_ScreenShot_f);
  	Cmd_AddCommand ("sizeup", SCR_SizeUp_f);
  	Cmd_AddCommand ("sizedown", SCR_SizeDown_f);
-@@ -1332,16 +1339,37 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
+@@ -1332,16 +1339,37 @@
  	time2 = 0.0f;						 // johnfitz -- timeout
  
  	Key_BeginInputGrab ();
@@ -77,10 +77,13 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  
  	//	SCR_UpdateScreen (); //johnfitz -- commented out
  
-@@ -1388,6 +1416,485 @@ void SCR_TileClear (cb_context_t *cbx)
- 	}
- }
- 
+@@ -1385,9 +1413,590 @@
+ 		Draw_TileClear (
+ 			cbx, r_refdef.vrect.x, r_refdef.vrect.y + r_refdef.vrect.height, r_refdef.vrect.width,
+ 			glheight - r_refdef.vrect.y - r_refdef.vrect.height - sb_lines);
++	}
++}
++
 +#ifdef VKQ_IOS
 +//==============================================================================
 +// vkquake-ios: rerelease-style weapon wheel.
@@ -129,6 +132,48 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 +
 +static qpic_t *SCR_WW_RingPic (void);  // defined below; built at load time (not mid-render)
 +static qpic_t *SCR_WW_ArrowPic (void); // selection pointer texture
++static qpic_t *SCR_WW_AxePic (qboolean sel); // classic data has no axe icon; drawn procedurally
++
++// Classic (non-rerelease) data: no wwheel.txt, no gfx/weapons/ww_*.lmp. Every
++// gfx.wad since 1996 does ship the status-bar weapon icons (inv_* / inv2_* —
++// 24x16, the same 3:2 as the rerelease wheel icons), so the wheel is built from
++// those instead, and only the axe (which the status bar never shows) is drawn
++// in code. Table order is wwheel.txt's own, so the reorder below yields the
++// identical on-screen layout for either data set. Mission packs add weapons
++// (hipnotic laser/mjolnir, rogue lava/plasma) but select them with these same
++// eight impulses, so the eight-slot wheel still switches everything.
++// GitHub issue #4: with original id1 the wheel never opened at all.
++static void SCR_WW_LoadClassic (void)
++{
++	static const struct
++	{
++		int			impulse, weaponnum, ammostat;
++		const char *inv; // gfx.wad lump suffix; NULL = the procedural axe
++	} classic[] = {
++		{2, IT_SHOTGUN, STAT_SHELLS, "shotgun"},   {3, IT_SUPER_SHOTGUN, STAT_SHELLS, "sshotgun"},
++		{4, IT_NAILGUN, STAT_NAILS, "nailgun"},	   {5, IT_SUPER_NAILGUN, STAT_NAILS, "snailgun"},
++		{6, IT_GRENADE_LAUNCHER, STAT_ROCKETS, "rlaunch"}, {7, IT_ROCKET_LAUNCHER, STAT_ROCKETS, "srlaunch"},
++		{8, IT_LIGHTNING, STAT_CELLS, "lightng"},  {1, IT_AXE, -1, NULL},
++	};
++	for (size_t i = 0; i < countof (classic); i++)
++	{
++		ww_slot_t *s = &ww_slots[ww_numslots++];
++		memset (s, 0, sizeof (*s));
++		s->impulse = classic[i].impulse;
++		s->weaponnum = classic[i].weaponnum;
++		s->ammostat = classic[i].ammostat;
++		if (classic[i].inv)
++		{
++			s->icon = Draw_PicFromWad (va ("inv_%s", classic[i].inv));
++			s->icon_sel = Draw_PicFromWad (va ("inv2_%s", classic[i].inv));
++		}
++		else
++		{
++			s->icon = SCR_WW_AxePic (false);
++			s->icon_sel = SCR_WW_AxePic (true);
++		}
++	}
++}
 +
 +static void SCR_WeaponWheel_Load (void)
 +{
@@ -137,11 +182,11 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 +	byte *file = COM_LoadFile ("wwheel.txt", NULL);
 +	if (!file)
 +	{
-+		Con_Printf ("weapon wheel: wwheel.txt not found (rerelease data only)\n");
-+		return;
++		Con_Printf ("weapon wheel: no wwheel.txt (classic data) -- using status-bar icons\n");
++		SCR_WW_LoadClassic ();
 +	}
 +	const char *data = (const char *)file;
-+	while ((data = COM_Parse (data)) != NULL)
++	while (file && (data = COM_Parse (data)) != NULL)
 +	{
 +		if (strcmp (com_token, "slot"))
 +			continue;
@@ -174,7 +219,8 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 +		if (s->icon)
 +			ww_numslots++;
 +	}
-+	Mem_Free (file);
++	if (file)
++		Mem_Free (file);
 +	// Reorder into the rerelease's on-screen layout. wwheel.txt lists the slots going
 +	// one rotational direction; the rerelease keeps slot 0 at 12 o'clock and runs the
 +	// rest the OTHER way, so reversing slots 1..N-1 reproduces it for ANY weapon count
@@ -294,6 +340,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 +
 +static qpic_t *ww_ring_pic;
 +static qpic_t *ww_arrow_pic;
++static qpic_t *ww_axe_pic[2]; // classic-data axe slot: [0] normal, [1] selected
 +
 +static qpic_t *SCR_WW_RingPic (void)
 +{
@@ -350,10 +397,10 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 +		return Draw_PicFromWad ("sb_rocket");
 +	case STAT_CELLS:
 +		return Draw_PicFromWad ("sb_cells");
-+	}
+ 	}
 +	return NULL;
-+}
-+
+ }
+ 
 +// white triangle pointing "up" (tip at top), for the selection pointer
 +static qpic_t *SCR_WW_ArrowPic (void)
 +{
@@ -381,6 +428,63 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 +	return ww_arrow_pic;
 +}
 +
++// Axe icon for classic data, 24x16 like the inv_* lumps it sits beside: a steel
++// head on a wooden haft, brightened for the selected state the way inv2_* are.
++static qpic_t *SCR_WW_AxePic (qboolean sel)
++{
++	if (ww_axe_pic[sel])
++		return ww_axe_pic[sel];
++	static const char *art[16] = {
++		"........................",
++		"..................####..",
++		".................######.",
++		"................#######.",
++		"...............#######..",
++		"..............#######...",
++		".............oo..###....",
++		"............oo....#.....",
++		"...........oo...........",
++		"..........oo............",
++		".........oo.............",
++		"........oo..............",
++		".......oo...............",
++		"......oo................",
++		".....oo.................",
++		"........................",
++	};
++	const int W = 24, H = 16;
++	byte	 *rgba = (byte *)malloc (W * H * 4); // kept alive: TexMgr may reload from this address
++	for (int y = 0; y < H; y++)
++		for (int x = 0; x < W; x++)
++		{
++			byte *px = rgba + (y * W + x) * 4;
++			char  c = art[y][x];
++			if (c == '#') // steel head
++			{
++				px[0] = px[1] = px[2] = sel ? 235 : 170;
++				px[3] = 255;
++			}
++			else if (c == 'o') // wooden haft
++			{
++				px[0] = sel ? 200 : 130;
++				px[1] = sel ? 150 : 85;
++				px[2] = sel ? 80 : 40;
++				px[3] = 255;
++			}
++			else
++				px[0] = px[1] = px[2] = px[3] = 0;
++		}
++	gltexture_t *tex = TexMgr_LoadImage (
++		NULL, sel ? "ww_axe_sel" : "ww_axe", W, H, SRC_RGBA, rgba, "", (src_offset_t)(uintptr_t)rgba, TEXPREF_ALPHA | TEXPREF_NEAREST | TEXPREF_NOPICMIP);
++	qpic_t *pic = (qpic_t *)Mem_Alloc (sizeof (int) * 2 + sizeof (ww_glpic_t));
++	pic->width = W;
++	pic->height = H;
++	ww_glpic_t gl = {tex, 0.0f, 0.0f, 1.0f, 1.0f};
++	memcpy (pic->data, &gl, sizeof (gl));
++	ww_axe_pic[sel] = pic;
++	return pic;
++}
++
 +// Switching games (mods menu / `game` command) flushes and reloads ALL textures
 +// (common.c: TexMgr_NewGame + Draw_NewGame), which frees the wheel's cached pics —
 +// but the wheel loaded lazily ONCE and kept those now-dangling pointers, so it drew
@@ -392,6 +496,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
 +	ww_loaded = false;	   // re-parse wwheel.txt + re-cache slot/digit/ammo pics on next open
 +	ww_ring_pic = NULL;	   // procedural: force SCR_WW_RingPic to recreate its texture
 +	ww_arrow_pic = NULL;   // procedural: force SCR_WW_ArrowPic to recreate its texture
++	ww_axe_pic[0] = ww_axe_pic[1] = NULL; // procedural: same for the classic-data axe
 +}
 +
 +// draw a pic centered at (ccx,ccy), size w x h, rotated by `angle` radians (local
@@ -563,7 +668,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  /*
  ==================
  SCR_DrawGUI
-@@ -1441,6 +1948,9 @@ static void SCR_DrawGUI (void *unused)
+@@ -1441,6 +2050,9 @@
  		SCR_DrawPause (cbx);
  		SCR_CheckDrawCenterString (cbx);
  		Sbar_Draw (cbx);
