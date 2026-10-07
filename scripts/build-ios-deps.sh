@@ -34,6 +34,8 @@ lipo -info "$DEPS/moltenvk/lib/libMoltenVK.a"
 # These are private build fixes, NOT upstream contributions. Currently: enable the
 # on-screen-keyboard backspace when SDL_HasKeyboard() is true (a game controller
 # makes it true on iOS, which otherwise gates soft-keyboard Delete off entirely).
+# 0002: SwiftUI scene-delegate coexistence (visionOS). 0003: iOS 27 SDK — ask the
+# window scene for interface orientation (statusBarOrientation returns Unknown).
 if [ -d "$SDL_SRC/.git" ]; then
 	sdl_patched=0
 	for p in "$ROOT"/patches/sdl/*.patch; do

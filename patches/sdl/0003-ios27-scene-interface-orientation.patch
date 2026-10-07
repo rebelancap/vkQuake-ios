@@ -1,0 +1,91 @@
+diff --git a/src/video/uikit/SDL_uikitmodes.m b/src/video/uikit/SDL_uikitmodes.m
+index b7cb52e..a8d3d80 100644
+--- a/src/video/uikit/SDL_uikitmodes.m
++++ b/src/video/uikit/SDL_uikitmodes.m
+@@ -330,7 +330,7 @@ bool UIKit_IsDisplayLandscape(UIScreen *uiscreen)
+ {
+ #ifndef SDL_PLATFORM_TVOS
+     if (uiscreen == [UIScreen mainScreen]) {
+-        return UIInterfaceOrientationIsLandscape([UIApplication sharedApplication].statusBarOrientation);
++        return UIInterfaceOrientationIsLandscape(UIKit_GetInterfaceOrientation(nil));
+     } else
+ #endif // !SDL_PLATFORM_TVOS
+     {
+@@ -484,7 +484,8 @@ void UIKit_QuitModes(SDL_VideoDevice *_this)
+ #if !defined(SDL_PLATFORM_TVOS) && !defined(SDL_PLATFORM_VISIONOS)
+ void SDL_OnApplicationDidChangeStatusBarOrientation(void)
+ {
+-    BOOL isLandscape = UIInterfaceOrientationIsLandscape([UIApplication sharedApplication].statusBarOrientation);
++    UIInterfaceOrientation curorient = UIKit_GetInterfaceOrientation(nil);
++    BOOL isLandscape = UIInterfaceOrientationIsLandscape(curorient);
+     SDL_VideoDisplay *display = SDL_GetVideoDisplay(SDL_GetPrimaryDisplay());
+ 
+     if (display) {
+@@ -518,7 +519,7 @@ void SDL_OnApplicationDidChangeStatusBarOrientation(void)
+             }
+         }
+ 
+-        switch ([UIApplication sharedApplication].statusBarOrientation) {
++        switch (curorient) {
+         case UIInterfaceOrientationPortrait:
+             orientation = SDL_ORIENTATION_PORTRAIT;
+             break;
+diff --git a/src/video/uikit/SDL_uikitvideo.h b/src/video/uikit/SDL_uikitvideo.h
+index 3db7f9b..d5e21f0 100644
+--- a/src/video/uikit/SDL_uikitvideo.h
++++ b/src/video/uikit/SDL_uikitvideo.h
+@@ -42,6 +42,10 @@ extern CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen);
+ #endif
+ 
+ extern API_AVAILABLE(ios(13.0)) UIWindowScene *UIKit_GetActiveWindowScene(void);
++#if !defined(SDL_PLATFORM_TVOS) && !defined(SDL_PLATFORM_VISIONOS)
++// vkquake-ios SDL patch 0003: scene-aware interface orientation (see SDL_uikitvideo.m).
++extern UIInterfaceOrientation UIKit_GetInterfaceOrientation(UIWindow *uiwindow);
++#endif
+ 
+ extern void UIKit_SetGameControllerInteraction(bool enabled);
+ extern void UIKit_SetViewGameControllerInteraction(UIView *view, bool enabled);
+diff --git a/src/video/uikit/SDL_uikitvideo.m b/src/video/uikit/SDL_uikitvideo.m
+index 97aeb94..58f8c7e 100644
+--- a/src/video/uikit/SDL_uikitvideo.m
++++ b/src/video/uikit/SDL_uikitvideo.m
+@@ -210,6 +210,30 @@ SDL_SystemTheme UIKit_GetSystemTheme(void)
+     return SDL_SYSTEM_THEME_UNKNOWN;
+ }
+ 
++#if !defined(SDL_PLATFORM_TVOS) && !defined(SDL_PLATFORM_VISIONOS)
++/* vkquake-ios SDL patch 0003: apps linked against the iOS 27 SDK that adopt the
++ * UIScene life cycle get UIInterfaceOrientationUnknown (0) from the deprecated
++ * -[UIApplication statusBarOrientation] (measured on the iOS 27.0 simulator: 0
++ * while the window scene reported LandscapeRight). Every SDL caller then treats a
++ * landscape app as portrait - UIKit_ComputeViewFrame swaps the view to 420x912 pt
++ * on a 912x420 pt landscape window the first time the keyboard machinery calls
++ * -updateKeyboard, and the Metal drawable follows it. Ask the window's scene
++ * (or the active scene) first; fall back to the status bar only if no scene. */
++UIInterfaceOrientation UIKit_GetInterfaceOrientation(UIWindow *uiwindow)
++{
++    if (@available(iOS 13.0, *)) {
++        UIWindowScene *scene = uiwindow ? uiwindow.windowScene : nil;
++        if (!scene) {
++            scene = UIKit_GetActiveWindowScene();
++        }
++        if (scene && scene.interfaceOrientation != UIInterfaceOrientationUnknown) {
++            return scene.interfaceOrientation;
++        }
++    }
++    return [UIApplication sharedApplication].statusBarOrientation;
++}
++#endif
++
+ #ifdef SDL_PLATFORM_VISIONOS
+ CGRect UIKit_ComputeViewFrame(SDL_Window *window)
+ {
+@@ -237,7 +261,7 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
+      * https://bugzilla.libsdl.org/show_bug.cgi?id=3505
+      * https://bugzilla.libsdl.org/show_bug.cgi?id=3465
+      * https://forums.developer.apple.com/thread/65337 */
+-    UIInterfaceOrientation orient = [UIApplication sharedApplication].statusBarOrientation;
++    UIInterfaceOrientation orient = UIKit_GetInterfaceOrientation((data != nil) ? data.uiwindow : nil);
+     BOOL landscape = UIInterfaceOrientationIsLandscape(orient) ||
+                     !(UIKit_GetSupportedOrientations(window) & (UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown));
+     BOOL fullscreen = CGRectEqualToRect(screen.bounds, frame);
