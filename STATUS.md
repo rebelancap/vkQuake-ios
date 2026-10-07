@@ -10,6 +10,8 @@ classic-data weapon wheel (issue #4) + SDL patch 0003 (iOS 27 SDK layout). It is
 the first release built on the Xcode 27 / iOS 27 SDK; sim-verified full-screen,
 Austin accepted on the strength of the sim round (rerelease-only on his device).
 Next OTA dev builds are 1.1.2.1, 1.1.2.2, …
+Branch `issue-5` (on top of 1.1.2) carries issue #5 — console by touch + Classic/2021
+Game Data choice — sim-verified, awaiting review and its first OTA (1.1.2.1).
 
 ## Last round (2026-10-07) — issue #5, branch `issue-5` (commit e274ad2, NOT released)
 Implemented GitHub issue #5 items 1 and 3 (item 2 shipped in 1.1.2):
