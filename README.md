@@ -58,6 +58,10 @@ mod like `ad` for Arcane Dimensions) and it appears in the in-game Mods menu.
 - **QuakeC mods** — drop a mod folder in and launch it from a generated menu (Arcane
   Dimensions, Copper, Alkaline, …)
 - Music, all sound, demos, and the full menu/console by touch or controller
+- Console by touch: tap **CONSOLE** in any menu, tap the screen with three fingers, or
+  type `~` on the on-screen keyboard (three fingers again hides/brings back the keyboard)
+- Have both the 2021 re-release and the original Quake files? Pick which one loads in
+  iOS Settings → **Game Data** (applies the next time the app starts)
 - **Game controllers** with a sane default layout; on-screen touch sticks + gyro aim
 - 60 / 120 Hz (ProMotion), in-app settings that persist
 - **Apple Vision Pro — three ways to play:** a free-resizing 2D window; a **3D mode**

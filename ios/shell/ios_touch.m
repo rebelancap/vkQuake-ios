@@ -695,6 +695,7 @@ UIWindow *VKQ_iOS_GameWindow (void)
 static UIButton		*g_back;
 static UIButton		*g_settings; // menu-only iOS settings button (shown with the back button)
 static UIButton		*g_qsave, *g_qload; // main-menu-only quick save / quick load
+static UIButton		*g_console;		 // issue #5: menu-only CONSOLE pill (touch-only players had no way in)
 static UIView		*g_catcher;	 // transparent; a tap during the attract demo opens the menu
 static UIButton		*g_kbdismiss; // dismiss-keyboard (checkmark) button, shown while the keyboard is up
 
@@ -713,6 +714,18 @@ static UIWindow *vkq_key_window (void); // defined below
 extern void VKQ_iOS_SetTextInputRect (int x, int y, int w, int h);
 extern void VKQ_TouchChar (int c);
 static BOOL g_kb_visible;
+static BOOL g_text_active; // engine says a text field / the console wants typing (VKQ_iOS_SetTextActive)
+
+// Issue #5: open/close the engine console from the shell (CONSOLE pill, 3-finger
+// tap, ` / ~ on the soft keyboard). `toggleconsole` is the same command the
+// desktop backquote key is bound to; Con_ToggleConsole_f handles every key_dest
+// (game -> console, menu -> console, console -> game or back to the main menu),
+// and the engine then raises the keyboard itself through VKQ_iOS_SetTextActive.
+static void vkq_toggle_console (const char *why)
+{
+	NSLog (@"[vkquake] console toggle (%s) keydest=%d", why, VKQ_TouchKeyDest ());
+	VKQ_TouchCommand ("toggleconsole\n");
+}
 // how far up to slide, as a fraction of the keyboard height (1.0 = clear it fully)
 #define VKQ_KB_SHIFT_FRAC 0.28f
 #define VKQ_K_BACKSPACE 127
@@ -735,6 +748,15 @@ static BOOL g_kb_visible;
 	for (NSUInteger i = 0; i < text.length; i++)
 	{
 		unichar c = [text characterAtIndex:i];
+		if (c == '`' || c == '~')
+		{
+			// Issue #5: the console key, as on a desktop keyboard. Typed into
+			// Char_Event it would land in the input line (or, in-game, nowhere
+			// useful); routed here it opens the console from the game or a menu
+			// and closes it from inside.
+			vkq_toggle_console ("keyboard ~");
+			continue;
+		}
 		if (c == '\n' || c == '\r')
 		{
 			VKQ_TouchKey (VKQ_K_ENTER, 1);
@@ -757,6 +779,7 @@ static VKQKeyInput *g_kbinput;
 void VKQ_iOS_SetTextActive (int active)
 {
 	dispatch_async (dispatch_get_main_queue (), ^{
+		g_text_active = active ? YES : NO;
 		if (!g_kbinput)
 			return;
 		if (active)
@@ -784,9 +807,36 @@ void VKQ_iOS_SetTextActive (int active)
 	// the keyboard height below the keyboard top so the shift is only that fraction.
 	CGFloat winH = win.bounds.size.height;
 	CGFloat kbTop = winH - h;
-	CGFloat rectBottom = kbTop + h * VKQ_KB_SHIFT_FRAC;
+	CGFloat shift = h * VKQ_KB_SHIFT_FRAC;
+	// Issue #5: the CONSOLE has a known geometry, so shift exactly as far as its
+	// input line needs and no further. A half-screen console (in game / over a
+	// demo) ends at winH/2, which clears a landscape phone keyboard on its own —
+	// the fixed fraction pushed its top ~4 lines off-screen for nothing. A forced
+	// full-screen console (nothing running) has its input line at the bottom,
+	// which the fraction left UNDER the keyboard; there the whole keyboard height
+	// is needed. 10 pt keeps the input line off the keyboard's edge.
+	if (VKQ_TouchKeyDest () == 1 /* key_console */)
+	{
+		extern int VKQ_TouchConForced (void);
+		CGFloat	   conBottom = VKQ_TouchConForced () ? winH : winH * 0.5f;
+		shift = MAX (0.0, conBottom + 10.0 - kbTop);
+	}
+	CGFloat rectBottom = kbTop + shift;
 	int		rh = 24;
 	VKQ_iOS_SetTextInputRect (0, (int)(rectBottom - rh), (int)win.bounds.size.width, rh);
+	// SDL only re-applies its shift for a new rect while ITS text field is
+	// focused (never — we use our own responder) or from its own will-show
+	// observer. When that observer runs before this one it shifts by the PREVIOUS
+	// show's rect: measured 59 pt instead of 0 on the first console after a menu
+	// keyboard. Ask the view controller to recompute now, whichever ran first.
+	{
+		UIViewController *vc = win.rootViewController;
+		SEL				  upd = NSSelectorFromString (@"updateKeyboard");
+		if ([vc respondsToSelector:upd])
+			((void (*) (id, SEL))[vc methodForSelector:upd]) (vc, upd);
+	}
+	NSLog (@"[vkquake] keyboard shown: win %.0fx%.0f pt, keyboard h=%.0f top=%.0f, view shift=%.0f pt (keydest %d)",
+		   win.bounds.size.width, winH, h, kbTop, shift, VKQ_TouchKeyDest ());
 
 	if (!g_kbdismiss)
 	{
@@ -817,9 +867,18 @@ void VKQ_iOS_SetTextActive (int active)
 {
 	[g_kbinput resignFirstResponder]; // hide the native keyboard
 }
-// 3-finger tap: toggle the keyboard (re-summon after a Dismiss, or hide it)
+// 3-finger tap. With nothing to type into (in-game, or a menu without a text
+// field) it opens the console — issue #5: raising a bare keyboard over the game
+// sent the typing to the game, not to anything the player could see. With a text
+// field or the console already active it toggles the keyboard (re-summon after a
+// Dismiss, or hide it), as before.
 - (void)threeFingerTap:(UITapGestureRecognizer *)g
 {
+	if (!g_text_active && VKQ_TouchKeyDest () != 1 /* key_console */)
+	{
+		vkq_toggle_console ("3-finger tap");
+		return;
+	}
 	if (g_kb_visible)
 		[g_kbinput resignFirstResponder];
 	else
@@ -827,6 +886,46 @@ void VKQ_iOS_SetTextActive (int active)
 }
 @end
 static VKQKeyboard *g_keyboard;
+
+// Headless seam for the simulator (issue #5), reached from the console as
+// `vkq_ui <action> [text]` (overlay 0030). Injected UIKit touches do not reach
+// these paths on the sim, so each action calls EXACTLY what the real gesture
+// calls: the CONSOLE pill is pressed through its own UIButton target (and refused
+// while the button is hidden, so a pill that never appears cannot pass), the
+// 3-finger tap runs the recognizer's action, and typing goes through the
+// keyboard responder's insertText:/deleteBackward.
+void VKQ_iOS_UIAction (const char *act, const char *arg)
+{
+	NSString *a = @(act ? act : ""), *t = @(arg ? arg : "");
+	dispatch_async (dispatch_get_main_queue (), ^{
+		if ([a isEqualToString:@"console"])
+		{
+			if (!g_console || g_console.hidden)
+				NSLog (@"[vkquake] vkq_ui console: REFUSED - the CONSOLE pill is not on screen");
+			else
+				[g_console sendActionsForControlEvents:UIControlEventTouchUpInside];
+		}
+		else if ([a isEqualToString:@"threefinger"])
+			[g_keyboard threeFingerTap:nil];
+		else if ([a isEqualToString:@"type"])
+			[g_kbinput insertText:t];
+		else if ([a isEqualToString:@"enter"])
+			[g_kbinput insertText:@"\n"];
+		else if ([a isEqualToString:@"backspace"])
+			[g_kbinput deleteBackward];
+		else if ([a isEqualToString:@"state"])
+		{
+			UIWindow *win = vkq_key_window ();
+			UIView	 *sdl = win.rootViewController.view; // SDL's updateKeyboard shifts this view
+			NSLog (@"[vkquake] vkq_ui state: kb_visible=%d text_active=%d firstResponder=%d keydest=%d console_pill=%@ sdl_view=%@ (%@)",
+				   g_kb_visible, g_text_active, g_kbinput.isFirstResponder, VKQ_TouchKeyDest (),
+				   g_console.hidden ? @"hidden" : NSStringFromCGRect (g_console.frame), sdl ? NSStringFromCGRect (sdl.frame) : @"-",
+				   sdl ? NSStringFromClass (sdl.class) : @"-");
+		}
+		else
+			NSLog (@"[vkquake] vkq_ui: unknown action '%@' (console | threefinger | type <text> | enter | backspace | state)", a);
+	});
+}
 
 // --- ProMotion-aware frame driver (our own CADisplayLink, so we can request 120) ---
 @interface VKQFrameDriver : NSObject
@@ -926,6 +1025,12 @@ static UIWindow *vkq_key_window (void)
 @end
 @implementation VKQQuickLoadBtn
 + (void)press { VKQ_TouchCommand ("vkq_quickload\n"); }
+@end
+@interface VKQConsoleBtn : NSObject
++ (void)press;
+@end
+@implementation VKQConsoleBtn
++ (void)press { vkq_toggle_console ("CONSOLE pill"); }
 @end
 
 // Labelled pill for the menu chrome column (glyph + caption).
@@ -1235,6 +1340,10 @@ static void vkq_build_ui (void)
 	g_qload = vkq_menu_pill (@"tray.and.arrow.up.fill", @"QUICK LOAD", VKQQuickLoadBtn.class);
 	[win addSubview:g_qsave];
 	[win addSubview:g_qload];
+	// Issue #5: the console, for players with no keyboard or controller. Shown in
+	// EVERY menu (not just the live-game main menu), stacked under the quick pills.
+	g_console = vkq_menu_pill (@"terminal.fill", @"CONSOLE", VKQConsoleBtn.class);
+	[win addSubview:g_console];
 
 	// attract-demo catcher: a tap during the demo opens the menu
 	g_catcher = [[UIView alloc] initWithFrame:win.bounds];
@@ -1359,22 +1468,22 @@ void VKQ_iOS_FramePoll (void)
 	if (g_catcher.hidden != !showCatcher)
 		g_catcher.hidden = !showCatcher;
 	BOOL showBack = (keydest != 0); // in a menu/console — shown even with a controller so the iOS settings gear is reachable
-	if (g_back.hidden != !showBack)
+	// Issue #5: in the console, back + gear move to the RIGHT edge. On the left
+	// they sat on top of the console's text (which starts at the left margin);
+	// the right of the console area is empty apart from the version string.
+	BOOL		onRight = (keydest == 1);
+	static BOOL lastRight = NO;
+	if (g_back.hidden != !showBack || onRight != lastRight)
 	{
 		g_back.hidden = !showBack;
+		g_settings.hidden = !showBack;
+		lastRight = onRight;
 		if (showBack)
 		{
 			UIWindow *win = g_back.superview;
-			g_back.center = CGPointMake (win.safeAreaInsets.left + 44, win.safeAreaInsets.top + 30);
-		}
-	}
-	if (g_settings.hidden != !showBack)
-	{
-		g_settings.hidden = !showBack;
-		if (showBack)
-		{
-			UIWindow *win = g_settings.superview;
-			g_settings.center = CGPointMake (win.safeAreaInsets.left + 44, win.safeAreaInsets.top + 88); // below back
+			CGFloat	  x = onRight ? win.bounds.size.width - win.safeAreaInsets.right - 44 : win.safeAreaInsets.left + 44;
+			g_back.center = CGPointMake (x, win.safeAreaInsets.top + 30);
+			g_settings.center = CGPointMake (x, win.safeAreaInsets.top + 88); // below back
 		}
 	}
 
@@ -1399,6 +1508,23 @@ void VKQ_iOS_FramePoll (void)
 				CGFloat	  x = win.safeAreaInsets.left + 12 + g_qsave.bounds.size.width * 0.5f;
 				g_qsave.center = CGPointMake (x, win.safeAreaInsets.top + 140);
 				g_qload.center = CGPointMake (x, win.safeAreaInsets.top + 188);
+			}
+		}
+		// CONSOLE pill (issue #5): any menu (keydest 3 = key_menu), placed in the
+		// next free slot of the same column so it never overlaps the quick pills.
+		BOOL		showCon = (keydest == 3);
+		int			slot = showCon ? (avail ? (showLoad ? 2 : 1) : 0) : -1;
+		static int	lastSlot = -2;
+		if (slot != lastSlot)
+		{
+			lastSlot = slot;
+			g_console.hidden = !showCon;
+			if (showCon)
+			{
+				UIWindow *win = g_console.superview;
+				CGFloat	  x = win.safeAreaInsets.left + 12 + g_console.bounds.size.width * 0.5f;
+				g_console.center = CGPointMake (x, win.safeAreaInsets.top + 140 + 48 * slot);
+				NSLog (@"[vkquake] console pill shown at %@", NSStringFromCGRect (g_console.frame));
 			}
 		}
 	}

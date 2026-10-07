@@ -395,6 +395,8 @@ static NSArray<NSString *> *vkq_choice_titles (NSString *key)
 		return VKQ_iOS_AudioModeTitles ();
 	if ([key isEqualToString:@"mapDownload"])
 		return @[ @"Never", @"Ask First", @"Always" ];
+	if ([key isEqualToString:@"gameData"])
+		return @[ @"2021 Re-release", @"Original (Classic)" ];
 	return @[];
 }
 
@@ -407,6 +409,13 @@ static NSArray<NSString *> *vkq_choice_details (NSString *key)
 			@"Joining a server running a map you do not have simply fails, with a message.",
 			@"Offer to fetch the map from the community archives, showing its size first. Recommended.",
 			@"Fetch it and rejoin without asking. Uses cellular data if that is all you have.",
+		];
+	if ([key isEqualToString:@"gameData"])
+		return @[
+			@"The 2021 enhanced edition (Documents/rerelease): updated models, lighting and the extra episodes. "
+			@"Takes effect next launch: swipe vkQuake away in the app switcher and reopen it.",
+			@"Your original Quake files (Documents/id1): the classic status bar, models and sounds. "
+			@"Takes effect next launch: swipe vkQuake away in the app switcher and reopen it.",
 		];
 	return @[];
 }
@@ -645,6 +654,18 @@ int VKQ_iOS_SettingsSheetOpen (void) { return vkq_settings_depth > 0 ? 1 : 0; }
 		[rows addObject:vr];
 	}
 #endif
+	// Issue #5 — Game Data: offered only when BOTH sets are on disk; with one set
+	// there is nothing to choose and the basedir logic simply uses it. The engine
+	// mounts its basedir once at startup, so the footer says when this applies.
+	{
+		extern int VKQ_iOS_HasRereleaseData (void);
+		extern int VKQ_iOS_HasClassicData (void);
+		if (VKQ_iOS_HasRereleaseData () && VKQ_iOS_HasClassicData ())
+		{
+			[secs addObject:@"Game Data"];
+			[rows addObject:@[ mkrow (@"Game Data", @"gameData", ROW_CHOICE, 0, 1, 0) ]];
+		}
+	}
 	[secs addObjectsFromArray:@[ @"Aim", @"Display", @"Audio", @"Touch Controls", @"Gameplay" ]];
 	[rows addObject:@[
 		mkrow (@"Look Sensitivity (H)", @"sensH", ROW_SLIDER, 0.3, 3.0, 1.0),
@@ -770,6 +791,14 @@ const char *VKQ_iOS_SettingsDumpText (void)
 - (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)s { return _sections[s]; }
 - (NSString *)tableView:(UITableView *)t titleForFooterInSection:(NSInteger)s
 {
+	if ([_sections[s] isEqualToString:@"Game Data"])
+		return @"You have both the 2021 re-release and the original Quake files. The choice takes effect the next "
+			   @"time vkQuake starts: swipe it away in the app switcher, then reopen it.";
+#ifndef VKQ_VISIONOS
+	if ([_sections[s] isEqualToString:@"Touch Controls"])
+		return @"Console: tap CONSOLE in any menu, tap with three fingers anywhere, or type ~ on the keyboard. "
+			   @"Three fingers again (or the keyboard button) hides or brings back the keyboard.";
+#endif
 	if ([_sections[s] isEqualToString:@"Audio"])
 		return @"“Other App Audio” only matters while something else — music, a podcast — is already playing. "
 			   @"Game Volume rides on top of the in-game Options → Sound/Music Volume sliders, so it never overwrites them.";

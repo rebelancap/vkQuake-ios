@@ -1,0 +1,56 @@
+vkquake-ios overlay 0030: console-by-touch seam (GitHub issue #5).
+
+`vkq_ui <action> [text]` drives the shell paths a touch-only player uses to
+reach the console: the CONSOLE menu pill (pressed through its own UIButton),
+the 3-finger tap, and soft-keyboard typing (insertText:, where ` / ~ toggle the
+console). Exists because injected UIKit touches do not reach the shell on the
+simulator. Applies on top of 0012.
+
+--- a/Quake/in_sdl.c
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -202,6 +202,7 @@
+ static void IN_TouchLook_f (void); // defined with the touch bridge below
+ static void IN_TouchEdit_f (void);  // ditto
+ static void IN_FakeTouch_f (void);  // ditto
++static void IN_UIAction_f (void);   // ditto (issue #5: console by touch)
+ // Shell still uses this to position SDL's view-shift when the native keyboard shows.
+ void VKQ_iOS_SetTextInputRect (int x, int y, int w, int h)
+ {
+@@ -248,6 +249,7 @@
+ 	Cmd_AddCommand ("vkq_touchlook", IN_TouchLook_f);
+ 	Cmd_AddCommand ("touchedit", IN_TouchEdit_f);
+ 	Cmd_AddCommand ("vkq_faketouch", IN_FakeTouch_f);
++	Cmd_AddCommand ("vkq_ui", IN_UIAction_f);
+ #endif
+ 	if (safemode || COM_CheckParm ("-nomouse"))
+ 	{
+@@ -980,8 +982,28 @@
+ 	ph = Cmd_Argv (3);
+ 	phase = !strcmp (ph, "down") ? 0 : (!strcmp (ph, "move") ? 1 : (!strcmp (ph, "zone") ? 3 : 2));
+ 	VKQ_iOS_FakeTouch ((float)atof (Cmd_Argv (1)), (float)atof (Cmd_Argv (2)), phase);
++}
++
++// `vkq_ui <action> [text]` — drives the shell's console-by-touch paths (CONSOLE
++// pill, 3-finger tap, soft-keyboard typing) through the same UIKit methods the
++// real gestures call. Simulator verification only: injected touches never reach
++// UIKit there. The shell dispatches to the main queue, i.e. after this frame.
++static void IN_UIAction_f (void)
++{
++	extern void VKQ_iOS_UIAction (const char *act, const char *arg);
++	if (Cmd_Argc () < 2)
++	{
++		Con_Printf ("usage: vkq_ui <console|threefinger|type <text>|enter|backspace|state>\n");
++		return;
++	}
++	VKQ_iOS_UIAction (Cmd_Argv (1), Cmd_Argc () > 2 ? Cmd_Argv (2) : ""); // quote text with spaces
+ }
+ 
++// 1 while the console is forced full-screen (not connected): its input line is
++// then at the BOTTOM of the screen, not mid-screen — the shell's keyboard shift
++// needs to know which.
++int VKQ_TouchConForced (void) { return con_forcedup ? 1 : 0; }
++
+ void VKQ_TouchKey (int key, int down) { Key_Event (key, down ? true : false); }
+ void VKQ_TouchChar (int c) { Char_Event (c); } // native iOS keyboard -> engine text input
+ void VKQ_TouchCommand (const char *text) { Cbuf_AddText (text); }
