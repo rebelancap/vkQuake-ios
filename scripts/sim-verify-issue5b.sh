@@ -19,7 +19,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE=com.rebelancap.vkquake
 PORT=27999
-UDID=${VKQ_SIM_UDID:-45A5059C-8751-4FC5-9BB2-A3EF6FFCCC22} # iPhone Air, iOS 27.0 (lane 2)
+# Lane 2: the existing iPhone Air on iOS 27.0, looked up by name (never created).
+UDID=${VKQ_SIM_UDID:-$(xcrun simctl list devices available | awk '/^-- iOS 27.0 --/{f=1;next} /^--/{f=0} f && /^ *iPhone Air \(/' | grep -oE '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' | head -1)}
+[ -n "$UDID" ] || { echo "FATAL: no iPhone Air on iOS 27.0 — ask the user; never simctl create" >&2; exit 1; }
 APP="$ROOT/build/ios-sim/xcode/Release-iphonesimulator/vkQuake.app"
 ARTS="$ROOT/artifacts/sim/issue5b"
 mkdir -p "$ARTS"
