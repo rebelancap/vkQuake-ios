@@ -2,20 +2,19 @@
 
 ## Current state
 Engine is on upstream vkQuake **1.36.0** (`1b948e29`) with a 28-patch overlay
-plus 3 SDL patches. **Public release 1.1.2** (tag `v1.1.2`, 2026-10-07) is live
-on GitHub and the OTA hub. **OTA dev build 1.1.2.2 (build 40)** is on the hub
-(2026-10-08, https://goomba.tailc8f64e.ts.net/ota/vkquake/): 1.1.2.1 added issue
-#5 (console by touch: console button in every menu, `~` on the keyboard,
-3-finger tap in-game, console-aware keyboard shift; Settings → Game Data 2021 /
-Classic, applies next launch). 1.1.2.2 made the menu chrome one column with
-matching 20 pt glyphs (back, gear, console, quick save, quick load) and indents
-the console away from the notch / Dynamic Island, side chosen from
-`windowScene.interfaceOrientation` (landscape safe-area insets are symmetric on
-iOS, so `safeAreaInsets.left` cannot tell the side). Both rounds sim-verified on
-lane 2 and Sonnet-reviewed with no blockers; merged to local `main`, NOT yet
-pushed (the session's push was blocked by the auto-mode classifier). Awaiting
-Austin's device check. Local `main` once carried 19 unpushed VR-doc commits;
-they live on local branch `vr-notes-private`.
+plus 3 SDL patches. **Public release 1.1.3** (tag `v1.1.3`, 2026-10-08) is live
+on GitHub and on the OTA hub at the same number
+(https://goomba.tailc8f64e.ts.net/ota/vkquake/); `origin/main` = release
+(branch `release-1.1.3`). 1.1.3 = issue #5: console by touch (console button in
+every menu, `~` on the keyboard, 3-finger tap in-game, console-aware keyboard
+shift, notch-side console inset chosen from `windowScene.interfaceOrientation`
+since landscape safe-area insets are symmetric) + Settings → Game Data (2021 /
+Classic, applies next launch) + one-column menu chrome with matching 20 pt
+glyphs. Sim-verified on lane 2 across 1.1.2.1 / 1.1.2.2, Austin verified on
+device and chose 1.1.3. Next OTA dev builds are 1.1.3.1, 1.1.3.2, …
+Local `main` once carried 19 unpushed VR-doc commits; they live on local branch
+`vr-notes-private`. Note: `git push` from a session is NOT blocked — the earlier
+denial was the classifier rejecting a long combined command, not the push.
 
 ## Last round (2026-10-08) — issue #5 follow-ups, branch `issue-5b` (NOT merged/published)
 - **Console button**: glyph-only (`terminal.fill`), 64x46, same tint/background/
@@ -44,21 +43,17 @@ they live on local branch `vr-notes-private`.
 Previous round (2026-10-07): issue #5 (console by touch, Game Data choice), 1.1.2.1.
 
 ## Next steps
-1. Orchestrator: review `issue-5b` (light Sonnet pass), merge to `main`, then
-   decide whether it rides the next OTA dev build (1.1.2.2) — needs the usual
-   sim-verified publish gate (this round's run counts if nothing changes).
-2. Push `main` (`git push origin main`) — earlier push was blocked by the
-   auto-mode classifier.
-3. Austin: on device, check the console column, the quick pills, and the console
-   indent in BOTH landscape sides (real rotation; the sim used a scene geometry
-   request).
-4. Pre-existing, seen in this round's shots: the keyboard-dismiss button sits on
-   top of the console's version string at the right end of the input row. Cosmetic.
-5. Known rare edge cases from the issue #5 review: `~` typed into a menu text
-   field opens the console; opening the console with the keyboard already up keeps
-   the previous shift.
-6. Add a shutdown trap to `scripts/sim-verify.sh` (it leaves the device booted).
-7. When upstream SDL moves off `statusBarOrientation`, drop SDL patch 0003.
+1. Confirm the SideStore source shows 1.1.3 (quake-ports `build-sources.yml` run
+   37854711034 was fired; check apps-ios.json / apps-visionos.json via the API).
+2. Reply on issue #5 (item 2 was fixed in 1.1.2; items 1 and 3 in 1.1.3) and on
+   issue #4; close both when the reporters confirm or after a reasonable wait.
+3. Known rare edge cases, fix if reported: `~` typed into a menu text field opens
+   the console instead of typing; opening the console while the keyboard is
+   already up keeps the previous shift; keyboard-dismiss button overlaps the
+   console version string.
+4. Add a shutdown trap to `scripts/sim-verify.sh` (it leaves the device booted).
+5. Consider upstream's per-game archived cvars in the iOS settings page.
+6. When upstream SDL moves off `statusBarOrientation`, drop SDL patch 0003.
 
 ## Open questions
 - Should the VR docs on local branch `vr-notes-private` (VR charter, R0–R6 notes,
@@ -68,6 +63,5 @@ Previous round (2026-10-07): issue #5 (console by touch, Game Data choice), 1.1.
   (1.1.3 presumably). Default: stay on 1.1.2.x dev builds.
 
 ## Live claims
-None. iPhone Air (lane 2) shut down; no agents running; local `main` is ahead
-of `origin/main` until pushed; tree clean apart from the untracked `.claude/`
-and `docs/IOS-AUDIO-SESSION-GUIDE.md`.
+None. iPhone Air (lane 2) shut down; no agents running; `main` = `origin/main`;
+tree clean apart from the untracked `.claude/` and `docs/IOS-AUDIO-SESSION-GUIDE.md`.
