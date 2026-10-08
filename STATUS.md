@@ -1,27 +1,21 @@
 # STATUS — vkQuake iOS
 
 ## Current state
-Engine is on upstream vkQuake **1.36.0** (`1b948e29`) with a 26-patch overlay
+Engine is on upstream vkQuake **1.36.0** (`1b948e29`) with a 28-patch overlay
 plus 3 SDL patches. **Public release 1.1.2** (tag `v1.1.2`, 2026-10-07) is live
-on GitHub and on the OTA hub at the same number
-(https://goomba.tailc8f64e.ts.net/ota/vkquake/); `origin/main` = `f291a42`
-(branch `upstream-1.36.0` = `release-1.1.2`). 1.1.2 = upstream 1.36.0 fold-in +
-classic-data weapon wheel (issue #4) + SDL patch 0003 (iOS 27 SDK layout). It is
-the first release built on the Xcode 27 / iOS 27 SDK; sim-verified full-screen,
-Austin accepted on the strength of the sim round (rerelease-only on his device).
-Next OTA dev builds are 1.1.2.1, 1.1.2.2, …
-**OTA dev build 1.1.2.1 (build 39)** is on the hub (2026-10-07): issue #5 —
-console by touch (CONSOLE pill in every menu, `~` on the keyboard, 3-finger tap
-in-game; console-aware keyboard shift) + Settings → Game Data (2021 / Classic,
-shown when both sets exist, applies next launch). Sim-verified on lane 2,
-Sonnet-reviewed (no blockers), merged to local `main`. Awaiting Austin's
-device check; the reporter is on 1.1.1 and issue item 2 is already in 1.1.2.
-**Branch `issue-5b`** (from `main` 2e00bb9, not merged, not published): the
-issue #5 follow-ups from the 1.1.2.1 sim-screenshot review — console glyph
-button in the back/gear column, quick pills below it at the same glyph size,
-and the console kept clear of the Dynamic Island (overlay 0031). Sim-verified.
-Local `main` once carried 19 unpushed VR-doc commits (first name throughout);
-they now live on local branch `vr-notes-private`, and `main` tracks `origin/main`.
+on GitHub and the OTA hub. **OTA dev build 1.1.2.2 (build 40)** is on the hub
+(2026-10-08, https://goomba.tailc8f64e.ts.net/ota/vkquake/): 1.1.2.1 added issue
+#5 (console by touch: console button in every menu, `~` on the keyboard,
+3-finger tap in-game, console-aware keyboard shift; Settings → Game Data 2021 /
+Classic, applies next launch). 1.1.2.2 made the menu chrome one column with
+matching 20 pt glyphs (back, gear, console, quick save, quick load) and indents
+the console away from the notch / Dynamic Island, side chosen from
+`windowScene.interfaceOrientation` (landscape safe-area insets are symmetric on
+iOS, so `safeAreaInsets.left` cannot tell the side). Both rounds sim-verified on
+lane 2 and Sonnet-reviewed with no blockers; merged to local `main`, NOT yet
+pushed (the session's push was blocked by the auto-mode classifier). Awaiting
+Austin's device check. Local `main` once carried 19 unpushed VR-doc commits;
+they live on local branch `vr-notes-private`.
 
 ## Last round (2026-10-08) — issue #5 follow-ups, branch `issue-5b` (NOT merged/published)
 - **Console button**: glyph-only (`terminal.fill`), 64x46, same tint/background/
@@ -74,6 +68,6 @@ Previous round (2026-10-07): issue #5 (console by touch, Game Data choice), 1.1.
   (1.1.3 presumably). Default: stay on 1.1.2.x dev builds.
 
 ## Live claims
-None. iPhone Air (lane 2) shut down; no agents running from this round; branch
-`issue-5b` committed; tree clean apart from the untracked `.claude/` and
-`docs/IOS-AUDIO-SESSION-GUIDE.md` (not this round's).
+None. iPhone Air (lane 2) shut down; no agents running; local `main` is ahead
+of `origin/main` until pushed; tree clean apart from the untracked `.claude/`
+and `docs/IOS-AUDIO-SESSION-GUIDE.md`.
