@@ -1,0 +1,213 @@
+vkquake-ios overlay 0031: notch-side console inset (issue #5 follow-up).
+
+On a notched / Dynamic Island iPhone in landscape the cutout covers one edge of
+the console (drawn edge to edge). The shell pushes the cutout side's safe-area
+inset in drawable pixels via VKQ_TouchSetConsoleInset(left, right): with the
+cutout on the left the console buffer, input line, notify lines, selection and
+hit-testing move right by that many whole console characters; on either side
+con_linewidth shrinks by the inset, so wrapped text and the version string end
+clear of it. iPhone only (VKQ_IOS and not VKQ_VISIONOS); menus and HUD are
+untouched. Applies on top of 0030.
+
+--- a/Quake/console.c
++++ b/Quake/console.c
+@@ -38,6 +38,48 @@
+ 
+ int con_linewidth;
+ 
++#if defined(VKQ_IOS) && !defined(VKQ_VISIONOS)
++/*
++vkquake-ios overlay 0031: notch-side console indent (issue #5 follow-up).
++
++On a notched / Dynamic Island phone in landscape the cutout covers one edge of
++the console, which is drawn edge to edge of the Metal view. The shell pushes
++the inset of the CUTOUT side only, in drawable pixels (iOS reports symmetric
++left/right safe-area insets on these phones, so the shell picks the side from
++the interface orientation). Cutout on the left: the text moves right by the
++inset (rounded up to whole 8-unit characters of the console canvas). Either
++side: the line width shrinks by the inset, so wrapped text and the version
++string end clear of the cutout.
++*/
++static int vkq_con_inset_l, vkq_con_inset_r; // drawable pixels
++void	   VKQ_TouchSetConsoleInset (int left_px, int right_px)
++{
++	left_px = q_max (left_px, 0);
++	right_px = q_max (right_px, 0);
++	if (left_px != vkq_con_inset_l || right_px != vkq_con_inset_r)
++		Sys_Printf ("[vkquake] console inset: left %d px, right %d px (vid %dx%d, conwidth %d)\n", left_px, right_px, vid.width, vid.height,
++					vid.conwidth);
++	vkq_con_inset_l = left_px;
++	vkq_con_inset_r = right_px;
++}
++// An inset in console characters (8 canvas units each), capped to an eighth of
++// the line per side so a bogus value can never collapse the console.
++static int VKQ_ConInsetChars (int px)
++{
++	int units, chars;
++	if (px <= 0 || vid.width <= 0 || vid.conwidth <= 0)
++		return 0;
++	units = (int)(((long long)px * vid.conwidth + vid.width - 1) / vid.width);
++	chars = (units + 7) >> 3;
++	return q_min (chars, (vid.conwidth >> 3) / 8);
++}
++#define VKQ_CON_INDENT (VKQ_ConInsetChars (vkq_con_inset_l))
++#define VKQ_CON_RINSET (VKQ_ConInsetChars (vkq_con_inset_r))
++#else
++#define VKQ_CON_INDENT 0
++#define VKQ_CON_RINSET 0
++#endif
++
+ float con_cursorspeed = 4;
+ 
+ #define CON_TEXTSIZE (1024 * 1024) // ericw -- was 65536. johnfitz -- new default size
+@@ -211,7 +253,7 @@
+ 	y >>= 3;
+ 
+ 	// apply margins and scrolling
+-	x -= CON_MARGIN;
++	x -= CON_MARGIN + VKQ_CON_INDENT;
+ 	y -= 2;
+ 
+ 	if (testmode == CT_INSIDE)
+@@ -972,7 +1014,7 @@
+ 	int	  i, j, width, oldwidth, oldtotallines, numlines, numchars;
+ 	char *tbuf; // johnfitz -- tbuf no longer a static array
+ 
+-	width = (vid.conwidth >> 3) - 2; // johnfitz -- use vid.conwidth instead of vid.width
++	width = (vid.conwidth >> 3) - 2 - VKQ_CON_INDENT - VKQ_CON_RINSET; // johnfitz -- use vid.conwidth instead of vid.width
+ 
+ 	if (width == con_linewidth)
+ 		return;
+@@ -2159,6 +2201,7 @@
+ 	int			i, x, v;
+ 	const char *text;
+ 	float		alpha;
++	const int	ind = VKQ_CON_INDENT << 3;
+ 
+ 	GL_SetCanvas (cbx, CANVAS_CONSOLE); // johnfitz
+ 	v = vid.conheight;					// johnfitz
+@@ -2179,11 +2222,11 @@
+ 			while (len > 0 && text[len - 1] == ' ')
+ 				--len;
+ 			for (x = 0; x < len; x++)
+-				Draw_Character (cbx, (con_linewidth - len) * 4 + (x + 1) * 8, v, text[x]);
++				Draw_Character (cbx, ind + (con_linewidth - len) * 4 + (x + 1) * 8, v, text[x]);
+ 		}
+ 		else
+ 			for (x = 0; x < con_linewidth; x++)
+-				Draw_Character (cbx, (x + 1) << 3, v, text[x]);
++				Draw_Character (cbx, ind + ((x + 1) << 3), v, text[x]);
+ 		GL_SetCanvasColor (1.f, 1.f, 1.f, 1.f);
+ 
+ 		v += 8;
+@@ -2193,12 +2236,12 @@
+ 	{
+ 		if (chat_team)
+ 		{
+-			Draw_String (cbx, 8, v, "say_team:");
++			Draw_String (cbx, ind + 8, v, "say_team:");
+ 			x = 11;
+ 		}
+ 		else
+ 		{
+-			Draw_String (cbx, 8, v, "say:");
++			Draw_String (cbx, ind + 8, v, "say:");
+ 			x = 6;
+ 		}
+ 
+@@ -2209,12 +2252,12 @@
+ 
+ 		while (*text)
+ 		{
+-			Draw_Character (cbx, x << 3, v, *text);
++			Draw_Character (cbx, ind + (x << 3), v, *text);
+ 			x++;
+ 			text++;
+ 		}
+ 
+-		Draw_Character (cbx, x << 3, v, 10 + ((int)(realtime * con_cursorspeed) & 1));
++		Draw_Character (cbx, ind + (x << 3), v, 10 + ((int)(realtime * con_cursorspeed) & 1));
+ 		v += 8;
+ 	}
+ }
+@@ -2316,6 +2359,7 @@
+ {
+ 	const char *workline = key_lines[edit_line];
+ 	int			i, ofs, len;
++	const int	ind = VKQ_CON_INDENT << 3;
+ 
+ 	if (key_dest != key_console && !con_forcedup)
+ 		return; // don't draw anything
+@@ -2330,14 +2374,14 @@
+ 
+ 	// draw input string
+ 	for (i = 0; i + ofs < len && i < con_linewidth; i++)
+-		Draw_Character (cbx, (i + 1) << 3, vid.conheight - 16, workline[i + ofs]);
++		Draw_Character (cbx, ind + ((i + 1) << 3), vid.conheight - 16, workline[i + ofs]);
+ 
+ 	// draw tab completion hint
+ 	if (key_tabhint[0])
+ 	{
+ 		GL_SetCanvasColor (1.0f, 1.0f, 1.0f, 0.75f);
+ 		for (i = 0; key_tabhint[i] && i + 1 + len - ofs < con_linewidth + 2; i++)
+-			Draw_Character (cbx, (i + 1 + len - ofs) << 3, vid.conheight - 16, key_tabhint[i] | 0x80);
++			Draw_Character (cbx, ind + ((i + 1 + len - ofs) << 3), vid.conheight - 16, key_tabhint[i] | 0x80);
+ 		GL_SetCanvasColor (1.0f, 1.0f, 1.0f, 1.0f);
+ 	}
+ 
+@@ -2345,7 +2389,7 @@
+ 	if (!((int)((realtime - key_blinktime) * con_cursorspeed) & 1))
+ 	{
+ 		i = key_linepos - ofs;
+-		Draw_Pic (cbx, (i + 1) << 3, vid.conheight - 16, key_insert ? pic_ins : pic_ovr, 1.0f, false);
++		Draw_Pic (cbx, ind + ((i + 1) << 3), vid.conheight - 16, key_insert ? pic_ins : pic_ovr, 1.0f, false);
+ 	}
+ }
+ 
+@@ -2395,6 +2439,7 @@
+ 	int			i, x, y, j, sb, rows;
+ 	const char *text;
+ 	char		ver[32];
++	const int	ind = VKQ_CON_INDENT << 3;
+ 
+ 	if (lines <= 0)
+ 		return;
+@@ -2416,7 +2461,7 @@
+ 		j = i - con_backscroll;
+ 		if (j < 0)
+ 			j = 0;
+-		Con_DrawSelectionHighlight (cbx, 8, y, j);
++		Con_DrawSelectionHighlight (cbx, ind + 8, y, j);
+ 	}
+ 
+ 	// draw the buffer text
+@@ -2438,9 +2483,9 @@
+ 			{
+ 				if (keydown[K_MOUSE1])
+ 					c &= 0x7f;
+-				Draw_Character (cbx, (x + 1) << 3, y + 2, '_' | (c & 0x80));
++				Draw_Character (cbx, ind + ((x + 1) << 3), y + 2, '_' | (c & 0x80));
+ 			}
+-			Draw_Character (cbx, (x + 1) << 3, y, c);
++			Draw_Character (cbx, ind + ((x + 1) << 3), y, c);
+ 		}
+ 	}
+ 
+@@ -2449,7 +2494,7 @@
+ 	{
+ 		y += 8; // blank line
+ 		for (x = 0; x < con_linewidth; x += 4)
+-			Draw_Character (cbx, (x + 1) << 3, y, '^');
++			Draw_Character (cbx, ind + ((x + 1) << 3), y, '^');
+ 		y += 8;
+ 	}
+ 
+@@ -2461,7 +2506,7 @@
+ 	y += 8;
+ 	q_snprintf (ver, sizeof (ver), ENGINE_NAME_AND_VER);
+ 	for (x = 0; x < (int)strlen (ver); x++)
+-		Draw_Character (cbx, (con_linewidth - strlen (ver) + x + 2) << 3, y, ver[x] /*+ 128*/);
++		Draw_Character (cbx, ind + ((con_linewidth - strlen (ver) + x + 2) << 3), y, ver[x] /*+ 128*/);
+ }
+ 
+ /*

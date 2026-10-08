@@ -695,7 +695,7 @@ UIWindow *VKQ_iOS_GameWindow (void)
 static UIButton		*g_back;
 static UIButton		*g_settings; // menu-only iOS settings button (shown with the back button)
 static UIButton		*g_qsave, *g_qload; // main-menu-only quick save / quick load
-static UIButton		*g_console;		 // issue #5: menu-only CONSOLE pill (touch-only players had no way in)
+static UIButton		*g_console;		 // issue #5: menu-only console button (touch-only players had no way in)
 static UIView		*g_catcher;	 // transparent; a tap during the attract demo opens the menu
 static UIButton		*g_kbdismiss; // dismiss-keyboard (checkmark) button, shown while the keyboard is up
 
@@ -788,6 +788,58 @@ void VKQ_iOS_SetTextActive (int active)
 			[g_kbinput resignFirstResponder];
 	});
 }
+
+#ifndef VKQ_VISIONOS
+// Overlay 0031: keep the engine console clear of the notch / Dynamic Island.
+// iOS reports SYMMETRIC left/right safe-area insets on these phones in landscape
+// (measured on the iPhone Air sim: {0, 68, 20, 68} in BOTH landscape sides), so
+// the cutout side comes from the interface orientation: LandscapeRight = cutout
+// on the LEFT (console indented by the left inset), LandscapeLeft = cutout on
+// the RIGHT (no indent; the line just ends short of it). Points convert to
+// drawable pixels with the Metal layer's own drawableSize / bounds ratio (the
+// engine's vid.width IS the drawable width), falling back to the screen's
+// native scale before the renderer has sized its layer. Pushed on change only.
+extern void VKQ_TouchSetConsoleInset (int left_px, int right_px);
+static CAMetalLayer *vkq_find_metal_layer (UIView *v)
+{
+	if ([v.layer isKindOfClass:CAMetalLayer.class])
+		return (CAMetalLayer *)v.layer;
+	for (UIView *sv in v.subviews)
+	{
+		CAMetalLayer *l = vkq_find_metal_layer (sv);
+		if (l)
+			return l;
+	}
+	return nil;
+}
+static void vkq_push_console_inset (UIWindow *win, UIEdgeInsets sa)
+{
+	static __weak CAMetalLayer *layer;
+	static int					lastL = -1, lastR = -1;
+	if (!win)
+		return;
+	if (!layer)
+		layer = vkq_find_metal_layer (win);
+	CGFloat scale = 0;
+	if (layer && layer.bounds.size.width > 0 && layer.drawableSize.width > 0)
+		scale = layer.drawableSize.width / layer.bounds.size.width;
+	if (scale <= 0)
+		scale = win.screen.nativeScale;
+	UIInterfaceOrientation o = win.windowScene.interfaceOrientation;
+	CGFloat				   lPts = o == UIInterfaceOrientationLandscapeLeft ? 0 : sa.left;
+	CGFloat				   rPts = o == UIInterfaceOrientationLandscapeRight ? 0 : sa.right;
+	if (o != UIInterfaceOrientationLandscapeLeft && o != UIInterfaceOrientationLandscapeRight)
+		rPts = 0; // unknown: indent the left only, as before scenes reported a side
+	int l = (int)ceil (lPts * scale), r = (int)ceil (rPts * scale);
+	if (l == lastL && r == lastR)
+		return;
+	lastL = l;
+	lastR = r;
+	NSLog (@"[vkquake] console inset: orientation %ld, safe area %@ x %.3f -> left %d px, right %d px", (long)o,
+		   NSStringFromUIEdgeInsets (sa), scale, l, r);
+	VKQ_TouchSetConsoleInset (l, r);
+}
+#endif
 
 @interface VKQKeyboard : NSObject
 @end
@@ -913,17 +965,39 @@ void VKQ_iOS_UIAction (const char *act, const char *arg)
 			[g_kbinput insertText:@"\n"];
 		else if ([a isEqualToString:@"backspace"])
 			[g_kbinput deleteBackward];
+#ifndef VKQ_VISIONOS
+		else if ([a isEqualToString:@"orient"])
+		{
+			// Sim seam (issue #5b): simctl cannot rotate a headless device, so ask
+			// the scene for one landscape side (left | right), or both again (any).
+			// "right" = UIInterfaceOrientationLandscapeRight (cutout on the LEFT).
+			UIWindowScene			*scene = vkq_key_window ().windowScene;
+			UIInterfaceOrientationMask m = [t isEqualToString:@"left"]	? UIInterfaceOrientationMaskLandscapeLeft
+										 : [t isEqualToString:@"right"] ? UIInterfaceOrientationMaskLandscapeRight
+																		: UIInterfaceOrientationMaskLandscape;
+			if (@available (iOS 16.0, *))
+			{
+				[vkq_key_window ().rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
+				[scene requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:m]
+										 errorHandler:^(NSError *e) { NSLog (@"[vkquake] vkq_ui orient %@: %@", t, e); }];
+			}
+			NSLog (@"[vkquake] vkq_ui orient %@ requested (scene now %ld)", t, (long)scene.interfaceOrientation);
+		}
+#endif
 		else if ([a isEqualToString:@"state"])
 		{
 			UIWindow *win = vkq_key_window ();
 			UIView	 *sdl = win.rootViewController.view; // SDL's updateKeyboard shifts this view
-			NSLog (@"[vkquake] vkq_ui state: kb_visible=%d text_active=%d firstResponder=%d keydest=%d console_pill=%@ sdl_view=%@ (%@)",
-				   g_kb_visible, g_text_active, g_kbinput.isFirstResponder, VKQ_TouchKeyDest (),
+			NSLog (@"[vkquake] vkq_ui state: kb_visible=%d text_active=%d firstResponder=%d keydest=%d orient=%ld safe=%@ back=%@ gear=%@ qsave=%@ qload=%@ console_pill=%@ sdl_view=%@ (%@)",
+				   g_kb_visible, g_text_active, g_kbinput.isFirstResponder, VKQ_TouchKeyDest (), (long)win.windowScene.interfaceOrientation,
+				   NSStringFromUIEdgeInsets (win.safeAreaInsets), g_back.hidden ? @"hidden" : NSStringFromCGRect (g_back.frame),
+				   g_settings.hidden ? @"hidden" : NSStringFromCGRect (g_settings.frame), g_qsave.hidden ? @"hidden" : NSStringFromCGRect (g_qsave.frame),
+				   g_qload.hidden ? @"hidden" : NSStringFromCGRect (g_qload.frame),
 				   g_console.hidden ? @"hidden" : NSStringFromCGRect (g_console.frame), sdl ? NSStringFromCGRect (sdl.frame) : @"-",
 				   sdl ? NSStringFromClass (sdl.class) : @"-");
 		}
 		else
-			NSLog (@"[vkquake] vkq_ui: unknown action '%@' (console | threefinger | type <text> | enter | backspace | state)", a);
+			NSLog (@"[vkquake] vkq_ui: unknown action '%@' (console | threefinger | type <text> | enter | backspace | orient <left|right|any> | state)", a);
 	});
 }
 
@@ -1033,12 +1107,30 @@ static UIWindow *vkq_key_window (void)
 + (void)press { vkq_toggle_console ("CONSOLE pill"); }
 @end
 
+// Glyph-only button for the menu chrome column — identical to back and gear
+// (64x46, 20 pt bold symbol, same tint / background / corner radius).
+static UIButton *vkq_menu_glyph (NSString *symbol, Class target)
+{
+	UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+	UIImage	 *img = [[UIImage systemImageNamed:symbol]
+		 imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightBold]];
+	[b setImage:img forState:UIControlStateNormal];
+	b.tintColor = [UIColor colorWithWhite:1 alpha:0.9];
+	b.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+	b.layer.cornerRadius = 10;
+	b.frame = CGRectMake (0, 0, 64, 46);
+	[b addTarget:target action:@selector (press) forControlEvents:UIControlEventTouchUpInside];
+	b.hidden = YES;
+	return b;
+}
+
 // Labelled pill for the menu chrome column (glyph + caption).
 static UIButton *vkq_menu_pill (NSString *symbol, NSString *title, Class target)
 {
 	UIButtonConfiguration *cfg = [UIButtonConfiguration plainButtonConfiguration];
 	cfg.image = [UIImage systemImageNamed:symbol];
-	cfg.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:15
+	// Same glyph size as the back / gear / console buttons (20 pt bold).
+	cfg.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:20
 																							   weight:UIImageSymbolWeightBold];
 	cfg.imagePadding = 6;
 	cfg.contentInsets = NSDirectionalEdgeInsetsMake (6, 10, 6, 10);
@@ -1049,7 +1141,7 @@ static UIButton *vkq_menu_pill (NSString *symbol, NSString *title, Class target)
 	b.tintColor = [UIColor colorWithWhite:1 alpha:0.9];
 	b.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
 	b.layer.cornerRadius = 10;
-	b.frame = CGRectMake (0, 0, 148, 40);
+	b.frame = CGRectMake (0, 0, 148, 46); // column height, like back / gear / console
 	[b addTarget:target action:@selector (press) forControlEvents:UIControlEventTouchUpInside];
 	b.hidden = YES;
 	return b;
@@ -1341,8 +1433,9 @@ static void vkq_build_ui (void)
 	[win addSubview:g_qsave];
 	[win addSubview:g_qload];
 	// Issue #5: the console, for players with no keyboard or controller. Shown in
-	// EVERY menu (not just the live-game main menu), stacked under the quick pills.
-	g_console = vkq_menu_pill (@"terminal.fill", @"CONSOLE", VKQConsoleBtn.class);
+	// EVERY menu (not just the live-game main menu): a glyph button in the back /
+	// gear column, directly under the gear; the quick pills stack below it.
+	g_console = vkq_menu_glyph (@"terminal.fill", VKQConsoleBtn.class);
 	[win addSubview:g_console];
 
 	// attract-demo catcher: a tap during the demo opens the menu
@@ -1467,13 +1560,27 @@ void VKQ_iOS_FramePoll (void)
 	BOOL showCatcher = isDemo && keydest == 0;
 	if (g_catcher.hidden != !showCatcher)
 		g_catcher.hidden = !showCatcher;
+	// Safe-area changes (rotation flips the notch side) re-place the menu chrome
+	// below and re-indent the console (overlay 0031). Read every frame — cheap.
+	UIWindow	   *chromeWin = g_back.superview;
+	UIEdgeInsets	sa = chromeWin ? chromeWin.safeAreaInsets : UIEdgeInsetsZero;
+	static UIEdgeInsets lastSA;
+	BOOL			saChanged = !UIEdgeInsetsEqualToEdgeInsets (sa, lastSA);
+	if (saChanged)
+	{
+		lastSA = sa;
+		NSLog (@"[vkquake] safe area changed: %@", NSStringFromUIEdgeInsets (sa));
+	}
+#ifndef VKQ_VISIONOS
+	vkq_push_console_inset (chromeWin, sa);
+#endif
 	BOOL showBack = (keydest != 0); // in a menu/console — shown even with a controller so the iOS settings gear is reachable
 	// Issue #5: in the console, back + gear move to the RIGHT edge. On the left
 	// they sat on top of the console's text (which starts at the left margin);
 	// the right of the console area is empty apart from the version string.
 	BOOL		onRight = (keydest == 1);
 	static BOOL lastRight = NO;
-	if (g_back.hidden != !showBack || onRight != lastRight)
+	if (g_back.hidden != !showBack || onRight != lastRight || saChanged)
 	{
 		g_back.hidden = !showBack;
 		g_settings.hidden = !showBack;
@@ -1496,7 +1603,7 @@ void VKQ_iOS_FramePoll (void)
 		static BOOL	 lastSave = NO, lastLoad = NO;
 		BOOL		 avail = VKQ_iOS_QuickSaveAvailable () != 0;
 		BOOL		 showLoad = avail && VKQ_iOS_QuickSaveExists () != 0;
-		if (avail != lastSave || showLoad != lastLoad)
+		if (avail != lastSave || showLoad != lastLoad || saChanged)
 		{
 			lastSave = avail;
 			lastLoad = showLoad;
@@ -1505,26 +1612,27 @@ void VKQ_iOS_FramePoll (void)
 			if (avail)
 			{
 				UIWindow *win = g_qsave.superview;
+				// Below the console button (back 7-53, gear 65-111, console 123-169
+				// pt from the safe top, 12 pt gaps): save 181-227, load 239-285.
+				// Left edges line up with the 64 pt column (safe left + 12).
 				CGFloat	  x = win.safeAreaInsets.left + 12 + g_qsave.bounds.size.width * 0.5f;
-				g_qsave.center = CGPointMake (x, win.safeAreaInsets.top + 140);
-				g_qload.center = CGPointMake (x, win.safeAreaInsets.top + 188);
+				g_qsave.center = CGPointMake (x, win.safeAreaInsets.top + 204);
+				g_qload.center = CGPointMake (x, win.safeAreaInsets.top + 262);
 			}
 		}
-		// CONSOLE pill (issue #5): any menu (keydest 3 = key_menu), placed in the
-		// next free slot of the same column so it never overlaps the quick pills.
+		// Console button (issue #5): any menu (keydest 3 = key_menu), in the back /
+		// gear column directly under the gear (same 58 pt pitch as back -> gear).
 		BOOL		showCon = (keydest == 3);
-		int			slot = showCon ? (avail ? (showLoad ? 2 : 1) : 0) : -1;
-		static int	lastSlot = -2;
-		if (slot != lastSlot)
+		static BOOL lastCon = NO;
+		if (showCon != lastCon || saChanged)
 		{
-			lastSlot = slot;
+			lastCon = showCon;
 			g_console.hidden = !showCon;
 			if (showCon)
 			{
 				UIWindow *win = g_console.superview;
-				CGFloat	  x = win.safeAreaInsets.left + 12 + g_console.bounds.size.width * 0.5f;
-				g_console.center = CGPointMake (x, win.safeAreaInsets.top + 140 + 48 * slot);
-				NSLog (@"[vkquake] console pill shown at %@", NSStringFromCGRect (g_console.frame));
+				g_console.center = CGPointMake (win.safeAreaInsets.left + 44, win.safeAreaInsets.top + 146);
+				NSLog (@"[vkquake] console button shown at %@", NSStringFromCGRect (g_console.frame));
 			}
 		}
 	}
