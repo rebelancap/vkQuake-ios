@@ -8,9 +8,10 @@ so this is the only way to verify the editor without a finger on glass.
 Applies on top of 0004's VKQ_IOS block.
 
 diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
+index 9852bacd..c1dec5b3 100644
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -200,6 +200,8 @@ void IN_HideCursor ()
+@@ -360,6 +360,8 @@ void IN_HideCursor ()
  // keyboard and feeds characters back via VKQ_TouchChar / VKQ_TouchKey.
  extern void VKQ_iOS_SetTextActive (int active);
  static void IN_TouchLook_f (void); // defined with the touch bridge below
@@ -19,7 +20,7 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  // Shell still uses this to position SDL's view-shift when the native keyboard shows.
  void VKQ_iOS_SetTextInputRect (int x, int y, int w, int h)
  {
-@@ -244,6 +246,8 @@ void IN_Init (void)
+@@ -404,6 +406,8 @@ void IN_Init (void)
  	// UIKit entirely, so a touch-look regression could never be caught without
  	// hands on glass. Feeds the same accumulator a finger drag does.
  	Cmd_AddCommand ("vkq_touchlook", IN_TouchLook_f);
@@ -28,7 +29,7 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  #endif
  	if (safemode || COM_CheckParm ("-nomouse"))
  	{
-@@ -721,6 +725,47 @@ static void IN_TouchLook_f (void)
+@@ -1019,6 +1023,47 @@ static void IN_TouchLook_f (void)
  	}
  	VKQ_TouchLook ((float)atof (Cmd_Argv (1)), (float)atof (Cmd_Argv (2)));
  }

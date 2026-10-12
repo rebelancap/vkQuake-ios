@@ -1,7 +1,8 @@
 diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
+index 5123918c..9852bacd 100644
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -192,15 +192,59 @@ void IN_HideCursor ()
+@@ -352,15 +352,59 @@ void IN_HideCursor ()
  #endif
  }
  
@@ -61,7 +62,7 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  	if (safemode || COM_CheckParm ("-nomouse"))
  	{
  		no_mouse = true;
-@@ -544,6 +588,25 @@ void IN_JoyMove (usercmd_t *cmd)
+@@ -754,6 +798,25 @@ void IN_JoyMove (usercmd_t *cmd)
  		lookRaw = temp;
  	}
  
@@ -87,7 +88,7 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  	moveDeadzone = IN_ApplyDeadzone (moveRaw, joy_deadzone_move.value, joy_outer_threshold_move.value);
  	lookDeadzone = IN_ApplyDeadzone (lookRaw, joy_deadzone_look.value, joy_outer_threshold_look.value);
  
-@@ -626,6 +689,73 @@ void IN_MouseMove (usercmd_t *cmd)
+@@ -924,6 +987,73 @@ void IN_MouseMove (usercmd_t *cmd)
  	}
  }
  
@@ -161,9 +162,9 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  void IN_Move (usercmd_t *cmd)
  {
  	// We only want the latest joystick movements
-@@ -635,6 +765,9 @@ void IN_Move (usercmd_t *cmd)
- 
+@@ -934,6 +1064,9 @@ void IN_Move (usercmd_t *cmd)
  	IN_JoyMove (cmd);
+ 	IN_GyroMove ();
  	IN_MouseMove (cmd);
 +#ifdef VKQ_IOS
 +	IN_TouchMove (cmd);
@@ -171,7 +172,7 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  }
  
  void IN_ClearStates (void) {}
-@@ -647,17 +780,13 @@ void IN_UpdateInputMode (void)
+@@ -946,17 +1079,13 @@ void IN_UpdateInputMode (void)
  		textmode = want_textmode;
  		if (in_debugkeys.value)
  			Con_Printf ("SDL_EnableUNICODE %d time: %g\n", textmode, Sys_DoubleTime ());

@@ -1,7 +1,8 @@
 diff --git a/Quake/cl_parse.c b/Quake/cl_parse.c
+index a7dba777..f73eae0e 100644
 --- a/Quake/cl_parse.c
 +++ b/Quake/cl_parse.c
-@@ -1877,7 +1877,28 @@ void CL_ParseServerMessage (void)
+@@ -1872,7 +1872,28 @@ void CL_ParseServerMessage (void)
  		case svc_print:
  			str = MSG_ReadString ();
  			if (!cls.demoseeking)
@@ -31,6 +32,7 @@ diff --git a/Quake/cl_parse.c b/Quake/cl_parse.c
  
  		case svc_centerprint:
 diff --git a/Quake/console.c b/Quake/console.c
+index 70e1888d..af368397 100644
 --- a/Quake/console.c
 +++ b/Quake/console.c
 @@ -67,6 +67,14 @@ char con_redirect_buffer[8192];
@@ -48,12 +50,12 @@ diff --git a/Quake/console.c b/Quake/console.c
  
  int con_vislines;
  
-@@ -1177,7 +1185,12 @@ static void Con_Print (const char *txt)
+@@ -1183,7 +1191,12 @@ static void Con_Print (const char *txt)
  			Con_Linefeed ();
  			// mark time for transparent overlay
  			if (con_current >= 0)
 +			{
- 				con_times[con_current % NUM_CON_TIMES] = realtime;
+ 				con_times[con_current % NUM_CON_TIMES] = skipnotify ? 0 : realtime;
 +#ifdef VKQ_VISIONOS
 +				con_notify_game[con_current % NUM_CON_TIMES] = con_vr_gameprint ? 1 : 0;
 +#endif
@@ -61,7 +63,7 @@ diff --git a/Quake/console.c b/Quake/console.c
  		}
  
  		switch (c)
-@@ -2206,6 +2219,90 @@ void Con_DrawNotify (cb_context_t *cbx)
+@@ -2217,6 +2230,90 @@ void Con_DrawNotify (cb_context_t *cbx)
  	}
  }
  
@@ -153,9 +155,10 @@ diff --git a/Quake/console.c b/Quake/console.c
  ================
  Con_DrawInput -- johnfitz -- modified to allow insert editing
 diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
+index 38e38290..11d5f361 100644
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
-@@ -280,6 +280,52 @@ static void SCR_CheckDrawCenterString (cb_context_t *cbx)
+@@ -356,6 +356,52 @@ static void SCR_CheckDrawCenterString (cb_context_t *cbx)
  	SCR_DrawCenterString (cbx);
  }
  
@@ -209,9 +212,10 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  
  /*
 diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
+index fce93e2e..5247935b 100644
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -6136,7 +6136,14 @@ static int				  vkq_vr_yaw_init = 0;	 // adopt the player's facing on the first
+@@ -5638,7 +5638,14 @@ static int				  vkq_vr_yaw_init = 0;	 // adopt the player's facing on the first
  // (charter §7 — the archived-cvar trap that R1 already paid for once).
  cvar_t vkqvr_aimhand = {"vkqvr_aimhand", "1", CVAR_NONE};	  // 0 = left, 1 = right
  cvar_t vkqvr_movedir = {"vkqvr_movedir", "0", CVAR_NONE};	  // 0 head, 1 aim hand, 2 off hand
@@ -227,7 +231,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  cvar_t vkqvr_turnspeed = {"vkqvr_turnspeed", "140", CVAR_NONE};
  cvar_t vkqvr_deadzone = {"vkqvr_deadzone", "0.15", CVAR_NONE};
  cvar_t vkqvr_laser = {"vkqvr_laser", "1", CVAR_NONE};		 // 0 off, 1 beam+dot, 2 dot only
-@@ -6361,7 +6368,10 @@ void VKQ_VR_RegisterCvars (void)
+@@ -5863,7 +5870,10 @@ void VKQ_VR_RegisterCvars (void)
  // the console +cmd/-cmd path is normally the only writer. Driving them directly
  // is what makes a Sense trigger indistinguishable from a bound gamepad button
  // to CL_KeyState and CL_FinishMove.
@@ -239,7 +243,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  extern int		 in_impulse;
  extern cvar_t	 cl_forwardspeed, cl_movespeedkey, cl_alwaysrun;
  
-@@ -6393,6 +6403,8 @@ void			VKQ_VR_ImmersiveReset (const char *why);
+@@ -5895,6 +5905,8 @@ void			VKQ_VR_ImmersiveReset (const char *why);
  // overlay 0023 (R6 part A) — the fire scheduler drives the same button latch the
  // rest of the input path does, and is defined above it.
  static void vkq_vr_hold (kbutton_t *b, qboolean down);
@@ -248,7 +252,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  
  // The hand a shot leaves from THIS frame. Normally the aim hand; in Immersive
  // dual wield it is whichever trigger is firing, so aim, muzzle, crosshair and
-@@ -6803,6 +6815,37 @@ void VKQ_VR_FireDebugString (char *out, int len)
+@@ -6305,6 +6317,37 @@ void VKQ_VR_FireDebugString (char *out, int len)
  		cl.stats[STAT_SHELLS], cl.stats[STAT_NAILS], cl.stats[STAT_ROCKETS], cl.stats[STAT_CELLS]);
  }
  
@@ -286,7 +290,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  // How far the wish vector was rotated this frame (charter A6's movement
  // direction). Published for the diagnostics line the simulator asserts on —
  // "the movement rotated" is otherwise invisible in a screenshot.
-@@ -7591,11 +7634,15 @@ extern int vkq_ios_modal_active; // gl_screen.c — SCR_ModalMessage is blocking
+@@ -7093,11 +7136,15 @@ extern int vkq_ios_modal_active; // gl_screen.c — SCR_ModalMessage is blocking
  void VKQ_VR_UIInputPump (void)
  {
  	extern int	  VKQ_Sense_UISample (unsigned *btn, float *stick);
@@ -303,7 +307,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	unsigned		btn[2] = {0u, 0u}, pressed;
  	float			stick[4] = {0.0f, 0.0f, 0.0f, 0.0f};
  	float			x, y;
-@@ -7630,6 +7677,31 @@ void VKQ_VR_UIInputPump (void)
+@@ -7132,6 +7179,31 @@ void VKQ_VR_UIInputPump (void)
  	prev[0] = btn[0];
  	prev[1] = btn[1];
  
@@ -335,7 +339,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	// Chirality-appropriate and hand-agnostic: trigger or A on EITHER controller
  	// is yes/select, B or menu on either is no/back. A player who put the pair
  	// down left-handed still gets out of the dialog.
-@@ -7723,6 +7795,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -7225,6 +7297,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  				vkq_vr_owned_buttons = 0;
  				vkq_vr_hold (&in_attack, false);
  				vkq_vr_hold (&in_jump, false);
@@ -343,7 +347,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  				// R3 release-on-doff (charter A7): the controllers have gone, so
  				// every grip goes with them and Immersive hands the weapon back.
  				// Never leave a player axe-locked because a battery died.
-@@ -7751,6 +7824,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -7253,6 +7326,7 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		// Nothing below this line may reach gameplay while a menu is up.
  		vkq_vr_hold (&in_attack, false);
  		vkq_vr_hold (&in_jump, false);
@@ -351,7 +355,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		// A menu opening mid-hold must not leave a grip latched, or Immersive
  		// would stow on the release the player made to press a menu button.
  		vkq_vr_grip_release_all ("menu opened");
-@@ -7812,6 +7886,34 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -7314,6 +7388,34 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		VKQ_VR_Haptic (aim, 0.5f, 0.05f, "recenter");
  	}
  
@@ -386,7 +390,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	// MOVE — same units and speed rule as IN_JoyMove, so a Sense stick and a
  	// gamepad stick move the player identically.
  	mx = vkq_vr_stick_axis (ls[0]);
-@@ -7893,9 +7995,35 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -7395,9 +7497,35 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  			cycleArmed = 1;
  	}
  
@@ -423,7 +427,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	VKQ_VR_UpdateHolsters (now);
  	(void)ry;
  	(void)rOff;
-@@ -8764,10 +8892,101 @@ static qmodel_t *vkq_vr_weapon_model (int itembit)
+@@ -8266,10 +8394,101 @@ static qmodel_t *vkq_vr_weapon_model (int itembit)
  
  static qboolean vkq_vr_owns (int itembit) { return itembit != 0 && (cl.items & itembit) != 0; }
  
@@ -526,7 +530,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	for (i = 0; i < 2; i++)
  	{
  		if (vkq_vr_holster_item[i] && !vkq_vr_owns (vkq_vr_holster_item[i]))
-@@ -8775,9 +8994,37 @@ static void vkq_vr_v2_validate (void)
+@@ -8277,9 +8496,37 @@ static void vkq_vr_v2_validate (void)
  		if (vkq_vr_held_item[i] && !vkq_vr_owns (vkq_vr_held_item[i]))
  			vkq_vr_held_item[i] = 0;
  	}
@@ -567,7 +571,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  }
  
  void VKQ_VR_ImmersiveReset (const char *why)
-@@ -8936,6 +9183,50 @@ int VKQ_VR_HudIcon (const char *name, unsigned *out, int maxw, int maxh, int *ow
+@@ -8438,6 +8685,50 @@ int VKQ_VR_HudIcon (const char *name, unsigned *out, int maxw, int maxh, int *ow
  	return 1;
  }
  
@@ -618,7 +622,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  /*
  ==================
  VKQ_VR_HudIcons -- overlay 0022 (VR R5 item 5)
-@@ -9032,7 +9323,7 @@ void VKQ_VR_CycleWeapon (qboolean next)
+@@ -8534,7 +8825,7 @@ void VKQ_VR_CycleWeapon (qboolean next)
  			continue;
  		if (cand == vkq_vr_held_item_get (hand ^ 1) || cand == vkq_vr_holster_item[0] || cand == vkq_vr_holster_item[1])
  			continue;
@@ -627,7 +631,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		in_impulse = vkq_vr_weapon_impulse (cand);
  		vkq_vr_fire_note_pending (cand);
  		vkq_vr_holster_note ("cycle -> imp%d (%s hand)", in_impulse, hand ? "right" : "left");
-@@ -9345,11 +9636,11 @@ void VKQ_VR_HolsterDebugString (char *out, int len)
+@@ -8847,11 +9138,11 @@ void VKQ_VR_HolsterDebugString (char *out, int len)
  	if (!out || len <= 0)
  		return;
  	q_snprintf (
@@ -641,7 +645,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		vkq_vr_shoot_hand < 0 ? "-" : (vkq_vr_shoot_hand ? "right" : "left"), vkq_vr_zone_log);
  }
  
-@@ -9452,7 +9743,10 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
+@@ -8954,7 +9245,10 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  	// death or a new game, so it is a "per life" behaviour without a death hook.
  	if (!vkq_vr_v2_started && !vkq_vr_held_item[0] && !vkq_vr_held_item[1] && cl.stats[STAT_ACTIVEWEAPON] && vkq_vr_owns (cl.stats[STAT_ACTIVEWEAPON]))
  	{
@@ -653,7 +657,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		vkq_vr_v2_started = 1;
  	}
  	if (!cl.stats[STAT_ACTIVEWEAPON] || cl.stats[STAT_HEALTH] <= 0)
-@@ -9516,7 +9810,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
+@@ -9018,7 +9312,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  				}
  				else
  				{
@@ -662,7 +666,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  					*slot = 0;
  					VKQ_VR_Haptic (hand, 0.7f, 0.04f, "take");
  					vkq_vr_holster_note ("TAKE imp%d from %s -> %s hand", vkq_vr_weapon_impulse (vkq_vr_held_item[hand]), vkq_vr_zone_names[zone],
-@@ -9525,7 +9819,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
+@@ -9027,7 +9321,7 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  			}
  			else if (held && !*slot)
  			{
@@ -671,7 +675,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  				vkq_vr_held_item[hand] = 0;
  				VKQ_VR_Haptic (hand, 0.5f, 0.04f, "stow");
  				vkq_vr_holster_note ("STOW imp%d into %s", vkq_vr_weapon_impulse (*slot), vkq_vr_zone_names[zone]);
-@@ -9541,8 +9835,8 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
+@@ -9043,8 +9337,8 @@ static void VKQ_VR_UpdateImmersiveV2 (double now, float on, float off)
  				else
  				{
  					int t = *slot;
@@ -683,9 +687,10 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  					vkq_vr_holster_note ("SWAP %s: imp%d out, imp%d in", vkq_vr_zone_names[zone], vkq_vr_weapon_impulse (*slot),
  						vkq_vr_weapon_impulse (t));
 diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
+index 600f2e44..a653e7c1 100644
 --- a/Quake/host_cmd.c
 +++ b/Quake/host_cmd.c
-@@ -1495,6 +1495,30 @@ static void Host_Map_f (void)
+@@ -1679,6 +1679,30 @@ static void Host_Map_f (void)
  
  	cls.demonum = -1; // stop demo loop in case this fails
  

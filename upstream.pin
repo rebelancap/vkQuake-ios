@@ -4,10 +4,11 @@
 
 repo=https://github.com/Novum/vkQuake
 branch=master
-commit=1b948e29a6e3e412df2e1814615d71fb8040bce5
-date=2026-08-27
-note=Release tag 1.36.0 ("End startup loading plaque after first frame"). No git submodules.
-#      Meson build system. This bump carries upstream's own mg3 fixes: af43754c/0edfa714
-#      (MD5 joint remap, superseding our deleted 0015) and 050b9f19 (localization read
-#      through COM_LoadFile, superseding most of our 0016 -- only the placeholder
-#      warning survives, as 0016-mg3-localization-placeholder-warning.patch).
+commit=749b4fd43fe8b8554b34163dc9469c4a08a4def1
+date=2026-10-03
+note=Release tag 1.37.0 ("Free cached sky textures before model cleanup"). No git submodules.
+#      Meson build system. 1.37.0 moved frame recording into r_passes.c (unified render
+#      passes), so the visionOS stereo/VR overlay (0010/0018) now routes its offscreen
+#      present image through R_RecordFrame (end_rendering_parms_t.ui_framebuffer_override).
+#      Upstream f8cef54b (quicksave row in the Load menu) superseded the Load-menu half of
+#      0013; only the iOS quick save/load chrome commands survive. See DECISIONS.md "upstream 1.37.0 pin bump".

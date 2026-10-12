@@ -1,7 +1,8 @@
 diff --git a/Quake/cl_main.c b/Quake/cl_main.c
+index 1a3b8d22..4b099242 100644
 --- a/Quake/cl_main.c
 +++ b/Quake/cl_main.c
-@@ -55,6 +55,10 @@ cvar_t cl_confirmquit = {"cl_confirmquit", "0", CVAR_ARCHIVE};
+@@ -56,6 +56,10 @@ cvar_t cl_confirmquit = {"cl_confirmquit", "0", CVAR_ARCHIVE};
  
  client_static_t cls;
  client_state_t	cl;
@@ -12,7 +13,7 @@ diff --git a/Quake/cl_main.c b/Quake/cl_main.c
  // FIXME: put these on hunk?
  lightstyle_t	cl_lightstyle[MAX_LIGHTSTYLES];
  dlight_t		cl_dlights[MAX_DLIGHTS];
-@@ -232,6 +236,22 @@ void CL_EstablishConnection (const char *host)
+@@ -229,6 +233,22 @@ void CL_EstablishConnection (const char *host)
  		Host_Error ("CL_Connect: connect failed");
  	Con_DPrintf ("CL_EstablishConnection: connected to %s\n", host);
  
@@ -51,6 +52,7 @@ diff --git a/Quake/cl_main.c b/Quake/cl_main.c
  	Cvar_RegisterVariable (&cl_bottomcolor);
 diff --git a/Quake/cl_mapdl.c b/Quake/cl_mapdl.c
 new file mode 100644
+index 00000000..8d5fbc26
 --- /dev/null
 +++ b/Quake/cl_mapdl.c
 @@ -0,0 +1,1026 @@
@@ -1081,6 +1083,7 @@ new file mode 100644
 +
 +#endif // VKQ_IOS
 diff --git a/Quake/cl_parse.c b/Quake/cl_parse.c
+index 30154578..43f73edb 100644
 --- a/Quake/cl_parse.c
 +++ b/Quake/cl_parse.c
 @@ -1132,6 +1132,35 @@ static void CL_ParseServerInfo (void)
@@ -1120,9 +1123,10 @@ diff --git a/Quake/cl_parse.c b/Quake/cl_parse.c
  			Con_Printf ("vkQuake cannot download game content from servers; you need the file installed.\n\n");
  
 diff --git a/Quake/client.h b/Quake/client.h
+index 5b3f5d70..a44bd4bb 100644
 --- a/Quake/client.h
 +++ b/Quake/client.h
-@@ -365,6 +365,31 @@ void CL_Disconnect (void);
+@@ -364,6 +364,31 @@ void CL_Disconnect (void);
  void CL_Disconnect_f (void);
  void CL_NextDemo (void);
  
@@ -1155,9 +1159,10 @@ diff --git a/Quake/client.h b/Quake/client.h
  
  //
 diff --git a/Quake/common.c b/Quake/common.c
+index a17ed708..906da96b 100644
 --- a/Quake/common.c
 +++ b/Quake/common.c
-@@ -3855,6 +3855,289 @@ static size_t mz_zip_file_read_func (void *opaque, mz_uint64 ofs, void *buf, siz
+@@ -4272,6 +4272,289 @@ static size_t mz_zip_file_read_func (void *opaque, mz_uint64 ofs, void *buf, siz
  #endif
  }
  
@@ -1448,9 +1453,10 @@ diff --git a/Quake/common.c b/Quake/common.c
  ================
  LOC_LoadFile
 diff --git a/Quake/common.h b/Quake/common.h
+index 2a156793..9519298b 100644
 --- a/Quake/common.h
 +++ b/Quake/common.h
-@@ -467,6 +467,14 @@ size_t COM_SanitizeDescriptionString (char *dst, size_t dstsize, const char *src
+@@ -482,6 +482,14 @@ size_t COM_SanitizeDescriptionString (char *dst, size_t dstsize, const char *src
  #define FS_ENT_FILE		 (1 << 0)
  #define FS_ENT_DIRECTORY (1 << 1)
  
@@ -1466,9 +1472,10 @@ diff --git a/Quake/common.h b/Quake/common.h
   * to perform non-sequential reads on files reopened on pak files
   * because we need the bookkeeping about file start/end positions.
 diff --git a/Quake/host.c b/Quake/host.c
+index e91d722e..b0f0425f 100644
 --- a/Quake/host.c
 +++ b/Quake/host.c
-@@ -1094,6 +1094,20 @@ static void _Host_Frame (double time)
+@@ -1246,6 +1246,20 @@ static void _Host_Frame (double time)
  	if (host_framecount == 0)
  		SCR_EndStartupLoadingPlaque ();
  
@@ -1490,9 +1497,10 @@ diff --git a/Quake/host.c b/Quake/host.c
  
  	if (cl.sendprespawn)
 diff --git a/Quake/menu.c b/Quake/menu.c
+index b19b8dab..5387ee1b 100644
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -77,6 +77,10 @@ static void M_LanConfig_Key (int key);
+@@ -79,6 +79,10 @@ static void M_LanConfig_Key (int key);
  static void M_MPGameOptions_Key (int key);
  static void M_Search_Key (int key);
  static void M_ServerList_Key (int key);
@@ -1503,7 +1511,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  static void M_Options_Key (int key);
  static void M_Keys_Key (int key);
  static void M_Help_Key (int key);
-@@ -4930,6 +4934,117 @@ static void M_ServerList_Key (int k)
+@@ -5431,6 +5435,117 @@ static void M_ServerList_Key (int k)
  	}
  }
  
@@ -1621,7 +1629,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  //=============================================================================
  /* Custom gfx checks (from Ironwail) */
  
-@@ -5206,6 +5321,12 @@ void M_Draw (cb_context_t *cbx)
+@@ -5728,6 +5843,12 @@ void M_Draw (cb_context_t *cbx)
  	case m_slist:
  		M_ServerList_Draw (cbx);
  		break;
@@ -1633,8 +1641,8 @@ diff --git a/Quake/menu.c b/Quake/menu.c
 +#endif
  	}
  
- 	if (m_entersound)
-@@ -5311,6 +5432,12 @@ void M_Keydown (int key)
+ 	Draw_SetOpacity (1.0f);
+@@ -5895,6 +6016,12 @@ void M_Keydown (int key, qboolean repeat)
  	case m_slist:
  		M_ServerList_Key (key);
  		return;
@@ -1648,9 +1656,10 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  }
  
 diff --git a/Quake/menu.h b/Quake/menu.h
+index 31345d5a..90eaec8a 100644
 --- a/Quake/menu.h
 +++ b/Quake/menu.h
-@@ -48,6 +48,13 @@ enum m_state_e
+@@ -49,6 +49,13 @@ enum m_state_e
  	m_mods,
  	m_maps,
  	m_skill,
@@ -1664,7 +1673,7 @@ diff --git a/Quake/menu.h b/Quake/menu.h
  };
  
  extern enum m_state_e m_state;
-@@ -74,6 +81,9 @@ void	 M_MenuChanged ();
+@@ -75,6 +82,9 @@ void	 M_MenuChanged ();
  void M_Menu_Main_f (void);
  void M_Menu_Options_f (void);
  void M_Menu_Quit_f (void);
@@ -1675,9 +1684,10 @@ diff --git a/Quake/menu.h b/Quake/menu.h
  void M_Print (cb_context_t *cbx, int cx, int cy, const char *str);
  
 diff --git a/meson.build b/meson.build
+index 459c7826..254962e0 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -214,6 +214,13 @@ srcs = [
+@@ -227,6 +227,13 @@ srcs = [
      'Quake/cl_demo.c',
      'Quake/cl_input.c',
      'Quake/cl_main.c',

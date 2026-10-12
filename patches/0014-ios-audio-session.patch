@@ -21,6 +21,7 @@ activation is what interrupts other apps' audio, so "Stop Other Audio" has to
 be decided before it happens.
 
 diff --git a/Quake/bgmusic.c b/Quake/bgmusic.c
+index 0ebffd09..904cb5d0 100644
 --- a/Quake/bgmusic.c
 +++ b/Quake/bgmusic.c
 @@ -417,7 +417,17 @@ static void BGM_UpdateStream (void)
@@ -42,6 +43,7 @@ diff --git a/Quake/bgmusic.c b/Quake/bgmusic.c
  		}
  		else if (res == 0) /* EOF */
 diff --git a/Quake/main_sdl.c b/Quake/main_sdl.c
+index 04e282cb..975f8c12 100644
 --- a/Quake/main_sdl.c
 +++ b/Quake/main_sdl.c
 @@ -120,6 +120,15 @@ int main (int argc, char *argv[])
@@ -61,6 +63,7 @@ diff --git a/Quake/main_sdl.c b/Quake/main_sdl.c
  	// Documents dir (Files-visible, where game data is imported/pushed).
  	{
 diff --git a/Quake/snd_dma.c b/Quake/snd_dma.c
+index bd1db5b8..5ff9c1e2 100644
 --- a/Quake/snd_dma.c
 +++ b/Quake/snd_dma.c
 @@ -78,6 +78,18 @@ SDL_Mutex *snd_mutex;
@@ -83,9 +86,10 @@ diff --git a/Quake/snd_dma.c b/Quake/snd_dma.c
  cvar_t loadas8bit = {"loadas8bit", "0", CVAR_NONE};
  
 diff --git a/Quake/snd_mix.c b/Quake/snd_mix.c
+index 1ae4c02f..092e0066 100644
 --- a/Quake/snd_mix.c
 +++ b/Quake/snd_mix.c
-@@ -406,7 +406,16 @@ void S_PaintChannels (int endtime)
+@@ -441,7 +441,16 @@ void S_PaintChannels (int endtime)
  	sfxcache_t *sc;
  	qboolean	pause_loops = snd_pauselooping.value && (cl.paused || (sv.active && svs.maxclients == 1 && key_dest != key_game));
  

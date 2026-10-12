@@ -1,7 +1,8 @@
 diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
+index e99bd939..2f318106 100644
 --- a/Quake/host_cmd.c
 +++ b/Quake/host_cmd.c
-@@ -648,8 +648,10 @@ static void Modlist_SetNameFromMapDB (modinfo_t *info, const char *mapdb, const
+@@ -688,8 +688,10 @@ static void Modlist_SetNameFromMapDB (modinfo_t *info, const char *mapdb, const
  
  static void Modlist_Add (const char *base, const char *name)
  {
@@ -13,9 +14,10 @@ diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
  		return;
  	char path[MAX_OSPATH];
 diff --git a/Quake/menu.c b/Quake/menu.c
+index 1b1ac16e..d5cfc48c 100644
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -691,12 +691,24 @@ void M_Main_Draw (cb_context_t *cbx)
+@@ -777,12 +777,24 @@ void M_Main_Draw (cb_context_t *cbx)
  	qpic_t *p;
  	qpic_t *menu2 = Get_Menu2 ();
  	int		main_items = MAIN_ITEMS + (menu2 ? 1 : 0);
@@ -40,7 +42,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  
  	f = (int)(realtime * 10) % 6;
  
-@@ -707,6 +719,12 @@ void M_Main_Draw (cb_context_t *cbx)
+@@ -793,6 +805,12 @@ void M_Main_Draw (cb_context_t *cbx)
  void M_Main_Key (int key)
  {
  	qpic_t *menu2 = Get_Menu2 ();
@@ -53,7 +55,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  
  	switch (key)
  	{
-@@ -725,14 +743,14 @@ void M_Main_Key (int key)
+@@ -811,14 +829,14 @@ void M_Main_Key (int key)
  
  	case K_DOWNARROW:
  		S_LocalSound ("misc/menu1.wav");
@@ -70,7 +72,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  		break;
  
  	case K_ENTER:
-@@ -764,6 +782,13 @@ void M_Main_Key (int key)
+@@ -850,6 +868,13 @@ void M_Main_Key (int key)
  				M_Menu_Quit_f ();
  			break;
  		case 5:

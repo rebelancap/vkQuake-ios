@@ -32,6 +32,7 @@ the gesture without a thumb on glass. vkq_slist_fake fills the host cache with a
 deterministic scrollable list for the same reason.
 
 diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
+index 9c9778e5..90124aac 100644
 --- a/Quake/in_sdl3.c
 +++ b/Quake/in_sdl3.c
 @@ -28,14 +28,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
@@ -52,7 +53,7 @@ diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
  
  static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
  SDL_Gamepad			 *joy_active_controller = NULL;
-@@ -269,15 +264,15 @@ void IN_SendKeyEvents (void)
+@@ -297,15 +292,15 @@ void IN_SendKeyEvents (void)
  #ifdef VKQ_IOS
  		// Drive the menu cursor from touch directly (SDL's touch->mouse synthesis
  		// freezes here). tfinger.x/y are normalized [0,1] in window space; scale to
@@ -75,12 +76,13 @@ diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
  #endif
  
 diff --git a/Quake/menu.c b/Quake/menu.c
+index 5387ee1b..8224371b 100644
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -123,6 +123,46 @@ static int scrollbar_x;
- static int scrollbar_y;
- static int scrollbar_size;
+@@ -184,6 +184,45 @@ static void M_BeginPreview (int row, preview_kind_t kind)
+ }
  
+ cvar_t ui_mouse = {"ui_mouse", "1", CVAR_ARCHIVE};
 +#ifdef VKQ_IOS
 +// ---------------------------------------------------------------------------
 +// TOUCH: tap vs drag (vkquake-ios 1.1.0.2)
@@ -120,11 +122,10 @@ diff --git a/Quake/menu.c b/Quake/menu.c
 +static qboolean vkq_touch_down;			  // a finger is currently on the glass
 +static qboolean vkq_touch_dragging;		  // ... and it has travelled past the slop
 +#endif
-+
+ 
  void		M_ConfigureNetSubsystem (void);
  static void M_SetSkillMenuMap (const char *name);
- 
-@@ -246,10 +286,15 @@ float M_GetScale ()
+@@ -310,10 +349,15 @@ float M_GetScale ()
  M_PixelToMenuCanvasCoord
  ================
  */
@@ -142,7 +143,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  	*x = (*x - (glwidth - 320 * s) / 2) / s;
  	*y = (*y - (glheight - 200 * s) / 2) / s;
  }
-@@ -494,6 +539,13 @@ static void M_DrawScrollbar (cb_context_t *cbx, int x, int y, float value, float
+@@ -559,6 +603,13 @@ static void M_DrawScrollbar (cb_context_t *cbx, int x, int y, float value, float
  	scrollbar_x = x;
  	scrollbar_y = y - 8;
  	scrollbar_size = (size + 2) * CHARACTER_SIZE;
@@ -156,7 +157,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  	value = CLAMP (0.0f, value, 1.0f);
  	Draw_Character (cbx, x, y - CHARACTER_SIZE, 128 + 256);
  	for (int i = 0; i < size; i++)
-@@ -658,6 +710,18 @@ M_UpdateCursorForList
+@@ -733,6 +784,18 @@ M_Mouse_UpdateListCursor
  */
  static void M_Mouse_UpdateListCursor (int *cursor, int left, int right, int top, int item_height, int num_items, int scroll_offset)
  {
@@ -172,10 +173,10 @@ diff --git a/Quake/menu.c b/Quake/menu.c
 +	list_hit_bottom = top + item_height * num_items;
 +	list_hit_valid = (num_items > 0);
 +#endif
- 	if (!scrollbar_grab && !slider_grab && m_mouse_moved && (num_items > 0) && (m_mouse_x >= left) && (m_mouse_x <= right) && (m_mouse_y >= top) &&
- 		(m_mouse_y <= (top + item_height * num_items)))
- 		*cursor = scroll_offset + CLAMP (0, (m_mouse_y - top) / item_height, num_items - 1);
-@@ -5090,6 +5154,210 @@ void M_CheckMods (void)
+ 	if (!scrollbar_grab && !slider_grab && num_items > 0 && M_Mouse_InRect (left, right, top, top + item_height * num_items))
+ 	{
+ 		m_mouse_hover_state = m_state;
+@@ -5591,6 +5654,210 @@ void M_CheckMods (void)
  	m_skill_usegfx = M_CheckCustomGfx ("gfx/skillmenu.lmp", "gfx/sp_menu.lmp", 14856, sp_hashes, countof (sp_hashes));
  	m_skill_usecustomtitle = M_CheckCustomGfx ("gfx/p_skill.lmp", "gfx/ttl_sgl.lmp", 6728, sgl_hashes, countof (sgl_hashes));
  }
@@ -386,7 +387,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  
  //=============================================================================
  /* Credits menu -- used by the 2021 re-release */
-@@ -5111,6 +5379,16 @@ void M_Init (void)
+@@ -5612,6 +5879,16 @@ void M_Init (void)
  #ifdef VKQ_IOS
  	Cmd_AddCommand ("vkq_quicksave", VKQ_QuickSave_f);
  	Cmd_AddCommand ("vkq_quickload", VKQ_QuickLoad_f);
@@ -403,17 +404,15 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  #endif
  	Cmd_AddCommand ("menu_multiplayer", M_Menu_MultiPlayer_f);
  	Cmd_AddCommand ("menu_setup", M_Menu_Setup_f);
-@@ -5136,8 +5414,7 @@ void M_UpdateMouse (void)
+@@ -5655,7 +5932,6 @@ void M_UpdateMouse (void)
  	// synthesis is unreliable here — SDL_GetMouseState freezes at the first tap's
  	// position (so every menu tap stuck on the first item, Single Player). Drive the
  	// menu straight from finger events (in_sdl3.c), already in drawable pixels.
 -	extern float vkq_menu_touch_x, vkq_menu_touch_y;
--	float		 new_mouse_x = vkq_menu_touch_x;
-+	float new_mouse_x = vkq_menu_touch_x;
- 	float		 new_mouse_y = vkq_menu_touch_y;
- #elif defined(USE_SDL3)
- 	float new_mouse_x;
-@@ -5163,11 +5440,18 @@ void M_UpdateMouse (void)
+ 	new_mouse_x = (int)vkq_menu_touch_x;
+ 	new_mouse_y = (int)vkq_menu_touch_y;
+ #else
+@@ -5675,11 +5951,18 @@ void M_UpdateMouse (void)
  	// A tap (finger up) sets a 2-frame pending click: the position was applied above
  	// and the menu draw updates the highlighted row this frame, so firing MOUSE1 a
  	// couple frames later lands the click on the row you touched, not a stale one.
@@ -435,10 +434,10 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  	}
  #endif
  
-@@ -5201,6 +5485,13 @@ void M_UpdateMouse (void)
+@@ -5716,6 +5999,13 @@ void M_Draw (cb_context_t *cbx)
+ 	m_mouse_hover_state = m_none;
+ 	m_mouse_hover_cursor = NULL;
  
- void M_Draw (cb_context_t *cbx)
- {
 +#ifdef VKQ_IOS
 +	// Touch's "what did the menu draw last frame" latches. Cleared here, at the
 +	// top of the draw, so they describe the menu that is actually on screen —
@@ -450,9 +449,10 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  		return;
  
 diff --git a/Quake/menu.h b/Quake/menu.h
+index 90eaec8a..e1c91ba5 100644
 --- a/Quake/menu.h
 +++ b/Quake/menu.h
-@@ -77,6 +77,11 @@ void	 M_ToggleMenu_f (void);
+@@ -78,6 +78,11 @@ void	 M_ToggleMenu_f (void);
  float	 M_GetScale ();
  void	 M_UpdateMouse ();
  void	 M_MenuChanged ();
@@ -465,6 +465,7 @@ diff --git a/Quake/menu.h b/Quake/menu.h
  void M_Menu_Main_f (void);
  void M_Menu_Options_f (void);
 diff --git a/Quake/net_main.c b/Quake/net_main.c
+index 0bbbe21e..1256c3e6 100644
 --- a/Quake/net_main.c
 +++ b/Quake/net_main.c
 @@ -433,6 +433,65 @@ const char *NET_SlistPrintServerName (size_t idx)

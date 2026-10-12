@@ -1,4 +1,5 @@
 diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
+index 1f0310ea..193fb56d 100644
 --- a/Quake/in_sdl3.c
 +++ b/Quake/in_sdl3.c
 @@ -28,6 +28,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
@@ -17,7 +18,7 @@ diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
  static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
  SDL_Gamepad			 *joy_active_controller = NULL;
  
-@@ -196,6 +205,21 @@ void IN_SendKeyEvents (void)
+@@ -225,6 +234,21 @@ void IN_SendKeyEvents (void)
  			IN_MouseMotion (event.motion.xrel, event.motion.yrel);
  			break;
  
@@ -40,26 +41,28 @@ diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
  			if (joy_active_instaceid == 0)
  			{
 diff --git a/Quake/menu.c b/Quake/menu.c
+index ae4552d0..43b3f9e9 100644
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -4865,7 +4865,15 @@ void M_NewGame (void)
+@@ -5455,7 +5455,17 @@ void M_UpdateMouse (void)
+ 		return;
+ 	}
  
- void M_UpdateMouse (void)
- {
--#ifdef USE_SDL3
 +#ifdef VKQ_IOS
 +	// iOS/visionOS: the menu is driven by TOUCH, not a mouse. SDL's touch->mouse
 +	// synthesis is unreliable here — SDL_GetMouseState freezes at the first tap's
 +	// position (so every menu tap stuck on the first item, Single Player). Drive the
 +	// menu straight from finger events (in_sdl3.c), already in drawable pixels.
 +	extern float vkq_menu_touch_x, vkq_menu_touch_y;
-+	float		 new_mouse_x = vkq_menu_touch_x;
-+	float		 new_mouse_y = vkq_menu_touch_y;
-+#elif defined(USE_SDL3)
- 	float new_mouse_x;
- 	float new_mouse_y;
- 	SDL_GetMouseState (&new_mouse_x, &new_mouse_y);
-@@ -4885,6 +4893,18 @@ void M_UpdateMouse (void)
++	new_mouse_x = (int)vkq_menu_touch_x;
++	new_mouse_y = (int)vkq_menu_touch_y;
++#else
+ 	IN_GetMousePos (&new_mouse_x, &new_mouse_y);
++#endif
+ 
+ 	m_mouse_moved = !menu_changed && ((m_mouse_x_pixels != new_mouse_x) || (m_mouse_y_pixels != new_mouse_y));
+ 	m_mouse_x_pixels = new_mouse_x;
+@@ -5466,6 +5476,18 @@ void M_UpdateMouse (void)
  	m_mouse_y = new_mouse_y;
  	M_PixelToMenuCanvasCoord (&m_mouse_x, &m_mouse_y);
  

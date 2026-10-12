@@ -1,7 +1,8 @@
 diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
+index c40ce566..737bf404 100644
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -523,6 +523,9 @@ static qboolean VID_SetMode (int width, int height, float refreshrate, qboolean
+@@ -571,6 +571,9 @@ static qboolean VID_SetMode (int width, int height, float refreshrate, qboolean
  	if (!draw_context)
  	{
  		flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_VULKAN;
@@ -11,7 +12,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  
  #ifdef USE_SDL3
  		flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
-@@ -2885,7 +2888,13 @@ static qboolean GL_CreateSwapChain (void)
+@@ -2665,7 +2668,13 @@ static qboolean GL_CreateSwapChain (void)
  	swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
  	swapchain_create_info.pNext = NULL;
  	swapchain_create_info.surface = vulkan_surface;

@@ -1,7 +1,8 @@
 diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
+index a3880706..e412f585 100644
 --- a/Quake/gl_rmain.c
 +++ b/Quake/gl_rmain.c
-@@ -353,6 +353,25 @@ static void R_SetupMatrices ()
+@@ -350,6 +350,25 @@ static void R_SetupMatrices ()
  	TranslationMatrix (translation_matrix, -r_refdef.vieworg[0], -r_refdef.vieworg[1], -r_refdef.vieworg[2]);
  	MatrixMultiply (vulkan_globals.view_matrix, translation_matrix);
  
@@ -28,9 +29,10 @@ diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
  	memcpy (vulkan_globals.view_projection_matrix, vulkan_globals.projection_matrix, 16 * sizeof (float));
  	MatrixMultiply (vulkan_globals.view_projection_matrix, vulkan_globals.view_matrix);
 diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
+index fbb38e04..5784b39d 100644
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
-@@ -658,10 +658,20 @@ static void SCR_DrawFPS (cb_context_t *cbx)
+@@ -827,10 +827,20 @@ static void SCR_DrawFPS (cb_context_t *cbx)
  	{
  		char st[16];
  		int	 x, y;
@@ -51,7 +53,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  		Draw_String (cbx, x, y, st);
  	}
  }
-@@ -2001,7 +2011,35 @@ WARNING: be very careful calling this from elsewhere, because the refresh
+@@ -2289,7 +2299,35 @@ WARNING: be very careful calling this from elsewhere, because the refresh
  needs almost the entire 256k of stack space!
  ==================
  */
@@ -87,7 +89,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  {
  	if (!scr_initialized || !con_initialized || in_update_screen)
  		return; // not initialized yet
-@@ -2032,6 +2070,16 @@ void SCR_UpdateScreen (qboolean use_tasks)
+@@ -2320,6 +2358,16 @@ void SCR_UpdateScreen (qboolean use_tasks)
  	// decide on the height of the console
  	con_forcedup = !cl.worldmodel || cls.signon != SIGNONS;
  
@@ -104,7 +106,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  	task_handle_t begin_rendering_task = INVALID_TASK_HANDLE;
  	if (!GL_BeginRendering (use_tasks, &begin_rendering_task, &glwidth, &glheight))
  	{
-@@ -2051,7 +2099,7 @@ void SCR_UpdateScreen (qboolean use_tasks)
+@@ -2339,7 +2387,7 @@ void SCR_UpdateScreen (qboolean use_tasks)
  		task_handle_t setup_frame_task = Task_AllocateAndAssignFunc (SCR_SetupFrame, NULL, 0);
  		task_handle_t draw_gui_task = Task_AllocateAndAssignFunc (SCR_DrawGUI, NULL, 0);
  		V_RenderView (use_tasks, begin_rendering_task, setup_frame_task, draw_done_task, draw_gui_task);
@@ -113,7 +115,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  
  		Task_AddDependency (begin_rendering_task, draw_gui_task);
  		Task_AddDependency (setup_frame_task, draw_gui_task);
-@@ -2073,7 +2121,7 @@ void SCR_UpdateScreen (qboolean use_tasks)
+@@ -2361,7 +2409,7 @@ void SCR_UpdateScreen (qboolean use_tasks)
  		S_ExtraUpdate ();
  		SCR_DrawGUI (NULL);
  		SCR_DrawDone (NULL);
@@ -123,6 +125,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  
  	in_update_screen = false;
 diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
+index 737bf404..3a768a11 100644
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
 @@ -154,6 +154,34 @@ static vulkan_memory_t	depth_buffer_memory;
@@ -160,7 +163,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  static vulkan_memory_t	oit_accum_buffer_memory;
  static vulkan_memory_t	oit_reveal_buffer_memory;
  static VkImageView		oit_accum_buffer_view;
-@@ -271,6 +299,10 @@ VID_GetCurrentWidth
+@@ -276,6 +304,10 @@ VID_GetCurrentWidth
  static int VID_GetCurrentWidth (void)
  {
  	int w = 0, h = 0;
@@ -171,7 +174,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  #ifdef USE_SDL3
  	SDL_GetWindowSizeInPixels (draw_context, &w, &h);
  #else
-@@ -287,6 +319,10 @@ VID_GetCurrentHeight
+@@ -292,6 +324,10 @@ VID_GetCurrentHeight
  static int VID_GetCurrentHeight (void)
  {
  	int w = 0, h = 0;
@@ -182,7 +185,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  #ifdef USE_SDL3
  	SDL_GetWindowSizeInPixels (draw_context, &w, &h);
  #else
-@@ -2722,6 +2758,21 @@ GL_CreateSwapChain
+@@ -2502,6 +2538,21 @@ GL_CreateSwapChain
  */
  static qboolean GL_CreateSwapChain (void)
  {
@@ -204,20 +207,25 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	uint32_t i;
  	VkResult err;
  
-@@ -3119,6 +3170,91 @@ static void GL_CreateFrameBuffers (void)
- 
- 		GL_SetObjectName ((uint64_t)ui_framebuffers[i], VK_OBJECT_TYPE_FRAMEBUFFER, "ui");
- 	}
+@@ -2820,6 +2871,96 @@ static void GL_CreateFrameBuffers (void)
+ 		.swapchain = swapchain_images_views,
+ 	};
+ 	R_CreateFrameBuffers (&images);
 +
 +#ifdef VKQ_VISIONOS
++	VkResult err;
 +	// overlay 0010: offscreen "present image" for stereoscopic 3D. In 3D the swapchain
 +	// is never touched (the hidden window's drawable acquire stalls MoltenVK); the
 +	// GUI+postprocess pass renders into this image instead, so the immersive panel
 +	// gets the full composite — gamma-corrected scene + HUD + menus. SAMPLED usage
 +	// makes the backing MTLTexture shader-readable by the CompositorServices quad
-+	// (vkGetMTLTextureMVK, zero copy). Reusing the GUI render pass on a non-swapchain
-+	// image leaves its PRESENT_SRC final layout technically swapchain-only per spec —
-+	// MoltenVK does not enforce image layouts, and this never runs elsewhere.
++	// (vkGetMTLTextureMVK, zero copy). Since 1.37.0 the UI pass is owned by
++	// r_passes.c: the framebuffer is built against R_UIRenderPass () with the same
++	// {ui_color, target} attachments as the swapchain framebuffers, and handed to
++	// R_RecordFrame through end_rendering_parms_t.ui_framebuffer_override. Reusing
++	// the GUI render pass on a non-swapchain image leaves its PRESENT_SRC final
++	// layout technically swapchain-only per spec — MoltenVK does not enforce image
++	// layouts, and this never runs elsewhere.
 +	for (int vkq_eye_i = 0; vkq_eye_i < 2; vkq_eye_i++)
 +	{
 +		ZEROED_STRUCT (VkImageCreateInfo, image_create_info);
@@ -273,13 +281,13 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 +
 +		ZEROED_STRUCT (VkFramebufferCreateInfo, framebuffer_create_info);
 +		framebuffer_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-+		framebuffer_create_info.renderPass = vulkan_globals.secondary_cb_contexts[SCBX_GUI]->render_pass;
++		framebuffer_create_info.renderPass = R_UIRenderPass ();
 +		framebuffer_create_info.attachmentCount = 2;
 +		framebuffer_create_info.width = vid.width;
 +		framebuffer_create_info.height = vid.height;
 +		framebuffer_create_info.layers = 1;
 +
-+		VkImageView stereo_attachments[2] = {color_buffers_view[0], vkq_stereo_present_view[vkq_eye_i]};
++		VkImageView stereo_attachments[2] = {images.ui_color, vkq_stereo_present_view[vkq_eye_i]};
 +		framebuffer_create_info.pAttachments = stereo_attachments;
 +
 +		assert (vkq_stereo_present_fb[vkq_eye_i] == VK_NULL_HANDLE);
@@ -296,7 +304,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  }
  
  /*
-@@ -3247,6 +3383,35 @@ static void GL_DestroyRenderResources (void)
+@@ -2965,6 +3106,35 @@ static void GL_DestroyRenderResources (void)
  		swapchain_images[i] = VK_NULL_HANDLE;
  	}
  
@@ -332,26 +340,17 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	for (int i = 0; i < DOUBLE_BUFFERED; ++i)
  	{
  		vkDestroySemaphore (vulkan_globals.device, image_aquired_semaphores[i], NULL);
-@@ -3614,6 +3779,10 @@ typedef struct end_rendering_parms_s
- 	qboolean	 ray_debug	   : 1;
- 	uint32_t	 render_scale  : 4;
- 	uint32_t	 vid_height	   : 20;
-+#ifdef VKQ_VISIONOS
-+	uint32_t	 stereo3d	   : 1; // overlay 0010: route GUI+postprocess to the present image
-+	uint32_t	 stereo3d_eye  : 2; // eye this frame rendered (latched for the compositor)
-+#endif
- 	float		 time;
- 	VkClearValue color_clear_value;
- 	uint8_t		 v_blend[4];
-@@ -4000,7 +4169,15 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
- 
+@@ -3476,7 +3646,17 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
  	qboolean swapchain_acquired = parms->swapchain && GL_AcquireNextSwapChainImage ();
- 	rs_gpuwaitaccum_us += (uint32_t)((Sys_DoubleTime () - display_wait_start) * 1000000.0);
+ 	if (frame_timing_enabled)
+ 		rs_gpuwaitaccum_us += (uint32_t)((Sys_DoubleTime () - display_wait_start) * 1000000.0);
 +#ifdef VKQ_VISIONOS
 +	// overlay 0010: in 3D the postprocess still runs — into the offscreen present
-+	// image instead of a swapchain image (framebuffer routed below).
++	// image instead of a swapchain image (framebuffer routed through
++	// parms->ui_framebuffer_override into R_RecordFrame below).
 +	const int	   vkq_stereo_eye_idx = (parms->stereo3d_eye == 2) ? 1 : 0;
 +	const qboolean vkq_stereo_present = parms->stereo3d && (vkq_stereo_present_fb[vkq_stereo_eye_idx] != VK_NULL_HANDLE);
++	parms->ui_framebuffer_override = vkq_stereo_present ? vkq_stereo_present_fb[vkq_stereo_eye_idx] : VK_NULL_HANDLE;
 +	if (swapchain_acquired || vkq_stereo_present)
 +#else
  	if (swapchain_acquired == true)
@@ -359,19 +358,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	{
  		cb_context_t *cbx = vulkan_globals.secondary_cb_contexts[SCBX_POST_PROCESS];
  
-@@ -4119,7 +4296,11 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
- 		ZEROED_STRUCT (VkRenderPassBeginInfo, render_pass_begin_info);
- 		render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
- 		render_pass_begin_info.renderPass = vulkan_globals.secondary_cb_contexts[SCBX_GUI]->render_pass;
-+#ifdef VKQ_VISIONOS
-+		render_pass_begin_info.framebuffer = vkq_stereo_present ? vkq_stereo_present_fb[vkq_stereo_eye_idx] : ui_framebuffers[current_swapchain_buffer];
-+#else
- 		render_pass_begin_info.framebuffer = ui_framebuffers[current_swapchain_buffer];
-+#endif
- 		render_pass_begin_info.renderArea = render_area;
- 		render_pass_begin_info.clearValueCount = 0;
- 		vkCmdBeginRenderPass (render_passes_cb, &render_pass_begin_info, VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS);
-@@ -4217,6 +4398,19 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
+@@ -3597,6 +3777,19 @@ static void GL_EndRenderingTask (end_rendering_parms_t *parms)
  			num_images_acquired -= 1;
  	}
  
@@ -391,7 +378,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	frame_submitted[cb_index] = true;
  	current_cb_index = (current_cb_index + 1) % DOUBLE_BUFFERED;
  }
-@@ -4273,6 +4467,13 @@ task_handle_t GL_EndRendering (qboolean use_tasks, qboolean swapchain)
+@@ -3655,6 +3848,13 @@ task_handle_t GL_EndRendering (qboolean use_tasks, qboolean swapchain)
  				-vulkan_globals.view_matrix[9],
  			},
  	};
@@ -405,7 +392,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	task_handle_t end_rendering_task = INVALID_TASK_HANDLE;
  	if (use_tasks)
  		end_rendering_task = Task_AllocateAndAssignFunc ((task_func_t)GL_EndRenderingTask, &parms, sizeof (parms));
-@@ -5567,3 +5768,123 @@ void VID_FocusLost (void)
+@@ -5075,3 +5275,123 @@ void VID_FocusLost (void)
  		vid.restart_next_frame = true;
  	}
  }
@@ -530,9 +517,10 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 +}
 +#endif
 diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
+index 193fb56d..11e4159d 100644
 --- a/Quake/in_sdl3.c
 +++ b/Quake/in_sdl3.c
-@@ -132,12 +132,31 @@ void IN_SendKeyEvents (void)
+@@ -156,12 +156,31 @@ void IN_SendKeyEvents (void)
  			VID_FocusGained ();
  			break;
  		case SDL_EVENT_WINDOW_FOCUS_LOST:
@@ -565,6 +553,7 @@ diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
  			vid.height = event.window.data2;
  			vid.restart_next_frame = true;
 diff --git a/Quake/main_sdl.c b/Quake/main_sdl.c
+index f604be33..04e282cb 100644
 --- a/Quake/main_sdl.c
 +++ b/Quake/main_sdl.c
 @@ -24,7 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
@@ -592,3 +581,97 @@ diff --git a/Quake/main_sdl.c b/Quake/main_sdl.c
  {
  	double time, oldtime, newtime;
  
+diff --git a/Quake/r_passes.c b/Quake/r_passes.c
+index 12ae722c..40129171 100644
+--- a/Quake/r_passes.c
++++ b/Quake/r_passes.c
+@@ -507,6 +507,21 @@ void R_CreateFrameBuffers (const render_framebuffer_images_t *images)
+ 	}
+ }
+ 
++#ifdef VKQ_VISIONOS
++// overlay 0010: the UI pass's render pass (current variant), so gl_vidsdl.c can
++// build the stereo present-image framebuffers compatible with it.
++VkRenderPass R_UIRenderPass (void)
++{
++	const main_render_pass_variant_t variant = R_UseMBOIT () ? MAIN_RENDER_PASS_MBOIT : R_UseWBOIT () ? MAIN_RENDER_PASS_OIT : MAIN_RENDER_PASS_STANDARD;
++	const frame_desc_t				*frame = &current_layout.variants[variant];
++	for (uint32_t pass = 0; pass < frame->pass_count; ++pass)
++		if (frame->passes[pass].target == FRAME_TARGET_UI)
++			return physical_passes[variant][pass].handles[MAIN_RENDER_PASS_STENCIL_CLEAR];
++	Sys_Error ("R_UIRenderPass: no UI pass");
++	return VK_NULL_HANDLE;
++}
++#endif
++
+ typedef struct screen_effect_constants_s
+ {
+ 	uint32_t clamp_size_x;
+@@ -778,12 +793,19 @@ uint32_t R_RecordFrame (
+ 
+ 	uint32_t submit_count = 0;
+ 	bool	 recording_started = false;
++#ifdef VKQ_VISIONOS
++	// overlay 0010: the stereo present image stands in for the swapchain image.
++	const VkFramebuffer ui_override = parms->ui_framebuffer_override;
++	const bool			ui_target = swapchain_acquired || (ui_override != VK_NULL_HANDLE);
++#else
++	const bool ui_target = swapchain_acquired;
++#endif
+ 	for (uint32_t i = 0; i < frame->step_count; ++i)
+ 	{
+ 		const frame_step_t *step = &frame->steps[i];
+ 		// The UI pass includes the swapchain attachment even without a postprocess draw.
+ 		// Skip the entire pass and its readback unless we own an acquired image.
+-		if (!swapchain_acquired && (step->type == FRAME_READBACK || frame->passes[step->pass].target == FRAME_TARGET_UI))
++		if ((!swapchain_acquired && step->type == FRAME_READBACK) || (!ui_target && frame->passes[step->pass].target == FRAME_TARGET_UI))
+ 			continue;
+ 		if (step->type == FRAME_PREPARED_COMMANDS || !recording_started)
+ 		{
+@@ -821,11 +843,17 @@ uint32_t R_RecordFrame (
+ 					command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+ 					0, 0, NULL, 0, NULL, 1, &barrier);
+ 			}
++#ifdef VKQ_VISIONOS
++			const VkFramebuffer framebuffer = (ui && ui_override != VK_NULL_HANDLE) ? ui_override : physical->framebuffers[image];
++			assert ((ui && ui_override != VK_NULL_HANDLE) || image < physical->framebuffer_count);
++#else
++			const VkFramebuffer framebuffer = physical->framebuffers[image];
+ 			assert (image < physical->framebuffer_count);
++#endif
+ 			const VkRenderPassBeginInfo begin = {
+ 				.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+ 				.renderPass = physical->handles[ui || Sky_NeedStencil () ? MAIN_RENDER_PASS_STENCIL_CLEAR : MAIN_RENDER_PASS_NO_STENCIL],
+-				.framebuffer = physical->framebuffers[image],
++				.framebuffer = framebuffer,
+ 				.renderArea = {{0, 0}, {ui ? parms->vid_width : parms->render_width, ui ? parms->vid_height : parms->render_height}},
+ 				.clearValueCount = ui ? 0 : physical->attachment_count,
+ 				.pClearValues = clear_values,
+diff --git a/Quake/r_passes.h b/Quake/r_passes.h
+index 1a39ee92..98ef7a0c 100644
+--- a/Quake/r_passes.h
++++ b/Quake/r_passes.h
+@@ -68,6 +68,13 @@ typedef struct end_rendering_parms_s
+ 	bool		 menu		   : 1;
+ 	bool		 ray_debug	   : 1;
+ 	uint32_t	 vid_height	   : 20;
++#ifdef VKQ_VISIONOS
++	uint32_t	 stereo3d	   : 1; // overlay 0010: route GUI+postprocess to the present image
++	uint32_t	 stereo3d_eye  : 2; // eye this frame rendered (latched for the compositor)
++	// overlay 0010: when set, the UI pass renders into this framebuffer (the stereo
++	// present image) instead of a swapchain framebuffer, with or without an acquire.
++	VkFramebuffer ui_framebuffer_override;
++#endif
+ 	uint32_t	 render_width;
+ 	uint32_t	 render_height;
+ 	float		 time;
+@@ -96,6 +103,9 @@ typedef struct
+ 
+ void	 R_CreateFrameBuffers (const render_framebuffer_images_t *images);
+ void	 R_DestroyFrameBuffers (void);
++#ifdef VKQ_VISIONOS
++VkRenderPass R_UIRenderPass (void); // overlay 0010: current variant's UI pass, for offscreen UI framebuffers
++#endif
+ uint32_t R_RecordFrame (
+ 	end_rendering_parms_t *parms, bool swapchain_acquired, uint32_t swapchain_index, VkCommandBuffer *submit_buffers, uint32_t submit_capacity,
+ 	void (*record_readback) (void *), void *readback_data);

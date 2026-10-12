@@ -1,4 +1,5 @@
 diff --git a/Quake/main_sdl.c b/Quake/main_sdl.c
+index 6e1ea448..f604be33 100644
 --- a/Quake/main_sdl.c
 +++ b/Quake/main_sdl.c
 @@ -75,6 +75,24 @@ static void Sys_InitSDL (void)

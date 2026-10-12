@@ -1,7 +1,8 @@
 diff --git a/Quake/cl_main.c b/Quake/cl_main.c
+index 38a44311..41c0a4c3 100644
 --- a/Quake/cl_main.c
 +++ b/Quake/cl_main.c
-@@ -765,6 +765,19 @@ void CL_RelinkEntities (void)
+@@ -762,6 +762,19 @@ void CL_RelinkEntities (void)
  			AngleVectors (ent->angles, fv, rv, uv);
  
  			VectorMA (dl->origin, 18, fv, dl->origin);
@@ -21,7 +22,7 @@ diff --git a/Quake/cl_main.c b/Quake/cl_main.c
  			dl->radius = 200 + (COM_Rand () & 31);
  			dl->minlight = 32;
  			dl->die = cl.time + 0.1;
-@@ -1060,7 +1073,12 @@ void CL_AccumulateCmd (void)
+@@ -1048,7 +1061,12 @@ void CL_AccumulateCmd (void)
  	// then sees ordinary view angles and stock progs, mods and multiplayer all
  	// aim where the player is looking. No-op outside VR.
  	{
@@ -34,7 +35,7 @@ diff --git a/Quake/cl_main.c b/Quake/cl_main.c
  		VKQ_VR_ApplyHeadAim ();
  	}
  #endif
-@@ -1091,6 +1109,18 @@ void CL_SendCmd (void)
+@@ -1079,6 +1097,18 @@ void CL_SendCmd (void)
  	cmd.servertime = cl.time;
  	cmd.seconds = cmd.servertime - cl.pendingcmd.servertime;
  
@@ -72,9 +73,10 @@ diff --git a/Quake/cl_main.c b/Quake/cl_main.c
  	Cvar_RegisterVariable (&cl_name);
  	Cvar_RegisterVariable (&cl_topcolor);
 diff --git a/Quake/cl_tent.c b/Quake/cl_tent.c
+index d995d8a3..87ae264c 100644
 --- a/Quake/cl_tent.c
 +++ b/Quake/cl_tent.c
-@@ -368,6 +368,19 @@ void CL_UpdateTEnts (void)
+@@ -366,6 +366,19 @@ void CL_UpdateTEnts (void)
  		if (b->entity == cl.viewentity && cl.entities)
  		{
  			VectorCopy (cl.entities[cl.viewentity].origin, b->start);
@@ -95,9 +97,10 @@ diff --git a/Quake/cl_tent.c b/Quake/cl_tent.c
  
  		// calculate pitch and yaw
 diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
+index 5ef2309c..0692bd55 100644
 --- a/Quake/gl_rmain.c
 +++ b/Quake/gl_rmain.c
-@@ -665,8 +665,20 @@ R_DrawViewModel -- johnfitz -- gutted
+@@ -678,8 +678,20 @@ R_DrawViewModel -- johnfitz -- gutted
  */
  void R_DrawViewModel (cb_context_t *cbx)
  {
@@ -118,7 +121,7 @@ diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
  
  	if (cl.items & IT_INVISIBILITY || cl.stats[STAT_HEALTH] <= 0)
  		return;
-@@ -683,7 +695,19 @@ void R_DrawViewModel (cb_context_t *cbx)
+@@ -696,7 +708,17 @@ void R_DrawViewModel (cb_context_t *cbx)
  	R_BeginDebugUtilsLabel (cbx, "View Model");
  
  	// hack the depth range to prevent view model from poking into walls
@@ -129,16 +132,14 @@ diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
 +	// twice over: it breaks stereo depth, and the compositor reprojects on the
 +	// depth we hand it (charter A5), so a squashed gun would swim against the
 +	// world on every head turn. Full range in VR; unchanged everywhere else.
-+	GL_Viewport (
-+		cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, vkq_vr_world ? 0.0f : 0.7f,
-+		1.0f);
++	R_SceneViewport (cbx, vkq_vr_world ? 0.0f : 0.7f);
 +#else
- 	GL_Viewport (cbx, r_refdef.vrect.x, glheight - r_refdef.vrect.y - r_refdef.vrect.height, r_refdef.vrect.width, r_refdef.vrect.height, 0.7f, 1.0f);
+ 	R_SceneViewport (cbx, 0.7f);
 +#endif
  
  	int aliaspolys = 0;
  	R_DrawAliasModel (cbx, currententity, &aliaspolys);
-@@ -1545,6 +1569,15 @@ static void R_DrawParticlesTask (void *unused)
+@@ -1556,6 +1578,15 @@ static void R_DrawParticlesTask (void *unused)
  	R_SetupContext (cbx);
  	Fog_EnableGFog (cbx); // johnfitz
  	R_DrawParticles (cbx);
@@ -154,7 +155,7 @@ diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
  
  	if (R_UseMBOIT ())
  	{
-@@ -1553,6 +1586,12 @@ static void R_DrawParticlesTask (void *unused)
+@@ -1564,6 +1595,12 @@ static void R_DrawParticlesTask (void *unused)
  		R_SetupContext (composite_cbx);
  		Fog_EnableGFog (composite_cbx);
  		R_DrawParticles (composite_cbx);
@@ -165,12 +166,13 @@ diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
 +		}
 +#endif
  	}
- #ifdef PSET_SCRIPT
- 	cb_context_t *fte_blend_cbx = NULL;
+ 	cb_context_t *fte_blend_cbx = vulkan_globals.secondary_cb_contexts[SCBX_FTE_PARTICLES_BLEND];
+ 	R_SceneViewport (fte_blend_cbx, 0.0f);
 diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
+index 5fd03cb7..d67982ee 100644
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -6083,6 +6083,41 @@ typedef struct
+@@ -5585,6 +5585,41 @@ typedef struct
  	float tan_l, tan_r, tan_u, tan_d;
  } vkq_vr_eye_t;
  
@@ -212,7 +214,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  static pthread_mutex_t	  vkq_vr_mtx = PTHREAD_MUTEX_INITIALIZER;
  static pthread_cond_t	  vkq_vr_cv = PTHREAD_COND_INITIALIZER;
  static unsigned long long vkq_vr_pub_id = 0;	  // last pose published by the shell
-@@ -6090,10 +6125,76 @@ static unsigned long long vkq_vr_rendered_id = 0; // last id the engine finished
+@@ -5592,10 +5627,76 @@ static unsigned long long vkq_vr_rendered_id = 0; // last id the engine finished
  static unsigned long long vkq_vr_frame_id = 0;	  // id of the frame being rendered
  static vkq_vr_eye_t		  vkq_vr_pub[2];		  // guarded by vkq_vr_mtx
  static vkq_vr_eye_t		  vkq_vr_cur[2];		  // engine's private copy (render thread)
@@ -289,7 +291,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  static void vkq_vr_deadline (struct timespec *ts, int ms)
  {
  	struct timespec now;
-@@ -6170,6 +6271,12 @@ void VKQ_VR_SetActive (int on)
+@@ -5672,6 +5773,12 @@ void VKQ_VR_SetActive (int on)
  		vkq_vr_pub_id = vkq_vr_rendered_id = vkq_vr_frame_id = 0;
  		vkq_vr_rendezvous = vkq_vr_timeouts_engine = vkq_vr_timeouts_shell = 0;
  	}
@@ -302,7 +304,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	pthread_cond_broadcast (&vkq_vr_cv); // never leave either side blocked on exit
  	pthread_mutex_unlock (&vkq_vr_mtx);
  }
-@@ -6231,6 +6338,12 @@ unsigned long long VKQ_VR_EngineAcquire (int timeout_ms)
+@@ -5733,6 +5840,12 @@ unsigned long long VKQ_VR_EngineAcquire (int timeout_ms)
  	if (vkq_vr_have)
  	{
  		memcpy (vkq_vr_cur, vkq_vr_pub, sizeof (vkq_vr_cur));
@@ -315,7 +317,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		vkq_vr_frame_id = vkq_vr_pub_id;
  	}
  	pthread_mutex_unlock (&vkq_vr_mtx);
-@@ -6306,9 +6419,657 @@ void VKQ_VR_ApplyHeadAim (void)
+@@ -5808,9 +5921,657 @@ void VKQ_VR_ApplyHeadAim (void)
  	while (delta < -180.0f)
  		delta += 360.0f;
  	vkq_vr_body_yaw = anglemod (vkq_vr_body_yaw + delta);
@@ -977,12 +979,13 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 +
  #endif
 diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
+index 11e4159d..9c9778e5 100644
 --- a/Quake/in_sdl3.c
 +++ b/Quake/in_sdl3.c
-@@ -40,6 +40,44 @@ int	  vkq_menu_click_pending = 0;
- static SDL_JoystickID joy_active_instaceid = 0; // in SDL3, 0 is the invalid joystick ID
- SDL_Gamepad			 *joy_active_controller = NULL;
- 
+@@ -58,6 +58,43 @@ void IN_Rumble (uint16_t low_frequency, uint16_t high_frequency, uint32_t durati
+ 	if (joy_active_controller)
+ 		SDL_RumbleGamepad (joy_active_controller, low_frequency, high_frequency, duration_ms);
+ }
 +#ifdef VKQ_VISIONOS
 +/*
 +================
@@ -1020,11 +1023,10 @@ diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
 +	return true;
 +}
 +#endif
-+
+ 
  void IN_StartupJoystick (void)
  {
- 	char			controllerdb[MAX_OSPATH];
-@@ -77,6 +115,10 @@ void IN_StartupJoystick (void)
+@@ -96,6 +133,10 @@ void IN_StartupJoystick (void)
  		for (int i = 0; i < count; i++)
  		{
  			SDL_JoystickID id = joysticks[i];
@@ -1035,7 +1037,7 @@ diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
  			if (SDL_IsGamepad (id))
  			{
  				const char *controllername = SDL_GetGamepadNameForID (id);
-@@ -240,6 +282,10 @@ void IN_SendKeyEvents (void)
+@@ -269,6 +310,10 @@ void IN_SendKeyEvents (void)
  #endif
  
  		case SDL_EVENT_GAMEPAD_ADDED:
@@ -1047,9 +1049,10 @@ diff --git a/Quake/in_sdl3.c b/Quake/in_sdl3.c
  			{
  				joy_active_controller = SDL_OpenGamepad (event.gdevice.which);
 diff --git a/Quake/r_part.c b/Quake/r_part.c
+index 8d4cf214..ed1a7a14 100644
 --- a/Quake/r_part.c
 +++ b/Quake/r_part.c
-@@ -1044,6 +1044,135 @@ void R_DrawParticles (cb_context_t *cbx)
+@@ -1045,6 +1045,135 @@ void R_DrawParticles (cb_context_t *cbx)
  	R_EndDebugUtilsLabel (cbx);
  }
  
@@ -1172,8 +1175,8 @@ diff --git a/Quake/r_part.c b/Quake/r_part.c
 +	R_BeginDebugUtilsLabel (cbx, "VR Laser");
 +	R_BindPipeline (
 +		cbx, VK_PIPELINE_BIND_POINT_GRAPHICS,
-+		R_PipelineForRenderPass (
-+			cbx->render_pass_index, vulkan_globals.particle_pipeline, vulkan_globals.particle_oit_pipeline, vulkan_globals.particle_mboit_moment_pipeline,
++		R_PipelineForSubpassType (
++			cbx->subpass_type, vulkan_globals.particle_pipeline, vulkan_globals.particle_oit_pipeline, vulkan_globals.particle_mboit_moment_pipeline,
 +			vulkan_globals.particle_mboit_composite_pipeline));
 +	vulkan_globals.vk_cmd_bind_descriptor_sets (
 +		cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_pipeline_layout.handle, 0, 1, &particletexture->descriptor_set, 0, NULL);
@@ -1186,9 +1189,10 @@ diff --git a/Quake/r_part.c b/Quake/r_part.c
  ===============
  R_DrawParticles_ShowTris -- johnfitz
 diff --git a/Quake/view.c b/Quake/view.c
+index 843c226b..461aaa84 100644
 --- a/Quake/view.c
 +++ b/Quake/view.c
-@@ -484,6 +484,20 @@ void V_CalcBlend (void)
+@@ -485,6 +485,20 @@ void V_CalcBlend (void)
  		b = b * (1 - a2) + cl.cshifts[j].destcolor[2] * a2;
  	}
  
@@ -1209,7 +1213,7 @@ diff --git a/Quake/view.c b/Quake/view.c
  	v_blend[0] = CLAMP (0.0f, r, 255.0f);
  	v_blend[1] = CLAMP (0.0f, g, 255.0f);
  	v_blend[2] = CLAMP (0.0f, b, 255.0f);
-@@ -865,6 +879,19 @@ void V_CalcRefdef (void)
+@@ -866,6 +880,19 @@ void V_CalcRefdef (void)
  	else
  		oldz = ent->origin[2];
  

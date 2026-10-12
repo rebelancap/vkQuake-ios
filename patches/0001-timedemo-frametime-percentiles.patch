@@ -1,4 +1,5 @@
 diff --git a/Quake/cl_demo.c b/Quake/cl_demo.c
+index 45425841..134bc7d6 100644
 --- a/Quake/cl_demo.c
 +++ b/Quake/cl_demo.c
 @@ -89,6 +89,19 @@ static void CL_WriteDemoMessage (void)
@@ -34,7 +35,7 @@ diff --git a/Quake/cl_demo.c b/Quake/cl_demo.c
  			// if this is the second frame, grab the real td_starttime
  			// so the bogus time on the first frame doesn't count
  			if (host_framecount == cls.td_startframe + 1)
-@@ -762,6 +781,19 @@ static void CL_FinishTimeDemo (void)
+@@ -759,6 +778,19 @@ static void CL_FinishTimeDemo (void)
  	if (!time)
  		time = 1;
  	Con_Printf ("%i frames %5.1f seconds %5.1f fps\n", frames, time, frames / time);
@@ -54,7 +55,7 @@ diff --git a/Quake/cl_demo.c b/Quake/cl_demo.c
  }
  
  /*
-@@ -792,4 +824,7 @@ void CL_TimeDemo_f (void)
+@@ -789,4 +821,7 @@ void CL_TimeDemo_f (void)
  	cls.timedemo = true;
  	cls.td_startframe = host_framecount;
  	cls.td_lastframe = -1; // get a new message this frame

@@ -1,7 +1,8 @@
 diff --git a/Quake/gl_model.c b/Quake/gl_model.c
+index 61046172..46c94002 100644
 --- a/Quake/gl_model.c
 +++ b/Quake/gl_model.c
-@@ -4118,8 +4118,10 @@ same weapon, and an arbitrary mod's viewmodel all go through this identically.
+@@ -4122,8 +4122,10 @@ same weapon, and an arbitrary mod's viewmodel all go through this identically.
  typedef struct
  {
  	int	   valid;		// 1 = mins/maxs/grip usable
@@ -14,7 +15,7 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
  	vec3_t mins, maxs;	// idle-pose bounds, flash excluded
  	vec3_t grip;		// (rear x, rear-slab y, rear-slab z)
  } vkq_vm_result_t;
-@@ -4205,12 +4207,33 @@ static void VKQ_VM_Analyze (int nverts, int nposes, const float *px, const float
+@@ -4209,12 +4211,33 @@ static void VKQ_VM_Analyze (int nverts, int nposes, const float *px, const float
  	}
  	out->nflash = ncand;
  
@@ -52,7 +53,7 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
  		for (p = 0; p < nposes; p++)
  			for (i = 0; i < nverts; i++)
  				if (!flash[i] && px[p * nverts + i] < lim)
-@@ -4224,11 +4247,13 @@ static void VKQ_VM_Analyze (int nverts, int nposes, const float *px, const float
+@@ -4228,11 +4251,13 @@ static void VKQ_VM_Analyze (int nverts, int nposes, const float *px, const float
  				if (flash[i] && px[p * nverts + i] > fmax)
  					fmax = px[p * nverts + i];
  			if (fmax < lim)
@@ -70,7 +71,7 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
  	}
  
  	// Bounds and grip axis from the idle pose, flash excluded.
-@@ -4292,10 +4317,15 @@ static void VKQ_VM_Publish (aliashdr_t *h, const vkq_vm_result_t *r, const char
+@@ -4296,10 +4321,15 @@ static void VKQ_VM_Publish (aliashdr_t *h, const vkq_vm_result_t *r, const char
  	VectorCopy (r->mins, h->vr_min);
  	VectorCopy (r->maxs, h->vr_max);
  	VectorCopy (r->grip, h->vr_grip);
@@ -89,9 +90,10 @@ diff --git a/Quake/gl_model.c b/Quake/gl_model.c
  #endif // VKQ_VISIONOS
  
 diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
+index 84516724..38e38290 100644
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
-@@ -1308,6 +1308,59 @@ void SCR_EndLoadingPlaque (void)
+@@ -1491,6 +1491,59 @@ void SCR_EndLoadingPlaque (void)
  const char *scr_notifystring;
  qboolean	scr_drawdialog;
  
@@ -151,7 +153,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  static void SCR_DrawNotifyString (cb_context_t *cbx)
  {
  	const char *start;
-@@ -1338,6 +1391,12 @@ static void SCR_DrawNotifyString (cb_context_t *cbx)
+@@ -1521,6 +1574,12 @@ static void SCR_DrawNotifyString (cb_context_t *cbx)
  			break;
  		start++; // skip the \n
  	} while (1);
@@ -164,7 +166,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  }
  
  /*
-@@ -1359,9 +1418,30 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
+@@ -1542,9 +1601,30 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  	scr_notifystring = text;
  
  	// draw a fresh screen
@@ -195,7 +197,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  
  	S_ClearBuffer (); // so dma doesn't loop current sound
  
-@@ -1374,7 +1454,15 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
+@@ -1557,7 +1637,15 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  	// deadlocks touch input. Show touch Yes/No buttons and pump the run loop.
  	{
  		extern void VKQ_iOS_ModalBegin (const char *t);
@@ -211,7 +213,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  	}
  #endif
  	do
-@@ -1384,7 +1472,34 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
+@@ -1567,7 +1655,34 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  #ifdef VKQ_IOS
  		{
  			extern void VKQ_iOS_ModalPump (void);
@@ -246,7 +248,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  		}
  #else
  		Sys_Sleep (16);
-@@ -1397,6 +1512,8 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
+@@ -1580,6 +1695,8 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  #ifdef VKQ_IOS
  	{
  		extern void VKQ_iOS_ModalEnd (void);
@@ -255,7 +257,7 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  		VKQ_iOS_ModalEnd ();
  	}
  #endif
-@@ -1405,10 +1522,21 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
+@@ -1588,10 +1705,21 @@ int SCR_ModalMessage (const char *text, float timeout) // johnfitz -- timeout
  
  	// johnfitz -- timeout
  	if (time2 > time1)
@@ -279,9 +281,10 @@ diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
  
  //=============================================================================
 diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
+index 1dacc153..ddeb68cf 100644
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -6154,6 +6154,19 @@ cvar_t vkqvr_gripback = {"vkqvr_gripback", "4.15", CVAR_NONE}; // fist forward o
+@@ -5656,6 +5656,19 @@ cvar_t vkqvr_gripback = {"vkqvr_gripback", "4.15", CVAR_NONE}; // fist forward o
  cvar_t vkqvr_gripup = {"vkqvr_gripup", "0.75", CVAR_NONE};	   // fist above the rear-quarter axis
  cvar_t vkqvr_guntrim = {"vkqvr_guntrim", "1", CVAR_NONE};	   // apply the four residual trims
  cvar_t vkqvr_crosshair = {"vkqvr_crosshair", "1", CVAR_NONE};  // R4 part B: the reticle at the hit point
@@ -301,7 +304,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  // R4 part E — strict weapon-flick gating. See the comment at the cycle site.
  cvar_t vkqvr_flick_y = {"vkqvr_flick_y", "0.85", CVAR_NONE};
  cvar_t vkqvr_flick_x = {"vkqvr_flick_x", "0.25", CVAR_NONE};
-@@ -6224,6 +6237,42 @@ cvar_t vkqvr_grip_off = {"vkqvr_grip_off", "0.35", CVAR_NONE};
+@@ -5726,6 +5739,42 @@ cvar_t vkqvr_grip_off = {"vkqvr_grip_off", "0.35", CVAR_NONE};
  // ASSIGNS instead (and suppresses the select). One threshold, no dead band.
  cvar_t vkqvr_grip_hold = {"vkqvr_grip_hold", "1.0", CVAR_NONE}; // seconds in-zone: reassign
  
@@ -344,7 +347,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  void VKQ_VR_RegisterCvars (void)
  {
  	Cvar_RegisterVariable (&vkqvr_aimhand);
-@@ -6243,6 +6292,11 @@ void VKQ_VR_RegisterCvars (void)
+@@ -5745,6 +5794,11 @@ void VKQ_VR_RegisterCvars (void)
  	Cvar_RegisterVariable (&vkqvr_gripup);
  	Cvar_RegisterVariable (&vkqvr_guntrim);
  	Cvar_RegisterVariable (&vkqvr_crosshair);
@@ -356,7 +359,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	Cvar_RegisterVariable (&vkqvr_flick_y);
  	Cvar_RegisterVariable (&vkqvr_flick_x);
  	Cvar_RegisterVariable (&vkqvr_flick_off);
-@@ -6519,6 +6573,12 @@ void VKQ_VR_EngineRelease (unsigned long long id)
+@@ -6021,6 +6075,12 @@ void VKQ_VR_EngineRelease (unsigned long long id)
  //
  // Base = Rx(-90).Rz(90).Rz(-bodyYaw).T(-vieworg - heightOfs). Pitch and roll are
  // deliberately absent: the head owns them.
@@ -369,7 +372,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  void VKQ_VR_ComposeView (int eye, float out[16])
  {
  	float base[16], rot[16], trans[16];
-@@ -6539,6 +6599,25 @@ void VKQ_VR_ComposeView (int eye, float out[16])
+@@ -6041,6 +6101,25 @@ void VKQ_VR_ComposeView (int eye, float out[16])
  
  	memcpy (out, vkq_vr_cur[eye & 1].eye_from_player, 16 * sizeof (float));
  	MatrixMultiply (out, base); // out = eyeFromPlayer * base
@@ -395,7 +398,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  }
  
  void VKQ_VR_GetProjection (int eye, float out[16]) { memcpy (out, vkq_vr_cur[eye & 1].projection, 16 * sizeof (float)); }
-@@ -6938,6 +7017,117 @@ static void vkq_vr_hold (kbutton_t *b, qboolean down)
+@@ -6440,6 +6519,117 @@ static void vkq_vr_hold (kbutton_t *b, qboolean down)
  	}
  }
  
@@ -513,7 +516,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  /*
  ==================
  VKQ_VR_ApplyHandInput -- overlay 0019
-@@ -7005,45 +7195,15 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -6507,45 +6697,15 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  	vkq_vr_stick_now (off, ls);
  	vkq_vr_stick_now (aim, rs);
  
@@ -566,7 +569,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		// Nothing below this line may reach gameplay while a menu is up.
  		vkq_vr_hold (&in_attack, false);
  		vkq_vr_hold (&in_jump, false);
-@@ -7053,6 +7213,12 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -6555,6 +6715,12 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		return;
  	}
  
@@ -579,7 +582,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	// --- gameplay -------------------------------------------------------------
  	// Convenience: right trigger fires, left trigger and A jump. Fixed layout,
  	// deliberately not bindable (both donors' ledgers paid for that).
-@@ -7162,18 +7328,28 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -6664,18 +6830,28 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  	// since the last cycle. Measured with synthetic stick injection in
  	// sim-verify-vr.sh: the R3 gate fires on 8 of 16 sampled diagonals, this one
  	// on 0, and both fire on all 4 clean vertical flicks.
@@ -610,7 +613,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  			cycleArmed = 1;
  	}
  
-@@ -7510,10 +7686,40 @@ makes the derivation mean anything: change the scale and the weapon still sits
+@@ -7012,10 +7188,40 @@ makes the derivation mean anything: change the scale and the weapon still sits
  in the same fist.
  ==================
  */
@@ -653,7 +656,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	VectorCopy (hand, org);
  	if (vkq_vr_grip_anchor (view->model, s, anchor, NULL, NULL))
  	{
-@@ -7528,7 +7734,7 @@ void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, con
+@@ -7030,7 +7236,7 @@ void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, con
  		VectorMA (org, s * -6.0f, fwd, org);
  		VectorMA (org, s * 7.0f, up, org);
  	}
@@ -662,7 +665,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	{
  		VectorMA (org, g->trimf, fwd, org);
  		VectorMA (org, g->trimr, right, org);
-@@ -7541,7 +7747,12 @@ void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, con
+@@ -7043,7 +7249,12 @@ void VKQ_VR_MountWeapon (entity_t *view, const vkq_vr_gun_t *g, int itembit, con
  	view->angles[PITCH] = -ang[PITCH];
  	view->angles[YAW] = ang[YAW];
  	view->angles[ROLL] = ang[ROLL];
@@ -676,7 +679,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  }
  
  /*
-@@ -7645,7 +7856,24 @@ qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit)
+@@ -7147,7 +7358,24 @@ qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit)
  	if (cl.intermission || cls.demoplayback || cl.stats[STAT_HEALTH] <= 0 || !cl.worldmodel)
  		return false;
  	if (!VKQ_VR_MuzzleWorld (start, fwd))
@@ -702,7 +705,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	VectorMA (start, VKQ_VR_LASER_RANGE, fwd, far_pt);
  	frac = CL_TraceLine (start, far_pt, end, normal, NULL);
  	if (hit)
-@@ -7661,6 +7889,56 @@ qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit)
+@@ -7163,6 +7391,56 @@ qboolean VKQ_VR_AimTrace (vec3_t start, vec3_t end, vec3_t normal, int *hit)
  	return true;
  }
  
@@ -759,7 +762,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  // ---------------------------------------------------------------------------
  // overlay 0020 fix 1 — standing eye height, computed once per frame.
  //
-@@ -7851,6 +8129,13 @@ static int vkq_vr_holster_item[2]; // by zone: RHIP, LHIP. 0 = empty
+@@ -7353,6 +7631,13 @@ static int vkq_vr_holster_item[2]; // by zone: RHIP, LHIP. 0 = empty
  static int vkq_vr_held_item[2];	   // by HAND: 0 = left, 1 = right. 0 = empty hand
  static int vkq_vr_v2_started = 0; // seeded the aim hand from the server yet
  
@@ -773,7 +776,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  static qboolean vkq_vr_immersive (void) { return vkqvr_style.value >= 0.5f; }
  static int		vkq_vr_held_item_get (int hand) { return (hand >= 0 && hand < 2) ? vkq_vr_held_item[hand] : 0; }
  
-@@ -8042,6 +8327,114 @@ int VKQ_VR_HudValues (int *health, int *armour, int *ammo0, int *type0, int *amm
+@@ -7544,6 +7829,114 @@ int VKQ_VR_HudValues (int *health, int *armour, int *ammo0, int *type0, int *amm
  	return 1;
  }
  
@@ -888,7 +891,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  int VKQ_VR_HeldItem (int hand) { return vkq_vr_held_item_get (hand); }
  int VKQ_VR_HolsterItem (int zone) { return (zone >= 0 && zone < 2) ? vkq_vr_holster_item[zone] : 0; }
  
-@@ -8104,6 +8497,7 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
+@@ -7606,6 +7999,7 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  {
  	const int aim = vkq_vr_aim_hand (), off = vkq_vr_off_hand ();
  	int		  n = 0, z;
@@ -896,7 +899,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	if (!vkq_vr_active || !vkq_vr_have || !vkq_vr_immersive () || max <= 0)
  		return 0;
  	if (cl.intermission || cl.stats[STAT_HEALTH] <= 0)
-@@ -8151,7 +8545,9 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
+@@ -7653,7 +8047,9 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  		// EXACTLY the transform a hand pose takes (vkq_vr_hand_world): the zone
  		// centre is published in the same player frame the hand positions are,
  		// so the model and the in-zone test cannot disagree about where the
@@ -907,7 +910,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		vkq_vr_zone_centre (z, c);
  		vkq_vr_player_to_world_dir (c, wc);
  		vkq_vr_player_origin (org);
-@@ -8165,16 +8561,85 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
+@@ -7667,16 +8063,85 @@ int VKQ_VR_ExtraViewmodels (entity_t *out, int max)
  			right[0] = 1.0f, right[1] = 0.0f, right[2] = 0.0f;
  		VectorNormalize (right);
  		CrossProduct (right, fwd, up);
@@ -997,7 +1000,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  // Convenience is untouched by all of this: it never consults held_item, so the
  // aim hand always has the server's weapon in it exactly as in R3.
  int VKQ_VR_HideViewent (void)
-@@ -8215,6 +8680,15 @@ static void vkq_vr_zone_set_impulse (int z, int imp)
+@@ -7717,6 +8182,15 @@ static void vkq_vr_zone_set_impulse (int z, int imp)
  static void vkq_vr_zone_centre (int z, float out[3])
  {
  	const float ws = vkq_vr_worldscale;
@@ -1013,7 +1016,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	switch (z)
  	{
  	case VKQ_VR_ZONE_RHIP:
-@@ -8233,6 +8707,7 @@ static void vkq_vr_zone_centre (int z, float out[3])
+@@ -7735,6 +8209,7 @@ static void vkq_vr_zone_centre (int z, float out[3])
  		out[0] = vkqvr_chest_x.value * ws, out[1] = vkqvr_chest_y.value * ws, out[2] = vkqvr_chest_z.value * ws;
  		break;
  	}
@@ -1022,9 +1025,10 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  
  static float vkq_vr_zone_radius (int z)
 diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
+index c1dec5b3..6fa4ac8e 100644
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -496,6 +496,30 @@ void IN_Commands (void)
+@@ -682,6 +682,30 @@ void IN_Commands (void)
  	const float	   stickthreshold = 0.9;
  	const float	   triggerthreshold = joy_deadzone_trigger.value;
  
@@ -1056,9 +1060,10 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  		return;
  
 diff --git a/Quake/r_part.c b/Quake/r_part.c
+index 039ef91a..b4b700fd 100644
 --- a/Quake/r_part.c
 +++ b/Quake/r_part.c
-@@ -1066,75 +1066,256 @@ sit at the texture's white centre, which makes the arms clean solid colour
+@@ -1067,75 +1067,256 @@ sit at the texture's white centre, which makes the arms clean solid colour
  rather than soft blobs.
  ===============
  */
@@ -1348,9 +1353,9 @@ diff --git a/Quake/r_part.c b/Quake/r_part.c
  }
  
  void R_DrawVRLaser (cb_context_t *cbx)
-@@ -1148,8 +1329,12 @@ void R_DrawVRLaser (cb_context_t *cbx)
- 		R_PipelineForRenderPass (
- 			cbx->render_pass_index, vulkan_globals.particle_pipeline, vulkan_globals.particle_oit_pipeline, vulkan_globals.particle_mboit_moment_pipeline,
+@@ -1149,8 +1330,12 @@ void R_DrawVRLaser (cb_context_t *cbx)
+ 		R_PipelineForSubpassType (
+ 			cbx->subpass_type, vulkan_globals.particle_pipeline, vulkan_globals.particle_oit_pipeline, vulkan_globals.particle_mboit_moment_pipeline,
  			vulkan_globals.particle_mboit_composite_pipeline));
 +	// particletexture1 explicitly, NOT `particletexture`: the latter follows
 +	// r_particles, and the "Classic" setting points it at a 2x2 texture whose

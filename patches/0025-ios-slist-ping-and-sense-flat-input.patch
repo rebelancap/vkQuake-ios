@@ -1,7 +1,8 @@
 diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
+index 6fa4ac8e..58c9ca71 100644
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -482,6 +482,149 @@ static void IN_JoyKeyEvent (qboolean wasdown, qboolean isdown, int key, double *
+@@ -668,6 +668,149 @@ static void IN_JoyKeyEvent (qboolean wasdown, qboolean isdown, int key, double *
  	}
  }
  
@@ -151,7 +152,7 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  /*
  ================
  IN_Commands
-@@ -492,7 +635,9 @@ Emit key events for game controller buttons, including emulated buttons for anal
+@@ -678,7 +821,9 @@ Emit key events for game controller buttons, including emulated buttons for anal
  void IN_Commands (void)
  {
  	joyaxisstate_t newaxisstate;
@@ -161,14 +162,12 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  	const float	   stickthreshold = 0.9;
  	const float	   triggerthreshold = joy_deadzone_trigger.value;
  
-@@ -523,17 +668,64 @@ void IN_Commands (void)
+@@ -709,13 +854,64 @@ void IN_Commands (void)
  	if (!joy_enable.value)
  		return;
  
 -	if (!joy_active_controller)
 -		return;
--
--	// emit key events for controller buttons
 +	/*
 +	 * R6.3 — ONE MERGED SNAPSHOT PER FRAME, FROM EVERY SOURCE THAT IS DRIVING.
 +	 *
@@ -192,11 +191,11 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
 +	 * held. The loops are 21 buttons and 6 axes of nothing.
 +	 */
 +	memset (&newaxisstate, 0, sizeof (newaxisstate));
- 	for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
++	for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
 +		newbuttonstate[i] = false;
 +
 +	if (joy_active_controller)
- 	{
++	{
 +		have_source = 1;
 +		for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
 +		{
@@ -208,13 +207,11 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
 +		}
 +		for (i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)
 +		{
- #ifdef USE_SDL3
--		qboolean newstate = SDL_GetGamepadButton (joy_active_controller, (SDL_GamepadButton)i);
++#ifdef USE_SDL3
 +			newaxisstate.axisvalue[i] = SDL_GetGamepadAxis (joy_active_controller, (SDL_GamepadAxis)i) / 32768.0f;
- #else
--		qboolean newstate = SDL_GameControllerGetButton (joy_active_controller, (SDL_GameControllerButton)i);
++#else
 +			newaxisstate.axisvalue[i] = SDL_GameControllerGetAxis (joy_active_controller, (SDL_GameControllerAxis)i) / 32768.0f;
- #endif
++#endif
 +		}
 +	}
 +
@@ -224,31 +221,28 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
 +		have_source = 1;
 +#endif
 +	(void)have_source; // the snapshot is authoritative; this is for readers
-+
-+	// emit key events for controller buttons
-+	for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
-+	{
+ 
+ 	// emit key events for controller buttons
+ 	for (i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
+ 	{
+-		qboolean newstate = SDL_GetGamepadButton (joy_active_controller, (SDL_GamepadButton)i);
 +		qboolean newstate = newbuttonstate[i];
  		qboolean oldstate = joy_buttonstate.buttondown[i];
+ 		int		 key;
  
- 		joy_buttonstate.buttondown[i] = newstate;
-@@ -546,15 +738,6 @@ void IN_Commands (void)
- #endif
+@@ -737,11 +933,6 @@ void IN_Commands (void)
+ 		IN_JoyKeyEvent (oldstate, newstate, key, &joy_buttontimer[i]);
  	}
  
 -	for (i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)
 -	{
--#ifdef USE_SDL3
 -		newaxisstate.axisvalue[i] = SDL_GetGamepadAxis (joy_active_controller, (SDL_GamepadAxis)i) / 32768.0f;
--#else
--		newaxisstate.axisvalue[i] = SDL_GameControllerGetAxis (joy_active_controller, (SDL_GameControllerAxis)i) / 32768.0f;
--#endif
 -	}
 -
- 	// emit emulated arrow keys so the analog sticks can be used in the menu
- 	if (key_dest != key_game)
+ 	if (key_dest == key_game && !gamepad_input_active)
  	{
-@@ -598,8 +781,17 @@ void IN_JoyMove (usercmd_t *cmd)
+ 		joyaxis_t move_axis = {newaxisstate.axisvalue[SDL_GAMEPAD_AXIS_LEFTX], newaxisstate.axisvalue[SDL_GAMEPAD_AXIS_LEFTY]};
+@@ -808,8 +999,17 @@ void IN_JoyMove (usercmd_t *cmd)
  	if (!joy_enable.value)
  		return;
  
@@ -267,9 +261,10 @@ diff --git a/Quake/in_sdl.c b/Quake/in_sdl.c
  	if (cl.paused || key_dest != key_game)
  		return;
 diff --git a/Quake/menu.c b/Quake/menu.c
+index fde2b2b2..b19b8dab 100644
 --- a/Quake/menu.c
 +++ b/Quake/menu.c
-@@ -4824,7 +4824,12 @@ static void M_Search_Key (int key) {}
+@@ -5324,7 +5324,12 @@ static void M_Search_Key (int key) {}
  static int		slist_cursor;
  static int		slist_first;
  static qboolean slist_sorted;
@@ -283,7 +278,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  
  static void M_Menu_ServerList_f (void)
  {
-@@ -4844,6 +4849,24 @@ static void M_ServerList_Draw (cb_context_t *cbx)
+@@ -5344,6 +5349,24 @@ static void M_ServerList_Draw (cb_context_t *cbx)
  	size_t	n;
  	qpic_t *p;
  
@@ -308,15 +303,16 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  	if (!slist_sorted)
  	{
  		slist_sorted = true;
-@@ -4851,18 +4874,21 @@ static void M_ServerList_Draw (cb_context_t *cbx)
+@@ -5351,19 +5374,22 @@ static void M_ServerList_Draw (cb_context_t *cbx)
  	}
  
  	if (hostCacheCount > SERVER_LIST_MAX_ON_SCREEN)
 -		M_DrawScrollbar (cbx, MENU_SCROLLBAR_X, 40, (float)(slist_first) / (hostCacheCount - SERVER_LIST_MAX_ON_SCREEN), SERVER_LIST_MAX_ON_SCREEN - 2);
--	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, 32, 8, SERVER_LIST_MAX_ON_SCREEN, slist_first);
 +		M_DrawScrollbar (
 +			cbx, MENU_SCROLLBAR_X, SERVER_LIST_TOP_Y, (float)(slist_first) / (hostCacheCount - SERVER_LIST_MAX_ON_SCREEN), SERVER_LIST_MAX_ON_SCREEN - 2);
-+	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, SERVER_LIST_TOP_Y, 8, SERVER_LIST_MAX_ON_SCREEN, slist_first);
+ 	const int server_list_height = CLAMP (0, (int)hostCacheCount - slist_first, SERVER_LIST_MAX_ON_SCREEN);
+-	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, 32, 8, server_list_height, slist_first);
++	M_Mouse_UpdateListCursor (&slist_cursor, 12, 400, SERVER_LIST_TOP_Y, 8, server_list_height, slist_first);
  
  	p = Draw_CachePic ("gfx/p_multi.lmp");
  	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
@@ -324,7 +320,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
 +	// Column widths are NET_SlistPrintServer's, kept in step by hand: name 13,
 +	// map 11, users 5, ping 4.
 +	M_PrintWhite (cbx, 28 - CHARACTER_SIZE, SERVER_LIST_HEADER_Y, "Server        Map         Users Ping");
- 	for (n = 0; n < SERVER_LIST_MAX_ON_SCREEN && n < hostCacheCount; n++)
+ 	for (n = 0; n < (size_t)server_list_height; n++)
  	{
 -		M_Print (cbx, 28 - CHARACTER_SIZE, 32 + 8 * n, NET_SlistPrintServer (slist_first + n));
 +		M_Print (cbx, 28 - CHARACTER_SIZE, SERVER_LIST_TOP_Y + 8 * n, NET_SlistPrintServer (slist_first + n));
@@ -336,6 +332,7 @@ diff --git a/Quake/menu.c b/Quake/menu.c
  	if (*m_return_reason)
  		M_PrintWhite (cbx, 16, 148, m_return_reason);
 diff --git a/Quake/net.h b/Quake/net.h
+index 246f233b..7e398b5b 100644
 --- a/Quake/net.h
 +++ b/Quake/net.h
 @@ -113,6 +113,10 @@ void		NET_Slist_f (void);
@@ -350,6 +347,7 @@ diff --git a/Quake/net.h b/Quake/net.h
  /* FIXME: driver related, but public:
   */
 diff --git a/Quake/net_defs.h b/Quake/net_defs.h
+index 8fbbc553..a13c9048 100644
 --- a/Quake/net_defs.h
 +++ b/Quake/net_defs.h
 @@ -263,6 +263,14 @@ typedef struct
@@ -368,6 +366,7 @@ diff --git a/Quake/net_defs.h b/Quake/net_defs.h
  } hostcache_t;
  
 diff --git a/Quake/net_dgrm.c b/Quake/net_dgrm.c
+index 98394a4c..0e252562 100644
 --- a/Quake/net_dgrm.c
 +++ b/Quake/net_dgrm.c
 @@ -1637,10 +1637,61 @@ static struct
@@ -448,7 +447,7 @@ diff --git a/Quake/net_dgrm.c b/Quake/net_dgrm.c
  		dfunc.Broadcast (dfunc.controlSock, net_message.data, net_message.cursize);
  		SZ_Clear (&net_message);
  
-@@ -1864,6 +1917,9 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
+@@ -1863,6 +1916,9 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
  				memcpy (&hostcache[n].addr, &readaddr, sizeof (struct qsockaddr));
  				hostcache[n].driver = net_driverlevel;
  				hostcache[n].ldriver = net_landriverlevel;
@@ -458,7 +457,7 @@ diff --git a/Quake/net_dgrm.c b/Quake/net_dgrm.c
  				q_strlcpy (hostcache[n].cname, dfunc.AddrToString (&readaddr, false), sizeof (hostcache[n].cname));
  
  				// check for a name conflict
-@@ -1946,6 +2002,8 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
+@@ -1944,6 +2000,8 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
  		memcpy (&hostcache[n].addr, &readaddr, sizeof (struct qsockaddr));
  		hostcache[n].driver = net_driverlevel;
  		hostcache[n].ldriver = net_landriverlevel;
@@ -467,7 +466,7 @@ diff --git a/Quake/net_dgrm.c b/Quake/net_dgrm.c
  		q_strlcpy (hostcache[n].cname, dfunc.AddrToString (&readaddr, false), sizeof (hostcache[n].cname));
  
  		// check for a name conflict
-@@ -1982,6 +2040,7 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
+@@ -1980,6 +2038,7 @@ static qboolean _Datagram_SearchForHosts (qboolean xmit)
  			if (hostlist[i].requery && hostlist[i].driver == net_landriverlevel)
  			{
  				hostlist[i].requery = false;
@@ -476,6 +475,7 @@ diff --git a/Quake/net_dgrm.c b/Quake/net_dgrm.c
  				sentsomething = true;
  				n--;
 diff --git a/Quake/net_loop.c b/Quake/net_loop.c
+index 504e04f4..d7bd21d1 100644
 --- a/Quake/net_loop.c
 +++ b/Quake/net_loop.c
 @@ -55,6 +55,11 @@ qboolean Loop_SearchForHosts (qboolean xmit)
@@ -487,10 +487,11 @@ diff --git a/Quake/net_loop.c b/Quake/net_loop.c
 +	// sorts to the top rather than showing "--" at the bottom. Assigned here
 +	// because hostcache[] is never zeroed between searches.
 +	hostcache[0].ping_ms = 0;
- 	strcpy (hostcache[0].cname, "local");
+ 	q_strlcpy (hostcache[0].cname, "local", sizeof (hostcache[0].cname));
  	return false;
  }
 diff --git a/Quake/net_main.c b/Quake/net_main.c
+index 8a6d1634..90fbfbbb 100644
 --- a/Quake/net_main.c
 +++ b/Quake/net_main.c
 @@ -275,10 +275,14 @@ static void NET_Port_f (void)

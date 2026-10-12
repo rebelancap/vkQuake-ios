@@ -54,9 +54,10 @@ it. Tracking loss or a menu releases everything and hands the weapon
 back, so nobody is ever left axe-locked.
 
 diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
+index d67982ee..e4cd63d1 100644
 --- a/Quake/gl_vidsdl.c
 +++ b/Quake/gl_vidsdl.c
-@@ -6150,6 +6150,68 @@ cvar_t vkqvr_gunscale = {"vkqvr_gunscale", "1", CVAR_NONE};
+@@ -5652,6 +5652,68 @@ cvar_t vkqvr_gunscale = {"vkqvr_gunscale", "1", CVAR_NONE};
  cvar_t vkqvr_flashscale = {"vkqvr_flashscale", "0.5", CVAR_NONE};
  cvar_t vkqvr_weapon = {"vkqvr_weapon", "1", CVAR_NONE}; // draw the viewmodel at the hand
  
@@ -125,7 +126,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  void VKQ_VR_RegisterCvars (void)
  {
  	Cvar_RegisterVariable (&vkqvr_aimhand);
-@@ -6167,6 +6229,31 @@ void VKQ_VR_RegisterCvars (void)
+@@ -5669,6 +5731,31 @@ void VKQ_VR_RegisterCvars (void)
  	Cvar_RegisterVariable (&vkqvr_gunscale);
  	Cvar_RegisterVariable (&vkqvr_flashscale);
  	Cvar_RegisterVariable (&vkqvr_weapon);
@@ -157,7 +158,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  }
  
  // cl_input.c's button state and impulse latch: globals with no header, because
-@@ -6183,13 +6270,40 @@ int		 VKQ_VR_AimHandTracked (void);
+@@ -5685,13 +5772,40 @@ int		 VKQ_VR_AimHandTracked (void);
  void	 VKQ_VR_AimAngles (float out[3]);
  float	 VKQ_VR_WeaponMuzzle (void);
  qboolean VKQ_VR_MuzzleWorld (vec3_t org, vec3_t fwd);
@@ -198,7 +199,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  // Whether the Sense path is currently driving the shared attack/jump buttons.
  // Latched so that losing the controllers releases them exactly ONCE instead of
  // fighting the gamepad for them every frame.
-@@ -6375,7 +6489,14 @@ void VKQ_VR_ComposeView (int eye, float out[16])
+@@ -5877,7 +5991,14 @@ void VKQ_VR_ComposeView (int eye, float out[16])
  	MatrixMultiply (base, rot);
  	RotationMatrix (rot, VKQ_VR_DEG2RAD (-vkq_vr_body_yaw), 0.0f, 0.0f, 1.0f);
  	MatrixMultiply (base, rot);
@@ -214,7 +215,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	MatrixMultiply (base, trans);
  
  	memcpy (out, vkq_vr_cur[eye & 1].eye_from_player, 16 * sizeof (float));
-@@ -6439,6 +6560,22 @@ void VKQ_VR_ApplyHeadAim (void)
+@@ -5941,6 +6062,22 @@ void VKQ_VR_ApplyHeadAim (void)
  		cl.viewangles[YAW] = anglemod (vkq_vr_body_yaw + vkq_vr_head_yaw);
  		cl.viewangles[ROLL] = 0.0f;
  	}
@@ -237,7 +238,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	last_sent = cl.viewangles[YAW];
  }
  
-@@ -6534,20 +6671,44 @@ static void vkq_vr_player_to_world_dir (const float *v, vec3_t out)
+@@ -6036,20 +6173,44 @@ static void vkq_vr_player_to_world_dir (const float *v, vec3_t out)
  }
  
  // The player frame's origin in Quake world: the body's eye point, i.e. exactly
@@ -290,7 +291,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  {
  	const vkq_vr_hand_t *h;
  	vec3_t				 f, r, u, o;
-@@ -6570,7 +6731,7 @@ static qboolean vkq_vr_hand_world (int hand, qboolean grip, vec3_t org, vec3_t f
+@@ -6072,7 +6233,7 @@ static qboolean vkq_vr_hand_world (int hand, qboolean grip, vec3_t org, vec3_t f
  		VectorAdd (o, wp, org);
  	}
  
@@ -299,7 +300,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	{
  		// Rotate the hand basis about its own axes: pitch about right, yaw about
  		// up, roll about forward. Order pitch -> yaw -> roll, so the pitch knob
-@@ -6605,7 +6766,13 @@ static qboolean vkq_vr_hand_world (int hand, qboolean grip, vec3_t org, vec3_t f
+@@ -6107,7 +6268,13 @@ static qboolean vkq_vr_hand_world (int hand, qboolean grip, vec3_t org, vec3_t f
  		}
  		VectorCopy (nr, r);
  		VectorCopy (nu, u);
@@ -314,7 +315,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		VectorMA (org, vkqvr_gunfwd.value, f, org);
  		VectorMA (org, vkqvr_gunright.value, r, org);
  		VectorMA (org, vkqvr_gunup.value, u, org);
-@@ -6632,34 +6799,39 @@ static void vkq_vr_angles_from_basis (const vec3_t fwd, const vec3_t right, cons
+@@ -6134,34 +6301,39 @@ static void vkq_vr_angles_from_basis (const vec3_t fwd, const vec3_t right, cons
  	out[ROLL] = (float)(atan2 (-right[2], up[2]) * 180.0 / M_PI);
  }
  
@@ -365,7 +366,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  // --- input (charter A10's fixed layout) --------------------------------------
  static float vkq_vr_stick_axis (float v)
  {
-@@ -6772,6 +6944,10 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -6274,6 +6446,10 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  				vkq_vr_owned_buttons = 0;
  				vkq_vr_hold (&in_attack, false);
  				vkq_vr_hold (&in_jump, false);
@@ -376,7 +377,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  			}
  			return;
  		}
-@@ -6826,6 +7002,9 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -6328,6 +6504,9 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  		// Nothing below this line may reach gameplay while a menu is up.
  		vkq_vr_hold (&in_attack, false);
  		vkq_vr_hold (&in_jump, false);
@@ -386,7 +387,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  		return;
  	}
  
-@@ -6896,6 +7075,11 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
+@@ -6398,6 +6577,11 @@ void VKQ_VR_ApplyHandInput (usercmd_t *cmd)
  	}
  	if (fabsf (rs[1]) < 0.4f)
  		cycleArmed = 1;
@@ -398,7 +399,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	(void)ry;
  	(void)rOff;
  	(void)pOff;
-@@ -6921,7 +7105,7 @@ void VKQ_VR_ApplyMoveDir (usercmd_t *cmd)
+@@ -6423,7 +6607,7 @@ void VKQ_VR_ApplyMoveDir (usercmd_t *cmd)
  		return; // aim-hand relative: the server already uses the aim yaw
  	if (mode == 2)
  	{
@@ -407,7 +408,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  			return;
  		ref = (float)(atan2 (fwd[1], fwd[0]) * 180.0 / M_PI);
  	}
-@@ -6945,26 +7129,78 @@ void VKQ_VR_ApplyMoveDir (usercmd_t *cmd)
+@@ -6447,26 +6631,78 @@ void VKQ_VR_ApplyMoveDir (usercmd_t *cmd)
  }
  
  // --- weapon at the hand (charter A8) -----------------------------------------
@@ -496,7 +497,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	const int				  w = cl.stats[STAT_ACTIVEWEAPON];
  	size_t					  i;
  	for (i = 0; i < sizeof (vkq_vr_guns) / sizeof (vkq_vr_guns[0]); i++)
-@@ -6973,36 +7209,74 @@ static const vkq_vr_gun_t *vkq_vr_gun_entry (void)
+@@ -6475,36 +6711,74 @@ static const vkq_vr_gun_t *vkq_vr_gun_entry (void)
  	return &def;
  }
  
@@ -582,7 +583,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	vkq_vr_angles_from_basis (fwd, right, up, ang);
  	VectorMA (org, g->fwd, fwd, org);
  	VectorMA (org, g->right, right, org);
-@@ -7011,7 +7285,7 @@ qboolean VKQ_VR_PlaceViewmodel (entity_t *view)
+@@ -6513,7 +6787,7 @@ qboolean VKQ_VR_PlaceViewmodel (entity_t *view)
  	VectorCopy (org, view->origin);
  	// Entity pitch is stored backwards from view angles (V_CalcRefdef's own
  	// comment, and what CalcGunAngle does to this same entity).
@@ -591,7 +592,7 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
  	view->angles[YAW] = ang[YAW];
  	view->angles[ROLL] = ang[ROLL];
  	view->netstate.scale = (byte)ENTSCALE_ENCODE (g->scale * vkqvr_gunscale.value);
-@@ -7058,18 +7332,513 @@ void VKQ_VR_AimDebugString (char *out, int len)
+@@ -6560,18 +6834,513 @@ void VKQ_VR_AimDebugString (char *out, int len)
  		VKQ_VR_HandsTracked ());
  }
  
@@ -1109,9 +1110,10 @@ diff --git a/Quake/gl_vidsdl.c b/Quake/gl_vidsdl.c
 +
  #endif
 diff --git a/Quake/r_part.c b/Quake/r_part.c
+index ed1a7a14..dc8e46d0 100644
 --- a/Quake/r_part.c
 +++ b/Quake/r_part.c
-@@ -1062,21 +1062,58 @@ texture's centre, which is solid white — so the ribbon is a clean constant
+@@ -1063,21 +1063,58 @@ texture's centre, which is solid white — so the ribbon is a clean constant
  colour while the dot keeps the texture's soft round falloff.
  ===============
  */
@@ -1176,7 +1178,7 @@ diff --git a/Quake/r_part.c b/Quake/r_part.c
  		return;
  
  	VectorSubtract (end, start, dir);
-@@ -1085,14 +1122,6 @@ static void R_DrawVRLaserGeometry (cb_context_t *cbx)
+@@ -1086,14 +1123,6 @@ static void R_DrawVRLaserGeometry (cb_context_t *cbx)
  		return;
  	VectorScale (dir, 1.0f / len, dir);
  
@@ -1191,7 +1193,7 @@ diff --git a/Quake/r_part.c b/Quake/r_part.c
  	v = (basicvertex_t *)R_VertexAllocate (12 * sizeof (basicvertex_t), &vbuf, &voff);
  
  #define VKQ_LASER_VERT(P, C)                                                                                                                                 \
-@@ -1107,34 +1136,47 @@ static void R_DrawVRLaserGeometry (cb_context_t *cbx)
+@@ -1108,34 +1137,47 @@ static void R_DrawVRLaserGeometry (cb_context_t *cbx)
  
  	if (want_beam)
  	{
@@ -1257,11 +1259,12 @@ diff --git a/Quake/r_part.c b/Quake/r_part.c
  			v[n].position[0] = p[0], v[n].position[1] = p[1], v[n].position[2] = p[2];
  			v[n].texcoord[0] = (qx[i] + 1.0f) * 0.5f;
 diff --git a/Quake/sv_phys.c b/Quake/sv_phys.c
+index 784a8ac0..49ba275b 100644
 --- a/Quake/sv_phys.c
 +++ b/Quake/sv_phys.c
-@@ -2157,6 +2157,119 @@ static void SV_Physics_ClientWalk (edict_t *ent, sv_client_move_frame_t *move_fr
- 	if (!ent->free && apply_gravity)
- 		SV_FinishGravity (ent);
+@@ -2226,6 +2226,119 @@ static void SV_Physics_ClientWalk (edict_t *ent, sv_client_move_frame_t *move_fr
+ 		VectorCopy (ent->v.velocity, move_velocity);
+ 	SV_WalkMove (ent, move_frame, move_velocity);
  }
 +#ifdef VKQ_VISIONOS
 +/*
@@ -1379,7 +1382,7 @@ diff --git a/Quake/sv_phys.c b/Quake/sv_phys.c
  
  static void SV_Physics_Client (edict_t *ent, int num)
  {
-@@ -2197,8 +2310,21 @@ static void SV_Physics_Client (edict_t *ent, int num)
+@@ -2272,8 +2385,21 @@ static void SV_Physics_Client (edict_t *ent, int num)
  		break;
  
  	case MOVETYPE_WALK:
@@ -1388,20 +1391,20 @@ diff --git a/Quake/sv_phys.c b/Quake/sv_phys.c
 +		// .think, so the muzzle has to be standing in for the body here too
 +		// (QuakeQuest makes the same second wrap, for the same reason).
 +		VKQ_VR_ShiftToMuzzle (ent, num);
- 		if (!SV_RunThink (ent))
++		if (!SV_RunThink (ent))
 +		{
 +			VKQ_VR_RestoreOrigin (ent);
- 			return;
++			goto done; // 1.37.0: upstream now releases retained edicts at `done`
 +		}
 +		VKQ_VR_RestoreOrigin (ent);
 +#else
-+		if (!SV_RunThink (ent))
-+			return;
+ 		if (!SV_RunThink (ent))
+ 			goto done;
 +#endif
  		SV_Physics_ClientWalk (ent, &move_frame);
  		break;
  
-@@ -2235,7 +2361,17 @@ static void SV_Physics_Client (edict_t *ent, int num)
+@@ -2310,7 +2436,17 @@ static void SV_Physics_Client (edict_t *ent, int num)
  
  	pr_global_struct->time = qcvm->time;
  	pr_global_struct->self = EDICT_TO_PROG (ent);
@@ -1416,13 +1419,14 @@ diff --git a/Quake/sv_phys.c b/Quake/sv_phys.c
 +#else
  	PR_ExecuteProgram (pr_global_struct->PlayerPostThink);
 +#endif
- }
  
- //============================================================================
+ 	forceunderwater = !wasunderwater && ent->v.waterlevel >= 3;
+ 	if (forceunderwater != ent->forcewater)
 diff --git a/Quake/view.c b/Quake/view.c
+index 461aaa84..6fd300d1 100644
 --- a/Quake/view.c
 +++ b/Quake/view.c
-@@ -887,7 +887,13 @@ void V_CalcRefdef (void)
+@@ -888,7 +888,13 @@ void V_CalcRefdef (void)
  	// Returns false with no controller tracked, and everything above stands:
  	// that is exactly R1, so a gamepad player sees no change.
  	{

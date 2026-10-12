@@ -14,9 +14,11 @@ single entry, LOC_GetString then returns every key verbatim, and the
 player sees $qc_item_health on screen with nothing in the log to explain
 it. Both clean vintages already work; this is purely a report.
 
+diff --git a/Quake/common.c b/Quake/common.c
+index 3cb8c336..a17ed708 100644
 --- a/Quake/common.c
 +++ b/Quake/common.c
-@@ -4148,6 +4148,21 @@
+@@ -4572,6 +4572,21 @@ loaded:
  	}
  
  	Con_Printf ("Loaded %d strings from '%s'\n", localization.numentries, file);
@@ -35,6 +37,6 @@ it. Both clean vintages already work; this is purely a report.
 +			"Your game paks predate the 2026 update but QuakeEX.kpf is from it or later.\n"
 +			"Re-copy the WHOLE rerelease folder (id1/pak0.pak carries the strings now).\n",
 +			file);
+ 	return true;
  }
- 
  /*

@@ -9,9 +9,11 @@ con_linewidth shrinks by the inset, so wrapped text and the version string end
 clear of it. iPhone only (VKQ_IOS and not VKQ_VISIONOS); menus and HUD are
 untouched. Applies on top of 0030.
 
+diff --git a/Quake/console.c b/Quake/console.c
+index af368397..8287fb4a 100644
 --- a/Quake/console.c
 +++ b/Quake/console.c
-@@ -38,6 +38,48 @@
+@@ -38,6 +38,48 @@ extern qboolean keydown[256];
  
  int con_linewidth;
  
@@ -60,7 +62,7 @@ untouched. Applies on top of 0030.
  float con_cursorspeed = 4;
  
  #define CON_TEXTSIZE (1024 * 1024) // ericw -- was 65536. johnfitz -- new default size
-@@ -211,7 +253,7 @@
+@@ -211,7 +253,7 @@ static qboolean Con_CanvasToOffset (int x, int y, conofs_t *ofs, contest_t testm
  	y >>= 3;
  
  	// apply margins and scrolling
@@ -69,7 +71,7 @@ untouched. Applies on top of 0030.
  	y -= 2;
  
  	if (testmode == CT_INSIDE)
-@@ -972,7 +1014,7 @@
+@@ -972,7 +1014,7 @@ void Con_CheckResize (void)
  	int	  i, j, width, oldwidth, oldtotallines, numlines, numchars;
  	char *tbuf; // johnfitz -- tbuf no longer a static array
  
@@ -78,7 +80,7 @@ untouched. Applies on top of 0030.
  
  	if (width == con_linewidth)
  		return;
-@@ -2159,6 +2201,7 @@
+@@ -2170,6 +2212,7 @@ void Con_DrawNotify (cb_context_t *cbx)
  	int			i, x, v;
  	const char *text;
  	float		alpha;
@@ -86,7 +88,7 @@ untouched. Applies on top of 0030.
  
  	GL_SetCanvas (cbx, CANVAS_CONSOLE); // johnfitz
  	v = vid.conheight;					// johnfitz
-@@ -2179,11 +2222,11 @@
+@@ -2190,11 +2233,11 @@ void Con_DrawNotify (cb_context_t *cbx)
  			while (len > 0 && text[len - 1] == ' ')
  				--len;
  			for (x = 0; x < len; x++)
@@ -100,7 +102,7 @@ untouched. Applies on top of 0030.
  		GL_SetCanvasColor (1.f, 1.f, 1.f, 1.f);
  
  		v += 8;
-@@ -2193,12 +2236,12 @@
+@@ -2204,12 +2247,12 @@ void Con_DrawNotify (cb_context_t *cbx)
  	{
  		if (chat_team)
  		{
@@ -115,7 +117,7 @@ untouched. Applies on top of 0030.
  			x = 6;
  		}
  
-@@ -2209,12 +2252,12 @@
+@@ -2220,12 +2263,12 @@ void Con_DrawNotify (cb_context_t *cbx)
  
  		while (*text)
  		{
@@ -130,7 +132,7 @@ untouched. Applies on top of 0030.
  		v += 8;
  	}
  }
-@@ -2316,6 +2359,7 @@
+@@ -2327,6 +2370,7 @@ void Con_DrawInput (cb_context_t *cbx)
  {
  	const char *workline = key_lines[edit_line];
  	int			i, ofs, len;
@@ -138,7 +140,7 @@ untouched. Applies on top of 0030.
  
  	if (key_dest != key_console && !con_forcedup)
  		return; // don't draw anything
-@@ -2330,14 +2374,14 @@
+@@ -2341,14 +2385,14 @@ void Con_DrawInput (cb_context_t *cbx)
  
  	// draw input string
  	for (i = 0; i + ofs < len && i < con_linewidth; i++)
@@ -155,7 +157,7 @@ untouched. Applies on top of 0030.
  		GL_SetCanvasColor (1.0f, 1.0f, 1.0f, 1.0f);
  	}
  
-@@ -2345,7 +2389,7 @@
+@@ -2356,7 +2400,7 @@ void Con_DrawInput (cb_context_t *cbx)
  	if (!((int)((realtime - key_blinktime) * con_cursorspeed) & 1))
  	{
  		i = key_linepos - ofs;
@@ -164,7 +166,7 @@ untouched. Applies on top of 0030.
  	}
  }
  
-@@ -2395,6 +2439,7 @@
+@@ -2406,6 +2450,7 @@ void Con_DrawConsole (cb_context_t *cbx, int lines, qboolean drawinput)
  	int			i, x, y, j, sb, rows;
  	const char *text;
  	char		ver[32];
@@ -172,7 +174,7 @@ untouched. Applies on top of 0030.
  
  	if (lines <= 0)
  		return;
-@@ -2416,7 +2461,7 @@
+@@ -2427,7 +2472,7 @@ void Con_DrawConsole (cb_context_t *cbx, int lines, qboolean drawinput)
  		j = i - con_backscroll;
  		if (j < 0)
  			j = 0;
@@ -181,7 +183,7 @@ untouched. Applies on top of 0030.
  	}
  
  	// draw the buffer text
-@@ -2438,9 +2483,9 @@
+@@ -2449,9 +2494,9 @@ void Con_DrawConsole (cb_context_t *cbx, int lines, qboolean drawinput)
  			{
  				if (keydown[K_MOUSE1])
  					c &= 0x7f;
@@ -193,7 +195,7 @@ untouched. Applies on top of 0030.
  		}
  	}
  
-@@ -2449,7 +2494,7 @@
+@@ -2460,7 +2505,7 @@ void Con_DrawConsole (cb_context_t *cbx, int lines, qboolean drawinput)
  	{
  		y += 8; // blank line
  		for (x = 0; x < con_linewidth; x += 4)
@@ -202,7 +204,7 @@ untouched. Applies on top of 0030.
  		y += 8;
  	}
  
-@@ -2461,7 +2506,7 @@
+@@ -2472,7 +2517,7 @@ void Con_DrawConsole (cb_context_t *cbx, int lines, qboolean drawinput)
  	y += 8;
  	q_snprintf (ver, sizeof (ver), ENGINE_NAME_AND_VER);
  	for (x = 0; x < (int)strlen (ver); x++)
