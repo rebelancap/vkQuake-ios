@@ -622,8 +622,10 @@ static const char *const kVRStashCvars[] = {
 	"cl_bob", "v_kicktime", "v_kickroll", "v_kickpitch", "v_idlescale", "cl_rollangle", "v_gunkick",
 	// A9/A8: the eye carries the world, the panel carries the UI
 	"scr_viewsize", "crosshair",
-	// A5: the depth handoff needs a single-sample, unscaled render target
-	"vid_fsaa", "r_scale",
+	// A5: the depth handoff needs a single-sample, unscaled render target.
+	// vkQuake 1.37.0 removed r_scale; the render resolution is now r_width /
+	// r_height (-1 = native), and the per-eye depth snapshot only runs native.
+	"vid_fsaa", "r_width", "r_height",
 	// R2/A8: cl_gun_fovscale stretches the viewmodel to compensate for a wide 2D
 	// fov. In VR the gun is an object in the room held in a hand, and stretching
 	// it is simply wrong — visibly so in stereo, where a squashed model reads as
@@ -631,7 +633,7 @@ static const char *const kVRStashCvars[] = {
 	"cl_gun_fovscale",
 };
 static const float kVRStashValues[] = {
-	0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 130.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+	0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 130.0f, 0.0f, 0.0f, -1.0f, -1.0f, 0.0f,
 };
 #define VKQ_VR_STASH_COUNT ((int)(sizeof (kVRStashCvars) / sizeof (kVRStashCvars[0])))
 
