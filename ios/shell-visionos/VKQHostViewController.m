@@ -631,10 +631,19 @@ static const char *const kVRStashCvars[] = {
 	// it is simply wrong — visibly so in stereo, where a squashed model reads as
 	// the wrong shape rather than as a wider view.
 	"cl_gun_fovscale",
+	// vkQuake 1.37.0 added screen-space AO (r_ssao, default 1 = low) — new for
+	// every user, archived or not. Its view-space reconstruction assumes a
+	// symmetric projection (it reads only P[0]/P[5]/P[14]), while each VR eye's
+	// projection is the compositor's ASYMMETRIC frustum, so the two eyes would get
+	// subtly different AO; and it runs twice per host frame here. Keep VR exactly
+	// as it rendered before 1.37.0 until a headset round says otherwise.
+	"r_ssao",
 };
 static const float kVRStashValues[] = {
-	0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 130.0f, 0.0f, 0.0f, -1.0f, -1.0f, 0.0f,
+	0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 130.0f, 0.0f, 0.0f, -1.0f, -1.0f, 0.0f, 0.0f,
 };
+_Static_assert (sizeof (kVRStashValues) / sizeof (kVRStashValues[0]) == sizeof (kVRStashCvars) / sizeof (kVRStashCvars[0]),
+				"VR stash: one value per cvar");
 #define VKQ_VR_STASH_COUNT ((int)(sizeof (kVRStashCvars) / sizeof (kVRStashCvars[0])))
 
 static NSString *vkq_vr_stash_key (int i) { return [NSString stringWithFormat:@"vrStash_%s", kVRStashCvars[i]]; }
