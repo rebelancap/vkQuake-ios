@@ -222,6 +222,36 @@ static const char *vkq_orient_name (UIInterfaceOrientation o)
 		return "unknown";
 	}
 }
+// Issue #7 round 3: the external-display predicate. The reporter's iPadOS 27.2
+// paste showed the monitor reported AS UIScreen.mainScreen (and UIScreen.screens
+// holding only it) while the game was on it, so "screen != mainScreen" never
+// fired. Key on the PANEL instead: every iPhone/iPad panel is portrait-native
+// (nativeBounds e.g. 2064x2752), an external monitor is landscape-native
+// (6016x3384). "Not the main screen" and the emulation hint are kept (OR).
+// SDL patch 0003's UIKit_IsExternalDisplayScene() is the same test — keep in step.
+static BOOL vkq_emulate_external (void)
+{
+	const char *e = getenv ("VKQ_EMULATE_EXTERNAL_DISPLAY");
+	return e && *e && *e != '0';
+}
+// Returns the reason the scene counts as external, or nil (not external).
+static NSString *vkq_external_reason (UIWindowScene *ws)
+{
+	if (!ws || !ws.screen)
+		return nil;
+	CGSize n = ws.screen.nativeBounds.size;
+	if (n.width > n.height)
+		return [NSString stringWithFormat:@"landscape-native %.0fx%.0f", n.width, n.height];
+	if (ws.screen != UIScreen.mainScreen)
+		return @"not-main-screen";
+	if (vkq_emulate_external ())
+		return @"hint";
+	return nil;
+}
+static BOOL vkq_scene_is_external (UIWindowScene *ws)
+{
+	return vkq_external_reason (ws) != nil;
+}
 static void vkq_log_displays (BOOL to_console)
 {
 	NSMutableArray<NSString *> *lines = [NSMutableArray array];
@@ -243,9 +273,13 @@ static void vkq_log_displays (BOOL to_console)
 		NSString	  *geo = @"";
 		if (@available(iOS 16.0, *))
 			geo = [NSString stringWithFormat:@" geomOrient=%s", vkq_orient_name (ws.effectiveGeometry.interfaceOrientation)];
+		NSString *ext = vkq_external_reason (ws);
+		CGSize	  nb = ws.screen.nativeBounds.size;
 		[lines addObject:[NSString stringWithFormat:@"  scene%s role=%@ state=%ld orient=%s%@ bounds=%.0fx%.0f fullscreen=%d", ws.screen == UIScreen.mainScreen ? "(main)" : "(EXTERNAL)",
 												   sc.session.role, (long)sc.activationState, vkq_orient_name (ws.interfaceOrientation), geo, cs.width, cs.height,
 												   CGSizeEqualToSize (cs, ws.screen.bounds.size) ? 1 : 0]];
+		[lines addObject:ext ? [NSString stringWithFormat:@"    external=1 reason=%@", ext]
+							 : [NSString stringWithFormat:@"    external=0 (portrait-native %.0fx%.0f)", nb.width, nb.height]];
 		for (UIWindow *w in ws.windows)
 		{
 			UIView *v = w.rootViewController.view;
@@ -317,7 +351,8 @@ void VKQ_iOS_MouseDiag (void)
 // shape), UIKit rotated the scene, and the game appeared sideways.
 // The fix has three parts:
 //  - SDL patch 0003: UIKit_GetSupportedOrientations answers Portrait (= native)
-//    for a window whose scene is on a non-main screen, and
+//    for a window whose scene is on an external panel (vkq_external_reason above:
+//    landscape-native panel, non-main screen, or the hint), and
 //    UIKit_GetInterfaceOrientation derives "landscape?" from the scene bounds there
 //    so UIKit_ComputeViewFrame keeps the view the shape of the window;
 //  - here: the app delegate must allow Portrait for that window, or Info.plist's
@@ -328,15 +363,6 @@ void VKQ_iOS_MouseDiag (void)
 // VKQ_EMULATE_EXTERNAL_DISPLAY=1 (environment; read by SDL as a hint too) treats
 // the main screen as external: the simulator's external screen only mirrors, so
 // this is the one way to run the path on a Mac (scripts/sim-verify-issue7.sh).
-static BOOL vkq_emulate_external (void)
-{
-	const char *e = getenv ("VKQ_EMULATE_EXTERNAL_DISPLAY");
-	return e && *e && *e != '0';
-}
-static BOOL vkq_scene_is_external (UIWindowScene *ws)
-{
-	return ws && ws.screen && (ws.screen != UIScreen.mainScreen || vkq_emulate_external ());
-}
 static NSUInteger vkq_orientations_for_window (id self, SEL _cmd, UIApplication *app, UIWindow *window)
 {
 	if (vkq_scene_is_external (window.windowScene))
@@ -420,6 +446,21 @@ void VKQ_iOS_MouseDiag (void)
 	Con_Printf ("vkq_mouse: not applicable on visionOS\n");
 }
 #endif // !VKQ_VISIONOS
+
+// "vkQuake <CFBundleShortVersionString> (<CFBundleVersion>)" — first line of
+// vkq_mouse and the last of `version` (issue #7: iPadOS Settings shows no app
+// version, so a player cannot tell which build they are reporting on).
+const char *VKQ_iOS_AppVersion (void)
+{
+	static char buf[128];
+	static dispatch_once_t once;
+	dispatch_once (&once, ^{
+		NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+		NSString *v = [NSString stringWithFormat:@"vkQuake %@ (%@)", info[@"CFBundleShortVersionString"] ?: @"?", info[@"CFBundleVersion"] ?: @"?"];
+		snprintf (buf, sizeof (buf), "%s", v.UTF8String);
+	});
+	return buf;
+}
 
 @interface VKQTouchView : UIView
 - (void)applyAppearance:(CGFloat)scale opacity:(CGFloat)op;

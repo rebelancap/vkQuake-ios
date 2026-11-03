@@ -58,8 +58,15 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    reporter asks: print CFBundleShortVersionString/CFBundleVersion in `vkq_mouse`
    (iOS Settings shows no version). Then 1.2.1.3 test build (OTA_PUBLIC_GATE=1).
    Pointer lock on the external display is still not granted (Apple policy).
-3'. Reporter on #8 (1.2.1.2): other servers "work well"; noticed the `*` rows. Wait for
-   more results of 1.2.1.2 (#7 external display, #8 servers incl. TF and
+3'. **#8 round 3 (reporter condump on 1.2.1.2):** CTF download worked, `*` rows refuse
+   cleanly. BUGS: (a) game dir sticks after moddl's `game hipnotic` → every later
+   join "gamedir mismatch", a map was installed into hipnotic/maps; (b) stale
+   "moddl: a download is already in progress" after an abandoned TF plan blocked
+   AirQuake/Copper downloads; (c) hipnotic server 192.99.32.215:27501 stalled on the
+   loading screen after the switch+rejoin (no error); (d) noise: `Unknown command
+   "fullserverinfo"`, `UDP_Write, sendto: No route to host` bursts. Read-only Opus
+   diagnosis in flight on the oracle; fix round follows on `dp7` once the tree is free
+   (after #7 round 3 + the DP7 bounds fixes), then 1.2.1.3. (#7 external display, #8 servers incl. TF and
    pieter). If #7 is still rotated, read the `vkq_mouse` paste (expect external scene
    orient=portrait, bounds 3008x1692, drawable 6016x3384, supported=0x2).
 3a. DarkPlaces support — APPROVED by Austin. Plan: docs/DP7-PLAN.md on branch

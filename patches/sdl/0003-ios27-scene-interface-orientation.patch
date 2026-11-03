@@ -48,10 +48,10 @@ index 3db7f9b..f68a7cd 100644
  extern void UIKit_SetGameControllerInteraction(bool enabled);
  extern void UIKit_SetViewGameControllerInteraction(UIView *view, bool enabled);
 diff --git a/src/video/uikit/SDL_uikitvideo.m b/src/video/uikit/SDL_uikitvideo.m
-index 97aeb94..4bd776a 100644
+index 97aeb94..9ac81cb 100644
 --- a/src/video/uikit/SDL_uikitvideo.m
 +++ b/src/video/uikit/SDL_uikitvideo.m
-@@ -210,6 +210,58 @@ SDL_SystemTheme UIKit_GetSystemTheme(void)
+@@ -210,6 +210,67 @@ SDL_SystemTheme UIKit_GetSystemTheme(void)
      return SDL_SYSTEM_THEME_UNKNOWN;
  }
  
@@ -70,14 +70,23 @@ index 97aeb94..4bd776a 100644
 + * the unrotated, native one (a 6016x3384 monitor reports portrait with 3008x1692 pt
 + * bounds), "landscape" turns the scene 90 degrees (landscape-right with 1692x3008
 + * pt bounds, which is what a landscape-only app got: the game drawn sideways).
++ * The test is the PANEL, not "screen != mainScreen": on iPadOS 27.2 (reporter's
++ * iPad Pro M5 + 6016x3384 monitor) the monitor IS [UIScreen mainScreen] while the
++ * game is on it, and UIScreen.screens lists only it. Every iPhone/iPad panel is
++ * portrait-native (nativeBounds e.g. 2064x2752); an external monitor is
++ * landscape-native (6016x3384). "Not the main screen" is kept as well.
 + * VKQ_EMULATE_EXTERNAL_DISPLAY=1 (env/hint, test only) treats the main screen the
-+ * same way so the simulator, whose external screen only mirrors, can exercise it. */
++ * same way so the simulator, whose external screen only mirrors, can exercise it.
++ * Keep in step with vkq_external_reason() in the vkquake shell (ios_touch.m). */
 +BOOL UIKit_IsExternalDisplayScene(UIWindowScene *scene)
 +{
 +    if (!scene || !scene.screen) {
 +        return NO;
 +    }
-+    return scene.screen != [UIScreen mainScreen] || SDL_GetHintBoolean("VKQ_EMULATE_EXTERNAL_DISPLAY", false);
++    UIScreen *screen = scene.screen;
++    CGSize native = screen.nativeBounds.size;
++    return native.width > native.height || screen != [UIScreen mainScreen] ||
++           SDL_GetHintBoolean("VKQ_EMULATE_EXTERNAL_DISPLAY", false);
 +}
 +
 +UIInterfaceOrientation UIKit_GetInterfaceOrientation(UIWindow *uiwindow)
@@ -110,7 +119,7 @@ index 97aeb94..4bd776a 100644
  #ifdef SDL_PLATFORM_VISIONOS
  CGRect UIKit_ComputeViewFrame(SDL_Window *window)
  {
-@@ -237,7 +289,7 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
+@@ -237,7 +298,7 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
       * https://bugzilla.libsdl.org/show_bug.cgi?id=3505
       * https://bugzilla.libsdl.org/show_bug.cgi?id=3465
       * https://forums.developer.apple.com/thread/65337 */
@@ -120,10 +129,22 @@ index 97aeb94..4bd776a 100644
                      !(UIKit_GetSupportedOrientations(window) & (UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown));
      BOOL fullscreen = CGRectEqualToRect(screen.bounds, frame);
 diff --git a/src/video/uikit/SDL_uikitwindow.m b/src/video/uikit/SDL_uikitwindow.m
-index 0ee7364..8aeebc5 100644
+index 0ee7364..b9910e5 100644
 --- a/src/video/uikit/SDL_uikitwindow.m
 +++ b/src/video/uikit/SDL_uikitwindow.m
-@@ -450,6 +450,20 @@ void UIKit_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int
+@@ -86,7 +86,10 @@ static bool SetupWindowData(SDL_VideoDevice *_this, SDL_Window *window, UIWindow
+ #endif
+ 
+ #if !defined(SDL_PLATFORM_TVOS) && !defined(SDL_PLATFORM_VISIONOS)
+-    if (displaydata.uiscreen == [UIScreen mainScreen]) {
++    /* vkquake-ios issue #7: an external (landscape-native) panel can BE the main
++     * screen on iPadOS 27; there the window keeps the panel's shape (wide) while
++     * the supported mask is Portrait (= native), so never swap it to tall. */
++    if (displaydata.uiscreen == [UIScreen mainScreen] && !UIKit_IsExternalDisplayScene(uiwindow.windowScene)) {
+         NSUInteger orients = UIKit_GetSupportedOrientations(window);
+         BOOL supportsLandscape = (orients & UIInterfaceOrientationMaskLandscape) != 0;
+         BOOL supportsPortrait = (orients & (UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown)) != 0;
+@@ -450,6 +453,20 @@ void UIKit_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int
          if ((validOrientations & orientationMask) == 0) {
              orientationMask = validOrientations;
          }
