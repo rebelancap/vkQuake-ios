@@ -44,7 +44,7 @@
 +#endif /* _CL_DP7_H */
 --- a/Quake/cl_dp7.c
 +++ b/Quake/cl_dp7.c
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,713 @@
 +/*
 +Copyright (C) 1996-2001 Id Software, Inc.
 +Copyright (C) 2000-2020 DarkPlaces contributors
@@ -558,8 +558,12 @@
 +	for (i = 0; i < 3; i++)
 +		pos[i] = MSG_ReadCoord (cl.protocolflags);
 +
-+	if (sound_num >= MAX_SOUNDS)
++	// a read past the end returns -1 (and sets msg_badread): never index with it
++	if (msg_badread || sound_num < 0 || sound_num >= MAX_SOUNDS || ent < 0 || channel < 0)
++	{
++		Con_DPrintf ("DP7 svc_sound: bad sound %i / entity %i / channel %i, ignored\n", sound_num, ent, channel);
 +		return;
++	}
 +	if (ent >= cl.max_edicts)
 +		ent = 0; // an entity we can't hold: play it at its position as a world sound
 +	S_StartSound (ent, channel, cl.sound_precache[sound_num], pos, volume / 255.0, attenuation);
@@ -800,7 +804,19 @@
  {
  	int i;
  	int bits; // johnfitz
-@@ -1797,7 +1800,7 @@
+@@ -1642,6 +1645,11 @@
+ 	ent->baseline.modelindex = (bits & B_LARGEMODEL) ? MSG_ReadShort () : MSG_ReadByte ();
+ 	ent->baseline.frame = (bits & B_LARGEFRAME) ? MSG_ReadShort () : MSG_ReadByte ();
+ 	// johnfitz
++	if (ent->baseline.modelindex >= MAX_MODELS) // a short (or a bad read) can exceed cl.model_precache[]
++	{
++		Con_DPrintf ("CL_ParseBaseline: model %i out of range, using none\n", ent->baseline.modelindex);
++		ent->baseline.modelindex = 0;
++	}
+ 
+ 	ent->baseline.colormap = MSG_ReadByte ();
+ 	ent->baseline.skin = MSG_ReadByte ();
+@@ -1797,7 +1805,7 @@
  CL_ParseStatic
  =====================
  */
@@ -809,7 +825,7 @@
  {
  	entity_t *ent;
  	int		  i;
-@@ -1846,7 +1849,7 @@
+@@ -1846,7 +1854,7 @@
  CL_ParseStaticSound
  ===================
  */
@@ -818,7 +834,19 @@
  {
  	vec3_t org;
  	int	   sound_num, vol, atten;
-@@ -1873,7 +1876,7 @@
+@@ -1865,6 +1873,11 @@
+ 	vol = MSG_ReadByte ();
+ 	atten = MSG_ReadByte ();
+ 
++	if (sound_num < 0 || sound_num >= MAX_SOUNDS) // a short (or a bad read) can exceed cl.sound_precache[]
++	{
++		Con_DPrintf ("CL_ParseStaticSound: sound %i out of range, ignored\n", sound_num);
++		return;
++	}
+ 	S_StaticSound (cl.sound_precache[sound_num], org, vol, atten);
+ }
+ 
+@@ -1873,7 +1886,7 @@
  
  spike -- added this mostly for particle effects, but its also used for models+sounds (if needed)
  */
@@ -827,7 +855,7 @@
  {
  	unsigned short code = MSG_ReadShort ();
  	unsigned int   index = code & 0x3fff;
-@@ -2042,7 +2045,7 @@
+@@ -2042,7 +2055,7 @@
  {
  	CL_ParseStatNumeric (stat, fval, fval);
  }
@@ -836,21 +864,21 @@
  {
  	CL_ParseStatNumeric (stat, ival, ival);
  }
-@@ -2119,6 +2122,14 @@
- 		if (cmd < (int)NUM_SVC_STRINGS)
- 		{
+@@ -2121,6 +2134,14 @@
  			SHOWNET (svc_strings[cmd]);
-+		}
-+
+ 		}
+ 
 +		// vkquake-ios 0036: DarkPlaces protocol 7 first -- its 52/54/56 are the
 +		// rerelease's achievement/levelcompleted/localsound in the switch below
 +		if (cl.protocol == PROTOCOL_DP7 && CLDP7_ParseCommand (cmd))
 +		{
 +			lastcmd = cmd;
 +			continue;
- 		}
- 
++		}
++
  		// other commands
+ 		switch (cmd)
+ 		{
 --- a/Quake/cl_input.c
 +++ b/Quake/cl_input.c
 @@ -25,6 +25,7 @@
