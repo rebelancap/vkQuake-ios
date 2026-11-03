@@ -9,7 +9,7 @@
  	{
  		// Work around https://github.com/sezero/quakespasm/issues/48
  		int width, height;
-@@ -360,6 +360,19 @@
+@@ -360,9 +360,75 @@
  // keyboard and feeds characters back via VKQ_TouchChar / VKQ_TouchKey.
  extern void VKQ_iOS_SetTextActive (int active);
  static void IN_TouchLook_f (void); // defined with the touch bridge below
@@ -29,7 +29,63 @@
  static void IN_TouchEdit_f (void);  // ditto
  static void IN_FakeTouch_f (void);  // ditto
  static void IN_UIAction_f (void);   // ditto (issue #5: console by touch)
-@@ -392,11 +405,15 @@
++// `vkq_fakemouseclick <x 0..1> <y 0..1> [touchid]` — a hardware-mouse left click
++// as SDL3 delivers it on iOS (the sim cannot present a GCMouse): absolute motion,
++// button down, the synthetic SDL_EVENT_FINGER_DOWN that SDL_HINT_MOUSE_TOUCH_EVENTS
++// pairs with it (touchID = SDL_MOUSE_TOUCHID), button up, finger up. Pushed through
++// the normal queue so the event filter and IN_Commands see exactly that sequence.
++// Passing another touchid (e.g. 7) makes the synthetic finger look real — the
++// pre-fix behaviour, where every menu click fired twice (issue #6 follow-up).
++static void IN_FakeMouseClick_f (void)
++{
++	SDL_Window *win = SDL3_GET_WINDOW;
++	SDL_Event	ev;
++	SDL_TouchID tid = SDL_MOUSE_TOUCHID;
++	float		nx, ny;
++	int			w = 0, h = 0, i;
++	if (Cmd_Argc () < 3 || Cmd_Argc () > 4 || !win)
++	{
++		Con_Printf ("vkq_fakemouseclick <x 0..1> <y 0..1> [touchid]\n");
++		return;
++	}
++	nx = (float)atof (Cmd_Argv (1));
++	ny = (float)atof (Cmd_Argv (2));
++	if (Cmd_Argc () == 4)
++		tid = (SDL_TouchID)strtoll (Cmd_Argv (3), NULL, 10);
++	SDL_GetWindowSize (win, &w, &h);
++	SDL_zero (ev);
++	ev.type = SDL_EVENT_MOUSE_MOTION;
++	ev.motion.windowID = SDL_GetWindowID (win);
++	ev.motion.x = nx * (float)w;
++	ev.motion.y = ny * (float)h;
++	SDL_PushEvent (&ev);
++	for (i = 0; i < 2; i++)
++	{
++		SDL_zero (ev);
++		ev.type = i ? SDL_EVENT_MOUSE_BUTTON_UP : SDL_EVENT_MOUSE_BUTTON_DOWN;
++		ev.button.windowID = SDL_GetWindowID (win);
++		ev.button.button = SDL_BUTTON_LEFT;
++		ev.button.down = !i;
++		ev.button.clicks = 1;
++		ev.button.x = nx * (float)w;
++		ev.button.y = ny * (float)h;
++		SDL_PushEvent (&ev);
++		SDL_zero (ev);
++		ev.type = i ? SDL_EVENT_FINGER_UP : SDL_EVENT_FINGER_DOWN;
++		ev.tfinger.windowID = SDL_GetWindowID (win);
++		ev.tfinger.touchID = tid;
++		ev.tfinger.fingerID = SDL_BUTTON_LEFT;
++		ev.tfinger.x = nx;
++		ev.tfinger.y = ny;
++		ev.tfinger.pressure = i ? 0.0f : 1.0f;
++		SDL_PushEvent (&ev);
++	}
++	Con_Printf ("fakemouseclick: (%.3f,%.3f) window %dx%d synthetic touchid %lld\n", nx, ny, w, h, (long long)tid);
++}
+ // Shell still uses this to position SDL's view-shift when the native keyboard shows.
+ void VKQ_iOS_SetTextInputRect (int x, int y, int w, int h)
+ {
+@@ -392,24 +458,34 @@
  #endif
  
  #ifdef VKQ_IOS
@@ -50,7 +106,14 @@
  	// The menu is driven straight from finger events (in_sdl3.c) — SDL's touch->mouse
  	// synthesis freezes at the first tap's position on this hardware, so every menu
  	// tap stuck on the first item. Turn the synthesis OFF so its stale-position mouse
-@@ -407,6 +424,7 @@
+ 	// buttons don't also fire spurious menu clicks.
+ 	SDL_SetHint (SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
++	// ... and the reverse: SDL3 on iOS defaults mouse->touch synthesis ON, which
++	// doubled every hardware-mouse menu click (issue #6 follow-up). in_sdl3.c also
++	// drops any synthetic finger by touch id, so this is belt and braces.
++	SDL_SetHint (SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+ 	// Console seam for the touch look bridge. Without it the touch aim path is
+ 	// unreachable from the console — on a simulator synthetic events bypass
  	// UIKit entirely, so a touch-look regression could never be caught without
  	// hands on glass. Feeds the same accumulator a finger drag does.
  	Cmd_AddCommand ("vkq_touchlook", IN_TouchLook_f);
@@ -58,9 +121,30 @@
  	Cmd_AddCommand ("touchedit", IN_TouchEdit_f);
  	Cmd_AddCommand ("vkq_faketouch", IN_FakeTouch_f);
  	Cmd_AddCommand ("vkq_ui", IN_UIAction_f);
++	Cmd_AddCommand ("vkq_fakemouseclick", IN_FakeMouseClick_f);
+ #endif
+ 	if (safemode || COM_CheckParm ("-nomouse"))
+ 	{
 --- a/Quake/in_sdl3.c
 +++ b/Quake/in_sdl3.c
-@@ -375,7 +375,23 @@
+@@ -298,6 +298,16 @@
+ 		case SDL_EVENT_FINGER_DOWN:
+ 		case SDL_EVENT_FINGER_MOTION:
+ 		case SDL_EVENT_FINGER_UP:
++			// Issue #6 follow-up: only REAL fingers drive the menu. On iOS SDL3
++			// defaults SDL_HINT_MOUSE_TOUCH_EVENTS to on, so a hardware-mouse click
++			// also arrives as a synthetic finger on SDL_MOUSE_TOUCHID — on top of
++			// the SDL_EVENT_MOUSE_BUTTON_* that already sent K_MOUSE1 — and every
++			// menu click fired twice. Apple Pencil does the same pairing
++			// (SDL_PEN_MOUSEID button + SDL_PEN_TOUCHID finger). Those clicks keep
++			// their single K_MOUSE1 path; the pointer position comes from
++			// M_MouseHover. UIKit finger touches never carry these reserved ids.
++			if (event.tfinger.touchID == SDL_MOUSE_TOUCHID || event.tfinger.touchID == SDL_PEN_TOUCHID)
++				break;
+ 			M_TouchEvent (
+ 				event.tfinger.x * (float)glwidth, event.tfinger.y * (float)glheight,
+ 				(event.type == SDL_EVENT_FINGER_DOWN) ? 0 : ((event.type == SDL_EVENT_FINGER_MOTION) ? 1 : 2));
+@@ -375,7 +385,23 @@
  			int x, y;
  			IN_ScaleMouseCoords (event->motion.x, event->motion.y, &x, &y);
  			Con_Mousemove (x, y);

@@ -58,7 +58,9 @@ ls -lh "$DOCS/rerelease/id1/pak0.pak"
 # reach the engine through the scene-grafted SDL main path (tried; crash
 # persisted). Real devices support indirect draws; the shipped build and its
 # data are untouched — this file exists only in the sim container.
-printf 'r_indirect 0\n' > "$DOCS/rerelease/id1/autoexec.cfg"
+# volume/bgmvolume 0: anything launched for testing on this Mac must be silent
+# (~/.claude/CLAUDE.md). Sim container only; the shipped defaults are untouched.
+printf 'r_indirect 0\nvolume 0\nbgmvolume 0\n' > "$DOCS/rerelease/id1/autoexec.cfg"
 
 echo "== launch (bridge enabled)"
 # MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0: on the SIMULATOR, MoltenVK's Metal
