@@ -1,0 +1,311 @@
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -621,13 +621,15 @@
+ 		}
+ 	}
+ }
++
++static double CL_ServerTimeFromWire (float sent); // vkquake-ios issue #8
+ 
+ static void CLFTE_ParseEntitiesUpdate (void)
+ {
+ 	int		  newnum;
+ 	qboolean  removeflag;
+ 	entity_t *ent;
+-	float	  newtime;
++	double	  newtime;
+ 
+ 	// so the server can know when we got it, and guess which frames we didn't get
+ 	if (cls.netcon && cl.ackframes_count < countof (cl.ackframes))
+@@ -641,7 +643,7 @@
+ 		cl.ackedmovemessages = seq;
+ 	}
+ 
+-	newtime = MSG_ReadFloat ();
++	newtime = CL_ServerTimeFromWire (MSG_ReadFloat ()); // vkquake-ios issue #8
+ 	if (newtime != cl.mtime[0])
+ 	{ // don't mess up lerps if the server is splitting entities into multiple packets.
+ 		cl.mtime[1] = cl.mtime[0];
+@@ -914,7 +916,48 @@
+ 	SZ_Clear (&cls.message);
+ }
+ #endif
++
++/*
++ * vkquake-ios (issue #8): svc_time is a 32-bit float. A server whose map has run
++ * for weeks (an empty server never changes level) sends a time whose float
++ * granularity is coarse: >= 2^21 s (24 days) it is 0.25 s, >= 2^22 s 0.5 s. Every
++ * update in between repeats the same time, so CL_LerpPoint pins cl.time to it and
++ * everything clocked by cl.time -- sky scroll, entity lerp, view bob -- steps at
++ * 2-4 Hz while the renderer runs at 120 fps. Measured on "CSH NetQuake"
++ * (svc_time 2568646.5, 4 distinct times per second).
++ *
++ * Rebuild the missing fraction from our own clock: carry the previous server time
++ * forward by the local time since that packet, and keep it inside the rounding
++ * interval of the float the server actually sent. Fine-grained times (anything a
++ * map younger than ~36 hours produces, ulp < 1/64 s) and all demo playback pass
++ * through untouched.
++ */
++static double cl_svctime_realtime; // realtime at which the server time last advanced
++
++static double CL_ServerTimeFromWire (float sent)
++{
++	const double t = sent;
++	const double half = ((double)nextafterf (sent, INFINITY) - t) * 0.5;
++	const double prev = cl.mtime[0];
++	const double elapsed = realtime - cl_svctime_realtime;
++	double		 est;
+ 
++	if (half < (0.5 / 64.0) || cls.demoplayback || cls.timedemo || prev <= 0.0 || elapsed > 1.0)
++	{
++		cl_svctime_realtime = realtime;
++		return t; // fine-grained (or no history): exactly as upstream
++	}
++	if (elapsed <= 0.0)
++		return prev; // another packet in the same client frame (split update)
++	cl_svctime_realtime = realtime;
++	est = prev + elapsed;
++	// the server's real clock lies within the rounding interval of what it sent
++	return CLAMP (t - half, est, t + half);
++}
++
++// vkquake-ios (issue #8): a .bsp model precache arrived after R_NewMap ran
++static qboolean cl_late_bmodel_precache;
++
+ /*
+ ==================
+ CL_ParseServerInfo
+@@ -945,6 +988,7 @@
+ 	// wipe the client_state_t struct
+ 	//
+ 	CL_ClearState ();
++	cl_late_bmodel_precache = false;
+ 
+ 	if (sv.loadgame)
+ 		V_StopPitchDrift ();
+@@ -1162,7 +1206,18 @@
+ #endif
+ 
+ 			Con_Printf ("\nThis server is running %s \"%s\", which you do not have.\n", ismap ? "a map" : "a model", missing);
+-			Con_Printf ("vkQuake cannot download game content from servers; you need the file installed.\n\n");
++			// vkquake-ios (issue #8): the old second line said downloads are impossible,
++			// which reads as a bug now that 0028 fetches maps. Say what actually applies.
++			if (!ismap && *gamedir && !COM_GameDirMatches (gamedir))
++				Con_Printf ("It belongs to the mod \"%s\". Install that mod's folder next to id1 to join.\n\n", gamedir);
++			else if (!ismap)
++				Con_Printf ("Models and mods are not downloaded automatically; install the mod to join.\n\n");
++			else
++#ifdef VKQ_IOS
++				Con_Printf ("The map could not be fetched automatically (see the mapdl lines above).\n\n");
++#else
++				Con_Printf ("vkQuake cannot download game content from servers; you need the file installed.\n\n");
++#endif
+ 
+ 			// m_return_reason is 32 bytes and is drawn at y=148 on the join screens,
+ 			// which is exactly where "No Response" already appears — so this failure
+@@ -1722,8 +1777,32 @@
+ 	case 0: // models
+ 		if (index < MAX_MODELS)
+ 		{
+-			cl.model_precache[index] = Mod_ForName (name, false);
+-			// FIXME: if its a bsp model, generate lightmaps.
++			qmodel_t *m = Mod_ForName (name, false);
++			qboolean  known = false; // already in the list R_NewMap built from (e.g. a resend)
++			for (int k = 1; m && k < MAX_MODELS && !known; k++)
++				known = (cl.model_precache[k] == m);
++			cl.model_precache[index] = m;
++			/*
++			 * vkquake-ios (issue #8): FTE servers send EVERY model precache this way,
++			 * after svc_serverinfo -- so after R_NewMap has already built lightmaps and
++			 * the bmodel vertex buffer from cl.model_precache[]. A late .bsp
++			 * (maps/b_bh25.bsp health box, b_shell0, ...) is then drawn with
++			 * lightmaptexturenum -1: lightmaps[-1].texture == NULL and MoltenVK
++			 * dereferences &NULL->descriptor_set (SIGSEGV at 0xd8) on the first frame.
++			 * During signon nothing has been drawn or linked yet, so rebuild the brush
++			 * data once at the next svc_signonnum. After signon, refuse the model
++			 * (entity invisible) rather than crash.
++			 */
++			if (m && m->type == mod_brush && name[0] != '*' && m != cl.worldmodel && !known)
++			{
++				if (cls.signon < SIGNONS)
++					cl_late_bmodel_precache = true;
++				else
++				{
++					Con_Warning ("late brush model precache \"%s\" after signon; not drawn\n", name);
++					cl.model_precache[index] = NULL;
++				}
++			}
+ 			// FIXME: update static entities with that modelindex
+ 		}
+ 		break;
+@@ -1948,8 +2027,11 @@
+ 			break;
+ 
+ 		case svc_time:
++		{
++			const double t = CL_ServerTimeFromWire (MSG_ReadFloat ());
+ 			cl.mtime[1] = cl.mtime[0];
+-			cl.mtime[0] = MSG_ReadFloat ();
++			cl.mtime[0] = t;
++		}
+ 			if (cl.protocol_pext2 & PEXT2_PREDINFO)
+ 				MSG_ReadShort (); // input sequence ack.
+ 			break;
+@@ -2075,7 +2157,13 @@
+ 		case svc_updatename:
+ 			i = MSG_ReadByte ();
+ 			if (i >= cl.maxclients)
+-				Host_Error ("CL_ParseServerMessage: svc_updatename > MAX_SCOREBOARD");
++			{
++				// vkquake-ios (issue #8): FTE can deliver scoreboard updates before
++				// svc_serverinfo (cl.maxclients still 0). Discard, don't disconnect.
++				Con_DPrintf ("svc_updatename for slot %i of %i ignored\n", i, cl.maxclients);
++				MSG_ReadString ();
++				break;
++			}
+ 			q_strlcpy (cl.scores[i].name, MSG_ReadString (), MAX_SCOREBOARDNAME);
+ 			Info_SetKey (cl.scores[i].userinfo, sizeof (cl.scores[i].userinfo), "name", cl.scores[i].name);
+ 			break;
+@@ -2083,14 +2171,22 @@
+ 		case svc_updatefrags:
+ 			i = MSG_ReadByte ();
+ 			if (i >= cl.maxclients)
+-				Host_Error ("CL_ParseServerMessage: svc_updatefrags > MAX_SCOREBOARD");
++			{
++				Con_DPrintf ("svc_updatefrags for slot %i of %i ignored\n", i, cl.maxclients); // issue #8
++				MSG_ReadShort ();
++				break;
++			}
+ 			cl.scores[i].frags = MSG_ReadShort ();
+ 			break;
+ 
+ 		case svc_updatecolors:
+ 			i = MSG_ReadByte ();
+ 			if (i >= cl.maxclients)
+-				Host_Error ("CL_ParseServerMessage: svc_updatecolors > MAX_SCOREBOARD");
++			{
++				Con_DPrintf ("svc_updatecolors for slot %i of %i ignored\n", i, cl.maxclients); // issue #8
++				MSG_ReadByte ();
++				break;
++			}
+ 			cl.scores[i].colors = MSG_ReadByte ();
+ 			CL_NewTranslation (i);
+ 			Info_SetKey (cl.scores[i].userinfo, sizeof (cl.scores[i].userinfo), "topcolor", va ("%d", cl.scores[i].colors >> 4));
+@@ -2134,6 +2230,12 @@
+ 			if (i <= cls.signon)
+ 				Host_Error ("Received signon %i when at %i", i, cls.signon);
+ 			cls.signon = i;
++			if (cl_late_bmodel_precache)
++			{
++				cl_late_bmodel_precache = false;
++				R_NewMap ();		   // vkquake-ios (issue #8): include late .bsp precaches
++				R_RebuildAllEfrags (); // R_NewMap unlinks static-entity efrags; relink any already parsed
++			}
+ 			// johnfitz -- if signonnum==2, signon packet has been fully parsed, so check for excessive static ents and efrags
+ 			if (i == 2)
+ 			{
+--- a/Quake/cl_main.c
++++ b/Quake/cl_main.c
+@@ -1001,7 +1001,29 @@
+ 	{
+ 		ret = CL_GetMessage ();
+ 		if (ret == -1)
++		{
++			extern char net_reject_reason[64];
++			if (net_reject_reason[0])
++			{
++				// vkquake-ios (issue #8): the server refused us after accepting
++				// (password, full, banned). Back to the join screen with the reason
++				// where "No Response" is shown, not a Host_Error stack trace.
++				extern enum m_state_e m_return_state;
++				extern char			 m_return_reason[32];
++				char				 reason[64];
++				q_strlcpy (reason, net_reject_reason, sizeof (reason));
++				net_reject_reason[0] = 0;
++				q_strlcpy (m_return_reason, reason, sizeof (m_return_reason));
++				key_dest = key_menu;
++				m_state = (m_return_state == m_slist || m_return_state == m_lanconfig) ? m_return_state : m_main;
++				IN_Deactivate (true);
++				// Host_Connect_f raised the loading plaque; with it up SCR_UpdateScreen
++				// draws nothing (menu included) until its 60 s "load failed" timeout.
++				SCR_EndLoadingPlaque ();
++				Host_EndGame ("Server refused the connection: %s\n", reason);
++			}
+ 			Host_Error ("CL_ReadFromServer: lost server connection");
++		}
+ 		if (!ret)
+ 			break;
+ 
+--- a/Quake/net_dgrm.c
++++ b/Quake/net_dgrm.c
+@@ -510,6 +510,8 @@
+ 
+ 	return NULL;
+ }
++
++char net_reject_reason[64]; // vkquake-ios (issue #8): set when the peer sends CCREP_REJECT
+ 
+ int Datagram_GetMessage (qsocket_t *sock)
+ {
+@@ -559,7 +561,30 @@
+ 		length &= NETFLAG_LENGTH_MASK;
+ 
+ 		if (flags & NETFLAG_CTL)
++		{
++			/*
++			 * vkquake-ios (issue #8): a server that ACCEPTED the connection can still
++			 * refuse us on the data channel -- FTE answers the "challengeconnect"
++			 * handshake with CCREP_REJECT ("Server requires a password", "Server is
++			 * full", ...). Dropping it here left the client resending its reliable
++			 * message once a second until net_messagetimeout (300 s): a loading
++			 * screen that never ends while the menu still works.
++			 */
++			const byte *ctl = (const byte *)&packetBuffer + 4; // after the length/flags word
++			if (length > 5 && ctl[0] == CCREP_REJECT)
++			{
++				int n = q_min ((int)length - 5, (int)sizeof (net_reject_reason) - 1);
++				memcpy (net_reject_reason, ctl + 1, n);
++				net_reject_reason[n] = 0;
++				n = (int)strcspn (net_reject_reason, "\r\n");
++				net_reject_reason[n] = 0;
++				if (!net_reject_reason[0])
++					q_strlcpy (net_reject_reason, "Connection refused", sizeof (net_reject_reason));
++				Con_Printf ("Server refused the connection: %s\n", net_reject_reason);
++				return -1;
++			}
+ 			continue;
++		}
+ 
+ 		sequence = BigLong (packetBuffer.sequence);
+ 		packetsReceived++;
+@@ -1908,6 +1933,21 @@
+ 				Info_ReadKey (info, "sv_maxclients", tmp, sizeof (tmp));
+ 				hostcache[n].maxusers = atoi (tmp);
+ 				Info_ReadKey (info, "protocol", tmp, sizeof (tmp));
++				{
++					/*
++					 * vkquake-ios (issue #8): mark the rows a join cannot succeed on, with
++					 * the same leading '*' upstream already uses for a protocol mismatch:
++					 * password-protected servers (FTE refuses after accepting) and
++					 * DarkPlaces servers that do not advertise an NQ protocol (they answer
++					 * with DP7, "Server returned version 3504").
++					 */
++					char needpass[8], gamename[32], nqprot[16];
++					Info_ReadKey (info, "needpass", needpass, sizeof (needpass));
++					Info_ReadKey (info, "gamename", gamename, sizeof (gamename));
++					Info_ReadKey (info, "nqprotocol", nqprot, sizeof (nqprot));
++					if (atoi (needpass) || (!q_strcasecmp (gamename, "DarkPlaces-Quake") && !*nqprot))
++						q_strlcpy (tmp, "0", sizeof (tmp)); // fall into the incompatible branch below
++				}
+ 				if (atoi (tmp) != NET_PROTOCOL_VERSION)
+ 				{
+ 					q_strlcpy (hostcache[n].cname, hostcache[n].name, sizeof (hostcache[n].cname));
+@@ -2089,6 +2129,8 @@
+ 	double			 start_time;
+ 	int				 control;
+ 	const char		*reason;
++
++	net_reject_reason[0] = 0; // vkquake-ios (issue #8): no stale refusal from an earlier server
+ 
+ 	newsock = dfunc.Open_Socket (0);
+ 	if (newsock == INVALID_SOCKET)
