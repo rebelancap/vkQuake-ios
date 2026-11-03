@@ -48,12 +48,18 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 3. Wait for robimart's test of 1.2.1.2 (#7 external display, #8 servers incl. TF and
    pieter). If #7 is still rotated, read the `vkq_mouse` paste (expect external scene
    orient=portrait, bounds 3008x1692, drawable 6016x3384, supported=0x2).
-3a. DarkPlaces protocol 7 support — APPROVED by Austin 2026-11-03 ("if it doesn't
-   harm anything else"). Phase 0 in flight: Opus planning agent writes
-   docs/DP7-PLAN.md on branch `dp7-plan` (survey of live DP servers incl. CSQC use,
-   protocol scope from the DP source, fit into vkQuake, phased plan + estimate,
-   go/no-go). Next: brief Phase A (join/see/move/shoot on an id1 DP server) as overlay
-   patch 0035 on a `dp7` branch, keeping 15/666/999 paths byte-identical.
+3a. DarkPlaces support — APPROVED by Austin. Plan: docs/DP7-PLAN.md on branch
+   `dp7-plan` (d59edfc). Survey 2026-11-03: 26 DP servers listed, 13 answer, 0 players
+   on any; 4 run protocol 15 and are joinable TODAY but our `*` rule stars them
+   (DP never sends `nqprotocol`); 7 are DP7 Quake servers (no CSQC); 2 are Xonotic
+   (CSQC, never joinable). Phase 0 (star rule fix) IN FLIGHT on the RC branch.
+   Phase A next (fresh agent, branch `dp7` from the RC): new cl_dp7.c behind
+   cl.protocol==PROTOCOL_DP7 — entity-delta reader, DP7 clientdata, opcodes 55/56/59,
+   56-byte clc_move + frame acks; ~450 lines, 2 rounds; regression gate = identical
+   timedemo counts + byte-identical move packet for non-DP7. A 230-line Python
+   prototype in the plan's Appendix A already joined/walked/fired on 4 live DP7
+   servers; a local DP dedicated server builds in 3 s for deterministic tests.
+   Phase B (effects, DP7 demos) later; Phase C (CSQC) no-go.
 3c. Later candidates: NetQuake.io in-protocol download (`cl_serverextension_download`);
    #7 split-scene idea (input scene on iPad + render scene on external display, how
    Jump Desktop does it) if pointer lock on external displays matters; 0026's
@@ -75,6 +81,7 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-Opus planning agent in flight: docs/DP7-PLAN.md on branch `dp7-plan` (read-only
-otherwise, oracle only, no sims). Branches pushed: issue-6-7-followup (1.2.1.1),
-mod-download, issue-7-external-display (1.2.1.2, RC). `main` = `origin/main` = v1.2.1.
+Opus agent in flight: DP7 Phase 0 (browser star rule) on branch
+`issue-7-external-display`; owns the tree + iPhone Air (lane 2). Branches pushed:
+issue-6-7-followup, mod-download, issue-7-external-display (RC, 1.2.1.2), dp7-plan.
+`main` = `origin/main` = v1.2.1.
