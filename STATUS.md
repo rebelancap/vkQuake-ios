@@ -8,41 +8,39 @@ the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/) and the SideStore so
 Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` holds the
 unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
 
-## Last round (2026-11-03) — issue #6 follow-up + issue #7, branch `issue-6-7-followup` (pushed, NOT merged)
-- **Reporter replies after the branch was pushed (2026-11-03 10:10–15:40 UTC), not
-  yet acted on:** iPad Pro M5, iPadOS 27.2. Turning OFF Stage Manager fixed the
-  mouse on the iPad screen instantly (pointer locked, no acceleration), even with the
-  external display still attached — confirms the diagnosis. On the EXTERNAL display
-  pointer lock never engages (windowed or full screen) and the game stays rotated 90°
-  with Stage Manager on or off (#7). New niggle on #6: in menus each mouse click
-  registers as a double-click (likely both the SDL mouse-button path and the
-  indirect-pointer touch path in `ios_touch.m` firing — check `vkq_direct_touches`
-  / the `!SDL_HasMouse()` gate, or the engine's `M_Keydown` K_MOUSE1 + touch
-  activation). New issue **#8**: public multiplayer — crash on join, stuck on
-  loading screen, jerky at claimed 120 fps (skybox pans at ~3 fps), and "map can't
-  be downloaded" errors (see MP map downloads memory: Tier 2 download open).
-  No replies posted to #6-niggle, #7 round 2, or #8 yet.
-- robimart on 1.2.1: bindings + touch-hiding work, but the pointer stays visible and
-  motion stops at the screen edge (= iPadOS did not grant pointer lock); aim feels
-  accelerated. New issue #7: on an external 4K display the game is drawn rotated 90°.
-- Pointer lock is granted only to a FULL-SCREEN foregroundActive scene (Apple doc);
-  an external display forces Stage Manager / windowing, so their scene was not
-  eligible. Proven on the iPad Air 13" (M4) sim, iOS 27.0: `vkq_mouse` shows
-  pointerlock=LOCKED in game, unlocked with the console open — our plumbing works.
-- Branch adds: `vkq_mouse` console diagnostic (engine + UIKit state), lock-state
-  logging, re-request of the lock on scene activation / while missing in game, a
-  one-time console notice telling the player iPadOS needs full screen; and for #7 an
-  `application:supportedInterfaceOrientationsForWindow:` on SDL's delegate (any
-  orientation when the scene is not on the main screen). All builds green (visionOS
-  needed a stub). sim-verify ios (iPhone Air) PASS; iPad sim e1m1 + console OK.
-- NOT verified: the external-display fix (sim's external display not drivable from
-  this session) and the lock on the reporter's hardware. Replied on #6 and #7 with
-  the diagnosis and questions.
-- Oddity, pre-existing (A/B with the hook disabled is identical): on the iPad Air 13"
-  sim the engine draws an almost square ~2048x2036 px frame at the top of a portrait
-  buffer while UIKit reports a 1366x1024 pt landscape window and SDL metal view
-  (artifacts/sim/2026-11-03-ipad-*.png). Unknown whether a sim artifact; the reporter
-  has not complained about the iPad's own screen.
+## Last round (2026-11-03 pm) — #6 double-click, #7 external display, #8 multiplayer; 1.2.1.1 test build
+- Branch `issue-6-7-followup` (pushed, NOT merged, now 1.2.1.1 / build 44) carries:
+  - #6 double-click: SDL3 on iOS synthesizes a finger tap from every mouse click
+    (SDL_HINT_MOUSE_TOUCH_EVENTS defaults on); in_sdl3.c now ignores finger events
+    with SDL_MOUSE_TOUCHID / SDL_PEN_TOUCHID, hint set 0 as backstop (patch 0032).
+    `vkq_fakemouseclick <x> <y> [touchid]` replays a click; VERIFIED on the iPhone Air
+    sim: default id = one activation, id 7 = the old double activation
+    (artifacts/sim/2026-11-03-ios-issue8-click-{default,tid7}.png, local only).
+    Side effect: Apple Pencil taps in menus now act like a mouse (no drag-scroll).
+  - #7: orientation hook kept; SDL patch 0003 now derives orientation from scene
+    bounds when the scene is not on the main screen; `vkq_mouse` prints every
+    screen/scene (orientation, bounds, transform, drawable). UNVERIFIED: Simulator.app
+    is not installed on this Mac and the headless external screen captures black.
+  - #8 (patch 0033, verified on the macOS oracle against live servers, and the sim
+    joined q1.pieter.com:27500 with players for 25 s): FTE late .bsp precache → re-run
+    R_NewMap + R_RebuildAllEfrags at signon (upstream bug, crash); CCREP_REJECT on
+    the connected socket now ends the game with the reason (+SCR_EndLoadingPlaque,
+    else LOADING freezes 60 s); scoreboard updates before serverinfo discarded;
+    float svc_time precision loss after ~24 days uptime smoothed by
+    CL_ServerTimeFromWire (4 → 39 time steps/s); browser marks needpass/DarkPlaces
+    rows with `*`; clearer missing-mod-content message. Sonnet review: no findings.
+- 1.2.1.1 OTA published (hub /ota/vkquake/, both platforms) with the gitignored
+  publish-ota.sh's new `OTA_PUBLIC_GATE=1` (dev-numbered build WITHOUT the Remote
+  Console, since the bridge binds INADDR_ANY and the IPA goes to a stranger).
+  Served IPA checked: 1.2.1.1/44, no remoteConsole string.
+- Replies posted on #6 and #7. #8 reply drafted at build/reply-8-1.2.1.1.md; the IPA
+  copy for the issue is build/ota/vkQuake-1.2.1.1-iOS.ipa — gh cannot attach files
+  to issues, so Austin must drag it into the comment (see Open questions).
+- Sim trap today: `simctl terminate` of a NOT-running app hung CoreSimulator for the
+  session (install/launch then hang too); a `simctl shutdown` + `boot` of the device
+  cleared it. sim-verify.sh starts with that terminate — guard it with a timeout.
+- Follow-up candidate from review: the 0026 "map you do not have" exit path also
+  ends the game without SCR_EndLoadingPlaque (same 60 s freeze, untested).
 
 ## Next steps
 1. Perf on device: SSAO now defaults on for GPUs with subgroup ops, and fresh installs
@@ -50,14 +48,11 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    r_ssao 0 / vid_fsaa 0 on iOS.
 2. Device checks the sim can't do: real controller gyro/rumble, headset VR (rebuilt
    present path, depth copy), surface-loss recovery on backgrounding.
-3. Issue #6 double-click in menus, #7 external display (orientation hook on the
-   branch is still the untested candidate; also consider forcing the external
-   scene's geometry via `UIWindowScene.requestGeometryUpdate:` or rendering the
-   external screen as a plain mirror), and #8 multiplayer (reproduce against a
-   public NetQuake server on the sim via the console bridge: `connect <ip>`; watch
-   crash.txt in Documents; the 3-fps skybox at 120 fps smells like net/physics
-   tick coupling, see host_maxfps notes). Reply on all three.
-3b. Release: when Austin OKs, bump to 1.2.2 on `issue-6-7-followup`,
+3. Wait for robimart's test of 1.2.1.1 (#6/#7/#8). If #7 is still rotated, read their
+   `vkq_mouse` paste: a window transform ⇒ UIKit rotation (hook not taking);
+   swapped bounds ⇒ SDL view frame (patch 0003 branch). If #8 still misbehaves,
+   ask for server name + console. Fix 0026's missing-map exit (SCR_EndLoadingPlaque).
+3b. Release: when Austin OKs, set both plists to 1.2.2 (build 45) on `issue-6-7-followup`,
    merge, release (RELEASING.md loop), ask robimart for `vkq_mouse` output and the
    external-display result. If the orientation hook does not fix #7, next candidates:
    log the scene's interfaceOrientation/screen on `windowScene:didUpdateEffectiveGeometry:`
@@ -68,17 +63,13 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- Release the `issue-6-7-followup` branch as 1.2.2 now, or fold in the menu
-  double-click fix (and anything from #7/#8) first? Default if unanswered: wait
-  (release numbers are Austin's call). The reporter cannot reach the OTA hub, so a
-  GitHub release (or an IPA attached to the issue) is the only way they can test.
+- Austin: drag build/ota/vkQuake-1.2.1.1-iOS.ipa into a comment on issue #8 using the
+  text in build/reply-8-1.2.1.1.md (gh has no issue-attachment API). Default if not
+  done: the reporter has no build to test and the round stalls.
+- Release `issue-6-7-followup` as 1.2.2 after the reporter confirms? Default: wait
+  (release numbers are Austin's call).
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-Round in flight (2026-11-03): Opus agent A owns the tree + sims (iPhone Air lane 2,
-iPad Air 13" M4) fixing the #6 menu double-click (SDL mouse→touch synthesis,
-SDL_HINT_MOUSE_TOUCH_EVENTS defaults on for iOS) and retrying #7 on the sim's external
-display; Opus agent B is read-only, diagnosing #8 on the macOS oracle. Plan agreed with
-Austin: fix #6/#7/#8, then ship a 1.2.1.x OTA dev build and attach its IPA to the
-issue for the reporter; public 1.2.2 only after they confirm. Branch
-`issue-6-7-followup` pushed; `main` = `origin/main` = v1.2.1.
+None. Simulators shut down (iPhone Air lane 2, iPad Air 13" M4); no agents running;
+tree clean; `issue-6-7-followup` pushed (1.2.1.1); `main` = `origin/main` = v1.2.1.
