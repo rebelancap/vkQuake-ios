@@ -33,8 +33,9 @@
 #      needs more content gets a fresh attempt instead of "not retrying"
 #  g2. (live) lose that loose model and rejoin: the retry guard is keyed on the
 #      missing SET, so the same server gets a 1-file plan, not a refusal
-#   j. (live) a DarkPlaces-protocol server: one clear console line, no stack
-#      trace, no "Unknown command cl_serverextension_download", back to the menu
+#   j. (live) a DarkPlaces protocol 7 server (overlay 0036): joined, signon 4, no
+#      stack trace / Host_Error / DP7 parse abort, no "Unknown command
+#      cl_serverextension_download" (before 0036 this leg proved a clean refusal)
 #
 # LANE: iPhone Air on iOS 27.0 (lane 2 by default). Never simctl create. The
 # device, the fixture HTTP server and every game server are shut down on every
@@ -564,11 +565,11 @@ fi
 fi
 
 echo
-echo "== (j) LIVE: a DarkPlaces-protocol server -> one clear line, no stack trace, back to the menu (#8)"
+echo "== (j) LIVE: a DarkPlaces protocol 7 server -> joined and in the game (0036; was a clean refusal in 0034)"
 # ===========================================================================
 back_to_id1
 DPSRV=""
-for cand in 5.196.63.132:26000 47.190.124.72:26004 47.190.124.72:26001; do
+for cand in 5.196.63.132:26000 47.190.124.72:26004; do # both DP7 (3504), id1 content
 	if python3 -I - "$cand" <<'PY' >/dev/null 2>&1
 import socket, sys
 h, p = sys.argv[1].rsplit(":", 1)
@@ -583,17 +584,25 @@ if [ -z "$DPSRV" ]; then
 else
 	M=$(mark)
 	say "connect $DPSRV"
-	waitlog 'This server uses the DarkPlaces protocol \(7\), which vkQuake cannot join\.' 60 "$M" \
-		&& pass "(j) $DPSRV: \"This server uses the DarkPlaces protocol (7), which vkQuake cannot join.\"" \
-		|| { fail "(j) no DarkPlaces refusal line"; tail -n +"$M" "$LOG" | tail -12 >&2; }
+	waitlog 'Using protocol 3504' 60 "$M" \
+		&& pass "(j) $DPSRV: \"Using protocol 3504\" (DarkPlaces protocol 7 accepted)" \
+		|| { fail "(j) no DP7 serverinfo"; tail -n +"$M" "$LOG" | tail -12 >&2; }
+	in_game=0
+	for _ in $(seq 1 30); do
+		say 'cl_dp7status'; sleep 2
+		tail -n +"$M" "$LOG" | grep -aq 'dp7: signon 4' && { in_game=1; break; }
+	done
+	[ "$in_game" = 1 ] && pass "(j) in the game: $(tail -n +"$M" "$LOG" | grep -a 'dp7: signon 4' | tail -1)" \
+		|| { fail "(j) never reached signon 4 on the DP7 server"; tail -n +"$M" "$LOG" | tail -12 >&2; }
 	sleep 3
 	tail -n +"$M" "$LOG" | grep -q 'STACK TRACE' && fail "(j) a stack trace was printed" || pass "(j) no stack trace"
 	tail -n +"$M" "$LOG" | grep -q 'Host_Error' && fail "(j) Host_Error" || pass "(j) no Host_Error"
+	tail -n +"$M" "$LOG" | grep -aq 'DarkPlaces server:' && fail "(j) the DP7 parser aborted" || pass "(j) no DP7 parse abort"
 	tail -n +"$M" "$LOG" | grep -q 'Unknown command "cl_serverextension_download"' && fail "(j) \"Unknown command cl_serverextension_download\" printed" \
 		|| pass "(j) DarkPlaces' cl_serverextension_download stufftext is silent"
 	alive && pass "(j) the app is alive" || fail "(j) the app stopped answering"
-	shot 11-j-darkplaces-refused-menu
-	say 'toggleconsole'; sleep 2; shot 12-j-darkplaces-refused-console; say 'toggleconsole'; sleep 1
+	shot 11-j-darkplaces-dp7-in-game
+	say 'disconnect'; sleep 2
 fi
 fi # VKQ_MODDL_LIVE
 

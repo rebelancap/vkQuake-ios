@@ -228,7 +228,7 @@
 +	int			  i, active = 0;
 +	const entity_t *view;
 +
-+	if (cl.protocol != PROTOCOL_DP7)
++	if (cls.state != ca_connected || cl.protocol != PROTOCOL_DP7)
 +	{
 +		Con_Printf ("dp7: not connected to a DarkPlaces protocol 7 server\n");
 +		return;
