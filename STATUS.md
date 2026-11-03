@@ -45,7 +45,13 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    r_ssao 0 / vid_fsaa 0 on iOS.
 2. Device checks the sim can't do: real controller gyro/rumble, headset VR (rebuilt
    present path, depth copy), surface-loss recovery on backgrounding.
-3. **#7 round 3 (NEXT, right after Phase A frees the tree; RC branch):** reporter's
+3. **#7 round 3 DONE on `dp7`** (fix files landed in e94e525 by accident of a `commit -a`
+   on STATUS.md, plus 69d1cf1 = patch 0037 version line; nothing lost). Predicate =
+   landscape-native panel OR not-main-screen OR hint, in SDL 0003
+   (`UIKit_IsExternalDisplayScene`, + SetupWindowData no longer swaps w/h for external)
+   and ios_touch.m `vkq_external_reason()`. `vkq_mouse` prints the app version first
+   and `external=1 reason=landscape-native WxH`. Sim-proven for the hint and the
+   un-hinted paths; the reporter's real case is the hardware test. Original finding: reporter's
    1.2.1.2 dump shows the external panel reported AS `UIScreen.mainScreen` with
    `screens=1` (the iPad's own panel is not listed while the game is on the monitor),
    so `UIKit_IsExternalDisplayScene()` / the shell hook (both keyed on
@@ -102,8 +108,7 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-`dp7` is now the RC line (issue-7-external-display + Phase 0 + Phase A + STATUS commits).
-Opus agent in flight: #7 round 3 (landscape-native predicate + version in vkq_mouse) on
-`dp7`; owns the tree, iPhone Air (lane 2) and iPad Air 13" sims. Sonnet review of
-Phase A in flight (read-only). Then: 1.2.1.3 test build (OTA_PUBLIC_GATE=1).
-`main` = `origin/main` = v1.2.1.
+Opus agent in flight: DP7 bounds fixes on `dp7` (owns the tree). Read-only Opus
+diagnosis of #8 round 3 on the oracle. ORCHESTRATOR RULE: commit STATUS.md by path
+only (`git commit STATUS.md`), never `-a`, while an agent owns the tree.
+`main` = `origin/main` = v1.2.1. RC line = `dp7`.
