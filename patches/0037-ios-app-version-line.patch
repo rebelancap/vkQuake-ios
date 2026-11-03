@@ -1,0 +1,27 @@
+--- a/Quake/host.c
++++ b/Quake/host.c
+@@ -350,6 +350,13 @@
+ 	const char *build_str_suffix = "";
+ #endif
+ 	Con_Printf ("Exe: %s %s %s\n", __TIME__, __DATE__, build_str_suffix);
++#ifdef VKQ_IOS
++	{
++		// issue #7: the app's own version (iOS/iPadOS Settings shows none)
++		extern const char *VKQ_iOS_AppVersion (void);
++		Con_Printf ("%s\n", VKQ_iOS_AppVersion ());
++	}
++#endif
+ }
+ 
+ /* cvar callback functions : */
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -368,6 +368,8 @@
+ 	extern void	   VKQ_iOS_MouseDiag (void);
+ 	SDL_Window	   *win = SDL3_GET_WINDOW;
+ 	SDL_WindowFlags f = win ? SDL_GetWindowFlags (win) : 0;
++	extern const char *VKQ_iOS_AppVersion (void);
++	Con_Printf ("%s\n", VKQ_iOS_AppVersion ()); // issue #7: first line of a player's paste
+ 	Con_Printf ("vkq_mouse (engine): SDL_HasMouse=%d relative=%d no_mouse=%d key_dest=%d input_focus=%d mouse_focus=%d sensitivity=%g\n", SDL_HasMouse () ? 1 : 0,
+ 				win && SDL_GetWindowRelativeMouseMode (win) ? 1 : 0, no_mouse ? 1 : 0, (int)key_dest, (f & SDL_WINDOW_INPUT_FOCUS) ? 1 : 0,
+ 				(f & SDL_WINDOW_MOUSE_FOCUS) ? 1 : 0, sensitivity.value);
