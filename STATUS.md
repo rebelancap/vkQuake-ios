@@ -52,6 +52,15 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    `vkq_mouse` paste: a window transform ⇒ UIKit rotation (hook not taking);
    swapped bounds ⇒ SDL view frame (patch 0003 branch). If #8 still misbehaves,
    ask for server name + console. Fix 0026's missing-map exit (SCR_EndLoadingPlaque).
+3a. Mod content download (Austin approved 2026-11-03, options 1+2): reuse the 0028
+   per-file downloader/consent/rejoin for missing precache MODELS/SOUNDS: (1) a small
+   curated table mapping common public-server mods (fortress, crmod, xmen, airquake,
+   ctf, lq1…) to a package URL + files to install; (2) honor a DarkPlaces/FTE-style
+   `sv_downloadurl`-type server info key and fetch each missing precache file from it.
+   Separate round after the reporter confirms 1.2.1.1; candidate 1.2.3 / 1.3.0.
+3c. #7 idea from the reporter: split scenes — full-screen input scene on the iPad
+   holding the pointer lock, separate non-interactive external-display scene for the
+   render (Jump Desktop does this). Parked until the orientation fix is judged.
 3b. Release: when Austin OKs, set both plists to 1.2.2 (build 45) on `issue-6-7-followup`,
    merge, release (RELEASING.md loop), ask robimart for `vkq_mouse` output and the
    external-display result. If the orientation hook does not fix #7, next candidates:
@@ -63,9 +72,8 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- Austin: drag build/ota/vkQuake-1.2.1.1-iOS.ipa into a comment on issue #8 using the
-  text in build/reply-8-1.2.1.1.md (gh has no issue-attachment API). Default if not
-  done: the reporter has no build to test and the round stalls.
+- (done 2026-11-03) Austin posted the 1.2.1.1 IPA on #8 via WeTransfer. Reporter's
+  SideStore shows "1.2.1"; replied with the in-app check (`vkq_mouse` unknown on 1.2.1).
 - Release `issue-6-7-followup` as 1.2.2 after the reporter confirms? Default: wait
   (release numbers are Austin's call).
 - VR docs on `vr-notes-private`: default keep local, never push.
