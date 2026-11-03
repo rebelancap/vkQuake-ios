@@ -8,39 +8,26 @@ the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/) and the SideStore so
 Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` holds the
 unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
 
-## Last round (2026-11-03 pm) — #6 double-click, #7 external display, #8 multiplayer; 1.2.1.1 test build
-- Branch `issue-6-7-followup` (pushed, NOT merged, now 1.2.1.1 / build 44) carries:
-  - #6 double-click: SDL3 on iOS synthesizes a finger tap from every mouse click
-    (SDL_HINT_MOUSE_TOUCH_EVENTS defaults on); in_sdl3.c now ignores finger events
-    with SDL_MOUSE_TOUCHID / SDL_PEN_TOUCHID, hint set 0 as backstop (patch 0032).
-    `vkq_fakemouseclick <x> <y> [touchid]` replays a click; VERIFIED on the iPhone Air
-    sim: default id = one activation, id 7 = the old double activation
-    (artifacts/sim/2026-11-03-ios-issue8-click-{default,tid7}.png, local only).
-    Side effect: Apple Pencil taps in menus now act like a mouse (no drag-scroll).
-  - #7: orientation hook kept; SDL patch 0003 now derives orientation from scene
-    bounds when the scene is not on the main screen; `vkq_mouse` prints every
-    screen/scene (orientation, bounds, transform, drawable). UNVERIFIED: Simulator.app
-    is not installed on this Mac and the headless external screen captures black.
-  - #8 (patch 0033, verified on the macOS oracle against live servers, and the sim
-    joined q1.pieter.com:27500 with players for 25 s): FTE late .bsp precache → re-run
-    R_NewMap + R_RebuildAllEfrags at signon (upstream bug, crash); CCREP_REJECT on
-    the connected socket now ends the game with the reason (+SCR_EndLoadingPlaque,
-    else LOADING freezes 60 s); scoreboard updates before serverinfo discarded;
-    float svc_time precision loss after ~24 days uptime smoothed by
-    CL_ServerTimeFromWire (4 → 39 time steps/s); browser marks needpass/DarkPlaces
-    rows with `*`; clearer missing-mod-content message. Sonnet review: no findings.
-- 1.2.1.1 OTA published (hub /ota/vkquake/, both platforms) with the gitignored
-  publish-ota.sh's new `OTA_PUBLIC_GATE=1` (dev-numbered build WITHOUT the Remote
-  Console, since the bridge binds INADDR_ANY and the IPA goes to a stranger).
-  Served IPA checked: 1.2.1.1/44, no remoteConsole string.
-- Replies posted on #6 and #7. #8 reply drafted at build/reply-8-1.2.1.1.md; the IPA
-  copy for the issue is build/ota/vkQuake-1.2.1.1-iOS.ipa — gh cannot attach files
-  to issues, so Austin must drag it into the comment (see Open questions).
-- Sim trap today: `simctl terminate` of a NOT-running app hung CoreSimulator for the
-  session (install/launch then hang too); a `simctl shutdown` + `boot` of the device
-  cleared it. sim-verify.sh starts with that terminate — guard it with a timeout.
-- Follow-up candidate from review: the 0026 "map you do not have" exit path also
-  ends the game without SCR_EndLoadingPlaque (same 60 s freeze, untested).
+## Last round (2026-11-03 evening) — mod-content download (branch `mod-download`), reporter feedback, #7 data
+- Reporter: #6 CONFIRMED fixed on 1.2.1.1 (close it); #8 testing servers now; #7 sent a
+  `vkq_mouse` dump: external scene says landscape-right but UIScreen/window bounds are
+  PORTRAIT-shaped 1692x3008 pt (native 6016x3384), identity transform, SDL view
+  3008x1692 with a 6016x3384 drawable inside the portrait window ⇒ rotated. Hook +
+  bounds patch did nothing. Asked about the iPad Settings → Displays rotation setting.
+- `mod-download` (from issue-6-7-followup, pushed, NOT merged): patch 0034 + cl_moddl.c
+  state machine; sources = server `sv_dlURL` (read via getstatus; NO live server sets
+  it) then curated `mods/mod-sources.json` (bundled, overridable from raw.github main;
+  entries: FortressOne pak for fortress, Threewave CTF 3.01, AirQuake 1.02, Copper 1.30,
+  all sha256-pinned and downloaded/listed by scripts/mod-sources-verify.py). One cvar
+  `cl_mapdownload` (Settings row renamed "Download Missing Content"). Harness
+  scripts/sim-verify-moddl.sh 43/43 PASS on iPhone Air; LIVE join of NetQuake.io TF
+  (52.14.57.255:26023) downloaded + rejoined into game (artifacts/sim/2026-11-03-moddl-*).
+  Also registers `sv_public` (upstream never did) and adds serverinfo to getstatus.
+  Sonnet review: no bugs; two gaps TO FIX (Next step 3d).
+- NetQuake.io (QSS-M) servers advertise `cl_serverextension_download 1` (in-protocol
+  file push); supporting it would cover them without the table — candidate later.
+- Sim note: on the iOS 27 sim the first join to a LOCAL server after launch can stall
+  (pre-existing); harness does a warm-up join.
 
 ## Next steps
 1. Perf on device: SSAO now defaults on for GPUs with subgroup ops, and fresh installs
@@ -61,6 +48,16 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 3c. #7 idea from the reporter: split scenes — full-screen input scene on the iPad
    holding the pointer lock, separate non-interactive external-display scene for the
    render (Jump Desktop does this). Parked until the orientation fix is judged.
+3d. mod-download review fixes (tree owned by the #7 agent right now; do after it):
+   (i) cl_moddl.c ~:740 `mod_begin_server`: if the server sent no usable gamedir
+   (`servergd` empty) fall through to `mod_begin_table()` instead of installing
+   server files into com_gamedir/id1; (ii) cap the summed uncompressed size of the zip
+   (cl_moddl.c ~:930 / COM_UnzipToDir, common.c ~:4404) against cl_mapdownload_maxpkg
+   × a small factor before extracting. Regenerate 0034, rebuild, re-run
+   sim-verify-moddl.sh. Then 1.2.1.2 test build (OTA_PUBLIC_GATE=1) for the reporter.
+3e. #7: Opus agent in flight on branch `issue-7-external-display` (from mod-download):
+   make SDL's view match the external scene's window; prove with an in-app drawable
+   dump on the iPad sim's headless external display.
 3b. Release: when Austin OKs, set both plists to 1.2.2 (build 45) on `issue-6-7-followup`,
    merge, release (RELEASING.md loop), ask robimart for `vkq_mouse` output and the
    external-display result. If the orientation hook does not fix #7, next candidates:
@@ -79,6 +76,7 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-Opus agent in flight (started 2026-11-03 pm): mod-content download round on new branch
-`mod-download` (from issue-6-7-followup); owns the tree and the iPhone Air sim (lane 2).
-`issue-6-7-followup` pushed (1.2.1.1); `main` = `origin/main` = v1.2.1.
+Opus agent in flight: #7 external-display fix on branch `issue-7-external-display`,
+owns the tree + iPhone Air (lane 2) + iPad Air 13" sims. Apple Vision Pro sim is booted
+by ANOTHER session (not ours). Branches pushed: issue-6-7-followup (1.2.1.1),
+mod-download. `main` = `origin/main` = v1.2.1.
