@@ -48,7 +48,7 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 3c. #7 idea from the reporter: split scenes — full-screen input scene on the iPad
    holding the pointer lock, separate non-interactive external-display scene for the
    render (Jump Desktop does this). Parked until the orientation fix is judged.
-3d. mod-download review fixes (tree owned by the #7 agent right now; do after it):
+3d. DONE (3a8c059 on issue-7-external-display): review fixes landed, harness legs (h)/(i) added, 52/53 PASS — (g) live TF failed because the server moved to blitzkrieg2 (tpad.mdl not in the FortressOne entry) and the once-per-session retry guard blocked a second attempt. Original brief was:
    (i) cl_moddl.c ~:740 `mod_begin_server`: if the server sent no usable gamedir
    (`servergd` empty) fall through to `mod_begin_table()` instead of installing
    server files into com_gamedir/id1; (ii) cap the summed uncompressed size of the zip
@@ -69,6 +69,16 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    orient=portrait, bounds 3008x1692, drawable=6016x3384, supported=0x2.
    Side finding: the iPad-sim "square frame" oddity is a headless-sim artifact
    (panel never rotates; landscape scene drawn unrotated into a portrait buffer).
+3f. Opus agent in flight on issue-7-external-display: (A) TF table coverage + retry
+   guard keyed on the missing-file set; (B) DarkPlaces protocol-7 servers (reporter
+   hit "Server returned version 3504" on 5-6 servers): graceful disconnect + message
+   instead of Host_Error stack wall, silence `cl_serverextension_download`, check the
+   `*` marking. DECISION FOR AUSTIN: DP7 client protocol support is a large engine
+   feature; decide after the reporter names the servers / how many populated ones
+   are DP-only.
+3g. Then: bump both plists to 1.2.1.2 (build 45) on issue-7-external-display,
+   `OTA_PUBLIC_GATE=1 OTA_NOTES=... scripts/publish-ota.sh`, verify served IPA, Austin
+   uploads to #8 (gh cannot attach), reply on #7/#8.
 3b. Release: when Austin OKs, set both plists to 1.2.2 (build 45) on `issue-6-7-followup`,
    merge, release (RELEASING.md loop), ask robimart for `vkq_mouse` output and the
    external-display result. If the orientation hook does not fix #7, next candidates:
@@ -87,7 +97,6 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-Opus agent in flight: mod-download review fixes (Next step 3d) on branch
-`issue-7-external-display`; owns the tree + iPhone Air (lane 2). Apple Vision Pro sim
-is booted by ANOTHER session. Branches pushed: issue-6-7-followup (1.2.1.1),
+Opus agent in flight (TF coverage + DP7 message) on branch `issue-7-external-display`;
+owns the tree + iPhone Air (lane 2). Branches pushed: issue-6-7-followup (1.2.1.1),
 mod-download, issue-7-external-display. `main` = `origin/main` = v1.2.1.
