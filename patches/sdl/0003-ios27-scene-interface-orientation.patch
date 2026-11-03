@@ -31,25 +31,27 @@ index b7cb52e..a8d3d80 100644
              orientation = SDL_ORIENTATION_PORTRAIT;
              break;
 diff --git a/src/video/uikit/SDL_uikitvideo.h b/src/video/uikit/SDL_uikitvideo.h
-index 3db7f9b..d5e21f0 100644
+index 3db7f9b..f68a7cd 100644
 --- a/src/video/uikit/SDL_uikitvideo.h
 +++ b/src/video/uikit/SDL_uikitvideo.h
-@@ -42,6 +42,10 @@ extern CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen);
+@@ -42,6 +42,12 @@ extern CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen);
  #endif
  
  extern API_AVAILABLE(ios(13.0)) UIWindowScene *UIKit_GetActiveWindowScene(void);
 +#if !defined(SDL_PLATFORM_TVOS) && !defined(SDL_PLATFORM_VISIONOS)
 +// vkquake-ios SDL patch 0003: scene-aware interface orientation (see SDL_uikitvideo.m).
 +extern UIInterfaceOrientation UIKit_GetInterfaceOrientation(UIWindow *uiwindow);
++// vkquake-ios issue #7: scene lives on an external display (or the emulation hint).
++extern BOOL UIKit_IsExternalDisplayScene(UIWindowScene *scene) API_AVAILABLE(ios(13.0));
 +#endif
  
  extern void UIKit_SetGameControllerInteraction(bool enabled);
  extern void UIKit_SetViewGameControllerInteraction(UIView *view, bool enabled);
 diff --git a/src/video/uikit/SDL_uikitvideo.m b/src/video/uikit/SDL_uikitvideo.m
-index 97aeb94..8a9b4f0 100644
+index 97aeb94..4bd776a 100644
 --- a/src/video/uikit/SDL_uikitvideo.m
 +++ b/src/video/uikit/SDL_uikitvideo.m
-@@ -210,6 +210,40 @@ SDL_SystemTheme UIKit_GetSystemTheme(void)
+@@ -210,6 +210,58 @@ SDL_SystemTheme UIKit_GetSystemTheme(void)
      return SDL_SYSTEM_THEME_UNKNOWN;
  }
  
@@ -62,6 +64,22 @@ index 97aeb94..8a9b4f0 100644
 + * on a 912x420 pt landscape window the first time the keyboard machinery calls
 + * -updateKeyboard, and the Metal drawable follows it. Ask the window's scene
 + * (or the active scene) first; fall back to the status bar only if no scene. */
++/* vkquake-ios issue #7: is this scene on an EXTERNAL display (iPadOS Stage
++ * Manager / extended display)? UIKit maps an external scene onto the panel by its
++ * interface orientation RELATIVE TO THE PANEL'S NATIVE ORIENTATION: "portrait" is
++ * the unrotated, native one (a 6016x3384 monitor reports portrait with 3008x1692 pt
++ * bounds), "landscape" turns the scene 90 degrees (landscape-right with 1692x3008
++ * pt bounds, which is what a landscape-only app got: the game drawn sideways).
++ * VKQ_EMULATE_EXTERNAL_DISPLAY=1 (env/hint, test only) treats the main screen the
++ * same way so the simulator, whose external screen only mirrors, can exercise it. */
++BOOL UIKit_IsExternalDisplayScene(UIWindowScene *scene)
++{
++    if (!scene || !scene.screen) {
++        return NO;
++    }
++    return scene.screen != [UIScreen mainScreen] || SDL_GetHintBoolean("VKQ_EMULATE_EXTERNAL_DISPLAY", false);
++}
++
 +UIInterfaceOrientation UIKit_GetInterfaceOrientation(UIWindow *uiwindow)
 +{
 +    if (@available(iOS 13.0, *)) {
@@ -69,11 +87,13 @@ index 97aeb94..8a9b4f0 100644
 +        if (!scene) {
 +            scene = UIKit_GetActiveWindowScene();
 +        }
-+        /* vkquake-ios issue #7: a scene on an EXTERNAL display. That screen never
-+         * rotates; UIKit can report the scene Portrait while its bounds are wide
-+         * (a 16:9 monitor), and UIKit_ComputeViewFrame would then swap a
-+         * full-screen view to portrait. The bounds are the truth there. */
-+        if (scene && scene.screen && scene.screen != [UIScreen mainScreen]) {
++        /* vkquake-ios issue #7: on an EXTERNAL display the scene is kept in the
++         * panel's native ("portrait") orientation - see UIKit_GetSupportedOrientations
++         * - while its bounds are the panel's shape (wide, for a monitor). Callers
++         * here only want "is the view wide?", so the bounds are the truth; the
++         * reported Portrait would make UIKit_ComputeViewFrame swap a full-screen view
++         * to tall. */
++        if (UIKit_IsExternalDisplayScene(scene)) {
 +            CGSize size = scene.coordinateSpace.bounds.size;
 +            if (size.width > 0 && size.height > 0) {
 +                return (size.width > size.height) ? UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationPortrait;
@@ -90,7 +110,7 @@ index 97aeb94..8a9b4f0 100644
  #ifdef SDL_PLATFORM_VISIONOS
  CGRect UIKit_ComputeViewFrame(SDL_Window *window)
  {
-@@ -237,7 +271,7 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
+@@ -237,7 +289,7 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
       * https://bugzilla.libsdl.org/show_bug.cgi?id=3505
       * https://bugzilla.libsdl.org/show_bug.cgi?id=3465
       * https://forums.developer.apple.com/thread/65337 */
@@ -99,3 +119,28 @@ index 97aeb94..8a9b4f0 100644
      BOOL landscape = UIInterfaceOrientationIsLandscape(orient) ||
                      !(UIKit_GetSupportedOrientations(window) & (UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown));
      BOOL fullscreen = CGRectEqualToRect(screen.bounds, frame);
+diff --git a/src/video/uikit/SDL_uikitwindow.m b/src/video/uikit/SDL_uikitwindow.m
+index 0ee7364..8aeebc5 100644
+--- a/src/video/uikit/SDL_uikitwindow.m
++++ b/src/video/uikit/SDL_uikitwindow.m
+@@ -450,6 +450,20 @@ void UIKit_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int
+         if ((validOrientations & orientationMask) == 0) {
+             orientationMask = validOrientations;
+         }
++
++#ifndef SDL_PLATFORM_VISIONOS
++        /* vkquake-ios issue #7: on an external display only the panel's native
++         * orientation ("portrait" in UIKit's terms) is right. A landscape-only answer
++         * here - a fullscreen, non-resizable SDL window always gives one - makes UIKit
++         * rotate the scene 90 degrees onto the monitor (landscape-right, portrait-shaped
++         * 1692x3008 pt bounds on a 6016x3384 panel), and the game appears sideways.
++         * The app delegate must allow Portrait for that window (vkquake's shell does). */
++        if (@available(iOS 13.0, *)) {
++            if (UIKit_IsExternalDisplayScene(data.uiwindow.windowScene) && (validOrientations & UIInterfaceOrientationMaskPortrait)) {
++                orientationMask = UIInterfaceOrientationMaskPortrait;
++            }
++        }
++#endif
+     }
+ 
+     return orientationMask;

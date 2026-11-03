@@ -255,9 +255,10 @@ static void vkq_log_displays (BOOL to_console)
 					ds = ((CAMetalLayer *)sub.layer).drawableSize;
 			if (!v || w.hidden)
 				continue;
-			[lines addObject:[NSString stringWithFormat:@"    window=%.0fx%.0f transform=%@ view=%@ drawable=%.0fx%.0f", w.bounds.size.width, w.bounds.size.height,
+			[lines addObject:[NSString stringWithFormat:@"    window=%.0fx%.0f transform=%@ view=%@ drawable=%.0fx%.0f vc=%@ supported=0x%lx", w.bounds.size.width, w.bounds.size.height,
 													   CGAffineTransformIsIdentity (w.transform) ? @"identity" : NSStringFromCGAffineTransform (w.transform), NSStringFromCGRect (v.frame),
-													   ds.width, ds.height]];
+													   ds.width, ds.height, NSStringFromClass (w.rootViewController.class),
+													   (unsigned long)w.rootViewController.supportedInterfaceOrientations]];
 		}
 	}
 	for (NSString *l in lines)
@@ -304,25 +305,80 @@ void VKQ_iOS_MouseDiag (void)
 }
 
 // --- external display (issue #7) --------------------------------------------
-// Info.plist allows landscape only, which is right for the iPad's own panel but
-// not for a scene on an external display: that screen never rotates and UIKit
-// reports it portrait, so a landscape-only app is drawn turned 90 degrees (the
-// report, and Moonlight's #515). SDL asks the app delegate first
-// (UIKit_GetSupportedOrientations), so answer for it: any orientation on a
-// screen other than the main one, landscape as before on the iPad itself.
-// SDL's delegate class has no such method of its own; it is added at load.
-// Its other half is SDL patch 0003 (UIKit_GetInterfaceOrientation): once portrait
-// is allowed there, the external scene may report Portrait while its bounds are
-// wide, and SDL's UIKit_ComputeViewFrame would swap a full-screen view to
-// portrait — so for a non-main screen the patch derives orientation from bounds.
-// Neither half could be exercised on the simulator (its external TVOut screen
-// neither mirrors nor extends); vkq_mouse prints the display table to check.
+// How UIKit presents a scene on an external display (iPadOS Stage Manager or the
+// iPadOS 26+ extended display): the scene's interface orientation is RELATIVE TO
+// THE PANEL'S NATIVE ORIENTATION. "Portrait" is the unrotated one — a 6016x3384
+// monitor then has 3008x1692 pt bounds; "landscape" turns the whole scene 90
+// degrees onto the panel and UIScreen/scene bounds become portrait-shaped. The
+// reporter's vkq_mouse paste (iPadOS 27.2) showed exactly that: scene
+// landscape-right, screen and window 1692x3008 pt on a 6016x3384 panel — because
+// SDL's view controller answered landscape-only (a fullscreen SDL window is not
+// resizable, so UIKit_GetSupportedOrientations returns the window's landscape
+// shape), UIKit rotated the scene, and the game appeared sideways.
+// The fix has three parts:
+//  - SDL patch 0003: UIKit_GetSupportedOrientations answers Portrait (= native)
+//    for a window whose scene is on a non-main screen, and
+//    UIKit_GetInterfaceOrientation derives "landscape?" from the scene bounds there
+//    so UIKit_ComputeViewFrame keeps the view the shape of the window;
+//  - here: the app delegate must allow Portrait for that window, or Info.plist's
+//    landscape-only list wins (SDL asks the delegate first);
+//  - here: when a scene changes screen (Stage Manager moves it, a monitor is
+//    plugged in) the answer above changes, and since iOS 16 UIKit only re-asks
+//    after -setNeedsUpdateOfSupportedInterfaceOrientations.
+// VKQ_EMULATE_EXTERNAL_DISPLAY=1 (environment; read by SDL as a hint too) treats
+// the main screen as external: the simulator's external screen only mirrors, so
+// this is the one way to run the path on a Mac (scripts/sim-verify-issue7.sh).
+static BOOL vkq_emulate_external (void)
+{
+	const char *e = getenv ("VKQ_EMULATE_EXTERNAL_DISPLAY");
+	return e && *e && *e != '0';
+}
+static BOOL vkq_scene_is_external (UIWindowScene *ws)
+{
+	return ws && ws.screen && (ws.screen != UIScreen.mainScreen || vkq_emulate_external ());
+}
 static NSUInteger vkq_orientations_for_window (id self, SEL _cmd, UIApplication *app, UIWindow *window)
 {
-	UIWindowScene *ws = window.windowScene;
-	if (ws && ws.screen && ws.screen != UIScreen.mainScreen)
+	if (vkq_scene_is_external (window.windowScene))
 		return UIInterfaceOrientationMaskAll;
 	return UIInterfaceOrientationMaskLandscape;
+}
+// Re-ask every view controller in every window scene for its orientations
+// (SDL's answer depends on the screen the scene is on).
+static void vkq_refresh_orientations (const char *why)
+{
+	if (@available(iOS 16.0, *))
+	{
+		for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+		{
+			if (![sc isKindOfClass:UIWindowScene.class])
+				continue;
+			for (UIWindow *w in ((UIWindowScene *)sc).windows)
+				[w.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
+		}
+	}
+	NSLog (@"[vkquake] display: orientation refresh (%s)", why);
+}
+static __weak UIScreen *g_scene_screen;
+// UIWindowSceneDelegate callback, added to SDL's scene delegate: fires when the
+// scene's coordinate space changes — moving to another display included.
+static void vkq_scene_did_update (id self, SEL _cmd, UIWindowScene *ws, id<UICoordinateSpace> prev, UIInterfaceOrientation prevOrient, UITraitCollection *prevTraits)
+{
+	if (ws.screen != g_scene_screen)
+	{
+		g_scene_screen = ws.screen;
+		vkq_refresh_orientations ("scene changed screen");
+	}
+	// Trait-only updates arrive here too (many per launch); log real changes only.
+	static CGSize				  last_size;
+	static UIInterfaceOrientation last_orient = UIInterfaceOrientationUnknown;
+	CGSize						  size = ws.coordinateSpace.bounds.size;
+	if (CGSizeEqualToSize (size, last_size) && ws.interfaceOrientation == last_orient)
+		return;
+	last_size = size;
+	last_orient = ws.interfaceOrientation;
+	NSLog (@"[vkquake] display: scene geometry changed (was %s)", vkq_orient_name (prevOrient));
+	vkq_log_displays (NO);
 }
 @interface VKQDelegateHooks : NSObject
 @end
@@ -332,18 +388,28 @@ static NSUInteger vkq_orientations_for_window (id self, SEL _cmd, UIApplication 
 	Class c = NSClassFromString (@"SDLUIKitDelegate");
 	SEL	  sel = @selector (application:supportedInterfaceOrientationsForWindow:);
 	// Log every display change (issue #7) — NSLog only; vkq_mouse prints the same
-	// table to the console for players.
+	// table to the console for players. A screen coming or going can move the scene.
 	for (NSNotificationName n in @[ UIScreenDidConnectNotification, UIScreenDidDisconnectNotification, UIScreenModeDidChangeNotification, UISceneDidActivateNotification ])
 		[NSNotificationCenter.defaultCenter addObserverForName:n
 														object:nil
 														 queue:NSOperationQueue.mainQueue
 													usingBlock:^(NSNotification *note) {
 														NSLog (@"[vkquake] display: %@", note.name);
+														if (![note.name isEqualToString:UIScreenModeDidChangeNotification])
+															vkq_refresh_orientations (note.name.UTF8String);
 														vkq_log_displays (NO);
 													}];
-	if (!c || class_getInstanceMethod (c, sel))
-		return; // no SDL delegate, or it grew its own answer — leave it
-	class_addMethod (c, sel, (IMP)vkq_orientations_for_window, "Q@:@@");
+	Class sd = NSClassFromString (@"SDLUIKitSceneShim");
+	SEL	  ssel = @selector (windowScene:didUpdateCoordinateSpace:interfaceOrientation:traitCollection:);
+	if (sd && !class_getInstanceMethod (sd, ssel))
+		class_addMethod (sd, ssel, (IMP)vkq_scene_did_update, "v@:@@q@");
+	// The UIApplication delegate is SDLUIKitSceneShim (SDL_RunApp passes the scene
+	// delegate class to UIApplicationMain on iOS 13+; one object serves as both).
+	// SDLUIKitDelegate is only the pre-iOS-13 fallback — 1.2.1.1 hooked only that
+	// one, so the hook never ran and Info.plist's landscape-only list kept winning.
+	for (Class k in @[ sd ?: NSNull.null, c ?: NSNull.null ])
+		if (k != (id)NSNull.null && !class_getInstanceMethod (k, sel)) // leave a delegate that grew its own answer
+			class_addMethod (k, sel, (IMP)vkq_orientations_for_window, "Q@:@@");
 }
 @end
 #else
