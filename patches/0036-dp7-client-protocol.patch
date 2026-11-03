@@ -1,0 +1,886 @@
+--- a/Quake/protocol.h
++++ b/Quake/protocol.h
+@@ -28,6 +28,7 @@
+ #define PROTOCOL_NETQUAKE  15  // johnfitz -- standard quake protocol
+ #define PROTOCOL_FITZQUAKE 666 // johnfitz -- added new protocol for fitzquake 0.85
+ #define PROTOCOL_RMQ	   999
++#define PROTOCOL_DP7	   3504 // vkquake-ios 0036: DarkPlaces protocol 7, client only (cl_dp7.c)
+ #define PROTOCOL_FTE_PEXT1 \
+ 	(('F' << 0) + ('T' << 8) + ('E' << 16) + ('X' << 24)) // fte extensions, provides extensions to the underlying base protocol (like 666 or even 15).
+ #define PROTOCOL_FTE_PEXT2 \
+--- a/Quake/cl_dp7.h
++++ b/Quake/cl_dp7.h
+@@ -0,0 +1,31 @@
++/*
++This program is free software; you can redistribute it and/or
++modify it under the terms of the GNU General Public License
++as published by the Free Software Foundation; either version 2
++of the License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++
++See the GNU General Public License for more details.
++*/
++// cl_dp7.h -- DarkPlaces protocol 7 client (vkquake-ios overlay 0036, cl_dp7.c)
++
++#ifndef _CL_DP7_H
++#define _CL_DP7_H
++
++void	 CLDP7_NewServer (void);
++qboolean CLDP7_ParseCommand (int cmd);
++void	 CLDP7_WriteMove (sizebuf_t *buf, const usercmd_t *cmd);
++
++// cl_parse.c parsers cl_dp7.c reuses (static upstream; exported by 0036)
++entity_t *CL_EntityNum (int num);
++void CL_EntitiesDeltaed (void);
++void CL_ParseBaseline (entity_t *ent, int version);
++void CL_ParseStatic (int version);
++void CL_ParseStaticSound (int version);
++void CL_ParsePrecache (void);
++void CL_ParseStatInt (int stat, int ival);
++
++#endif /* _CL_DP7_H */
+--- a/Quake/cl_dp7.c
++++ b/Quake/cl_dp7.c
+@@ -0,0 +1,709 @@
++/*
++Copyright (C) 1996-2001 Id Software, Inc.
++Copyright (C) 2000-2020 DarkPlaces contributors
++Copyright (C) 2026 vkQuake-ios contributors
++
++This program is free software; you can redistribute it and/or
++modify it under the terms of the GNU General Public License
++as published by the Free Software Foundation; either version 2
++of the License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++
++See the GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program; if not, write to the Free Software
++Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
++
++*/
++// cl_dp7.c -- client side of DarkPlaces protocol 7 (3504), vkquake-ios overlay 0036
++//
++// Wire formats ported from DarkPlaces (https://github.com/DarkPlacesEngine/darkplaces,
++// GPLv2, commit 10d48635): cl_ents5.c EntityState5_ReadUpdate /
++// EntityFrame5_CL_ReadFrame, cl_parse.c CL_ParseClientdata (DP7 branch),
++// CL_ParseStartSoundPacket, CL_ParseTempEntity (sizes only), cl_input.c CL_SendMove
++// (DP7 clc_move). FTEQW's DP5_ParseDelta was the cross-check.
++//
++// EVERYTHING here is reached only when cl.protocol == PROTOCOL_DP7, which only a
++// DP7 svc_serverinfo sets. Protocols 15/666/999 (+FTE extensions), single player
++// and every existing demo never enter this file. docs/DP7-PLAN.md has the design.
++//
++// Phase A scope: join, signon, EntityFrame5 entities into vkQuake's delta sink
++// (CL_EntitiesDeltaed, the same path FTE replacement deltas use), DP7 clientdata,
++// DP's opcodes 51-59 (52/54/56 collide with the 2021 rerelease's opcodes, which is
++// why this runs BEFORE the shared switch), DP's svc_sound bits, the 56-byte DP7
++// clc_move and E5 frame acks. Phase B (deferred): DP-only temp entities (skipped by
++// size here), svc_effect, E5 glow/light dlights, colormod, attachments, viewmodel
++// entities, trail effect numbers.
++
++#include "quakedef.h"
++#include "cl_dp7.h"
++
++// ---- DarkPlaces protocol.h ----
++#define DP_E5_FULLUPDATE		 (1u << 0)
++#define DP_E5_ORIGIN			 (1u << 1)
++#define DP_E5_ANGLES			 (1u << 2)
++#define DP_E5_MODEL				 (1u << 3)
++#define DP_E5_FRAME				 (1u << 4)
++#define DP_E5_SKIN				 (1u << 5)
++#define DP_E5_EFFECTS			 (1u << 6)
++#define DP_E5_EXTEND1			 (1u << 7)
++#define DP_E5_FLAGS				 (1u << 8)
++#define DP_E5_ALPHA				 (1u << 9)
++#define DP_E5_SCALE				 (1u << 10)
++#define DP_E5_ORIGIN32			 (1u << 11)
++#define DP_E5_ANGLES16			 (1u << 12)
++#define DP_E5_MODEL16			 (1u << 13)
++#define DP_E5_COLORMAP			 (1u << 14)
++#define DP_E5_EXTEND2			 (1u << 15)
++#define DP_E5_ATTACHMENT		 (1u << 16)
++#define DP_E5_LIGHT				 (1u << 17)
++#define DP_E5_GLOW				 (1u << 18)
++#define DP_E5_EFFECTS16			 (1u << 19)
++#define DP_E5_EFFECTS32			 (1u << 20)
++#define DP_E5_FRAME16			 (1u << 21)
++#define DP_E5_COLORMOD			 (1u << 22)
++#define DP_E5_EXTEND3			 (1u << 23)
++#define DP_E5_GLOWMOD			 (1u << 24)
++#define DP_E5_COMPLEXANIMATION	 (1u << 25)
++#define DP_E5_TRAILEFFECTNUM	 (1u << 26)
++
++#define DP_RENDER_STEP			 1
++#define DP_RENDER_EXTERIORMODEL	 8
++
++#define DP_EF_NODRAW			 16
++#define DP_EF_BLUE				 64
++#define DP_EF_RED				 128
++
++#define DP_SU_VIEWHEIGHT		 (1u << 0)
++#define DP_SU_IDEALPITCH		 (1u << 1)
++#define DP_SU_PUNCH1			 (1u << 2)
++#define DP_SU_VELOCITY1			 (1u << 5)
++#define DP_SU_ITEMS				 (1u << 9)
++#define DP_SU_ONGROUND			 (1u << 10)
++#define DP_SU_INWATER			 (1u << 11)
++#define DP_SU_EXTEND1			 (1u << 15)
++#define DP_SU_PUNCHVEC1			 (1u << 16)
++#define DP_SU_VIEWZOOM			 (1u << 19)
++#define DP_SU_EXTEND2			 (1u << 23)
++
++#define DP_SND_VOLUME			 (1 << 0)
++#define DP_SND_ATTENUATION		 (1 << 1)
++#define DP_SND_LOOPING			 (1 << 2) // a flag, no data (vkQuake's SND_FTE_MOREFLAGS reads a byte here)
++#define DP_SND_LARGEENTITY		 (1 << 3)
++#define DP_SND_LARGESOUND		 (1 << 4)
++#define DP_SND_SPEEDUSHORT4000	 (1 << 5)
++
++#define DP_svc_showlmp			 35
++#define DP_svc_hidelmp			 36
++#define DP_svc_downloaddata		 50
++#define DP_svc_effect			 52
++#define DP_svc_effect2			 53
++#define DP_svc_precache			 54
++#define DP_svc_spawnbaseline2	 55
++#define DP_svc_spawnstatic2		 56
++#define DP_svc_entities			 57
++#define DP_svc_csqcentities		 58
++#define DP_svc_spawnstaticsound2 59
++
++// the DarkPlaces entity state as the server deltas it (DP's defaultstate is the
++// reset value). Kept per entity so a delta that changes one field (say effects)
++// can still be mapped onto vkQuake's netstate as a whole.
++typedef struct
++{
++	vec3_t		   origin;
++	vec3_t		   angles;
++	unsigned int   effects;
++	unsigned short modelindex;
++	unsigned short frame;
++	unsigned char  flags;
++	unsigned char  skin;
++	unsigned char  alpha; // 255 = opaque
++	unsigned char  scale; // *16
++	unsigned char  colormap;
++	unsigned char  colormod[3]; // *32
++} dp7state_t;
++
++static dp7state_t *dp7_states;
++static int		   dp7_numstates;
++static dp7state_t  dp7_scratch; // updates for entity numbers we cannot store are parsed into this
++
++static int		   dp7_frames;		  // svc_entities frames received this connection
++static int		   dp7_lastframe;	  // the last E5 frame number
++static int		   dp7_servermoveseq; // DP7 servermovesequence (unused: we never predict)
++static int		   dp7_skipped_te;	  // DP-only temp entities skipped (Phase B renders them)
++static int		   dp7_moves;		  // clc_move messages written
++
++extern vec3_t v_punchangles[2];
++extern double v_punchangles_times[2];
++
++// skip n message bytes (a read past the end sets msg_badread, as MSG_ReadByte does)
++static void CLDP7_Skip (int n)
++{
++	while (n-- > 0 && !msg_badread)
++		MSG_ReadByte ();
++}
++
++static void CLDP7_ResetState (dp7state_t *s)
++{
++	memset (s, 0, sizeof (*s));
++	s->alpha = 255;
++	s->scale = 16;
++	s->colormod[0] = s->colormod[1] = s->colormod[2] = 32;
++}
++
++/*
++ * End the game with one line instead of a desync (or a Sys_Error in the shared
++ * temp-entity parser). Same shape as cl_parse.c's CL_RefuseServerProtocol.
++ */
++static void CLDP7_Abort (const char *why)
++{
++	extern enum m_state_e m_return_state;
++	extern char			 m_return_reason[32];
++
++	if (cls.demoplayback)
++		Host_Error ("DarkPlaces demo: %s", why);
++	Con_Printf ("\nDarkPlaces server: %s\n", why);
++	q_snprintf (m_return_reason, sizeof (m_return_reason), "DP server: unsupported data");
++	key_dest = key_menu;
++	m_state = (m_return_state == m_slist || m_return_state == m_lanconfig) ? m_return_state : m_main;
++	IN_Deactivate (true);
++	SCR_EndLoadingPlaque ();
++	cls.demonum = -1;
++	Host_EndGame ("DarkPlaces server: %s\n", why);
++}
++
++static void CLDP7_Status_f (void)
++{
++	int			  i, active = 0;
++	const entity_t *view;
++
++	if (cl.protocol != PROTOCOL_DP7)
++	{
++		Con_Printf ("dp7: not connected to a DarkPlaces protocol 7 server\n");
++		return;
++	}
++	for (i = 1; i < cl.num_entities; i++)
++		if (cl.entities[i].update_type)
++			active++;
++	view = (cl.viewentity > 0 && cl.viewentity < cl.num_entities) ? &cl.entities[cl.viewentity] : NULL;
++	Con_Printf (
++		"dp7: signon %i frames %i lastframe %i entities %i moves %i skipped_te %i health %i shells %i viewent %i origin %.1f %.1f %.1f\n", cls.signon,
++		dp7_frames, dp7_lastframe, active, dp7_moves, dp7_skipped_te, cl.stats[STAT_HEALTH], cl.stats[STAT_SHELLS], cl.viewentity, view ? view->origin[0] : 0,
++		view ? view->origin[1] : 0, view ? view->origin[2] : 0);
++}
++
++/*
++==================
++CLDP7_NewServer
++
++svc_serverinfo said 3504. cl was just wiped by CL_ClearState.
++==================
++*/
++void CLDP7_NewServer (void)
++{
++	static qboolean registered;
++	int				i;
++
++	if (!registered)
++	{
++		Cmd_AddCommand ("cl_dp7status", CLDP7_Status_f);
++		registered = true;
++	}
++	cl.protocolflags = PRFL_FLOATCOORD | PRFL_SHORTANGLE;
++
++	if (dp7_numstates != cl.max_edicts)
++	{
++		Mem_Free (dp7_states);
++		dp7_states = (dp7state_t *)Mem_Alloc (cl.max_edicts * sizeof (*dp7_states));
++		dp7_numstates = cl.max_edicts;
++	}
++	for (i = 0; i < dp7_numstates; i++)
++		CLDP7_ResetState (&dp7_states[i]);
++	dp7_frames = dp7_lastframe = dp7_servermoveseq = dp7_skipped_te = dp7_moves = 0;
++}
++
++// ---------------------------------------------------------------------------
++// EntityFrame5 (DarkPlaces cl_ents5.c)
++// ---------------------------------------------------------------------------
++
++static unsigned int CLDP7_ReadE5Update (dp7state_t *s)
++{
++	unsigned int bits;
++	int			 i;
++
++	bits = MSG_ReadByte ();
++	if (bits & DP_E5_EXTEND1)
++	{
++		bits |= MSG_ReadByte () << 8;
++		if (bits & DP_E5_EXTEND2)
++		{
++			bits |= MSG_ReadByte () << 16;
++			if (bits & DP_E5_EXTEND3)
++				bits |= (unsigned int)MSG_ReadByte () << 24;
++		}
++	}
++	if (bits & DP_E5_FULLUPDATE)
++		CLDP7_ResetState (s);
++	if (bits & DP_E5_FLAGS)
++		s->flags = MSG_ReadByte ();
++	if (bits & DP_E5_ORIGIN)
++	{
++		for (i = 0; i < 3; i++)
++			s->origin[i] = (bits & DP_E5_ORIGIN32) ? MSG_ReadFloat () : MSG_ReadShort () * (1.0f / 8.0f); // Coord32f / Coord13i
++	}
++	if (bits & DP_E5_ANGLES)
++	{
++		for (i = 0; i < 3; i++)
++			s->angles[i] = (bits & DP_E5_ANGLES16) ? MSG_ReadShort () * (360.0f / 65536.0f) : MSG_ReadByte () * (360.0f / 256.0f); // Angle16i / Angle8i
++	}
++	if (bits & DP_E5_MODEL)
++		s->modelindex = (bits & DP_E5_MODEL16) ? (unsigned short)MSG_ReadShort () : MSG_ReadByte ();
++	if (bits & DP_E5_FRAME)
++		s->frame = (bits & DP_E5_FRAME16) ? (unsigned short)MSG_ReadShort () : MSG_ReadByte ();
++	if (bits & DP_E5_SKIN)
++		s->skin = MSG_ReadByte ();
++	if (bits & DP_E5_EFFECTS)
++	{
++		if (bits & DP_E5_EFFECTS32)
++			s->effects = (unsigned int)MSG_ReadLong ();
++		else if (bits & DP_E5_EFFECTS16)
++			s->effects = (unsigned short)MSG_ReadShort ();
++		else
++			s->effects = MSG_ReadByte ();
++	}
++	if (bits & DP_E5_ALPHA)
++		s->alpha = MSG_ReadByte ();
++	if (bits & DP_E5_SCALE)
++		s->scale = MSG_ReadByte ();
++	if (bits & DP_E5_COLORMAP)
++		s->colormap = MSG_ReadByte ();
++	if (bits & DP_E5_ATTACHMENT)
++	{
++		MSG_ReadShort (); // tagentity -- Phase B
++		MSG_ReadByte ();  // tagindex
++	}
++	if (bits & DP_E5_LIGHT)
++	{
++		for (i = 0; i < 4; i++)
++			MSG_ReadShort (); // light rgb*256, radius -- Phase B
++		MSG_ReadByte ();	  // lightstyle
++		MSG_ReadByte ();	  // lightpflags
++	}
++	if (bits & DP_E5_GLOW)
++	{
++		MSG_ReadByte (); // glowsize -- Phase B
++		MSG_ReadByte (); // glowcolor
++	}
++	if (bits & DP_E5_COLORMOD)
++	{
++		for (i = 0; i < 3; i++)
++			s->colormod[i] = MSG_ReadByte ();
++	}
++	if (bits & DP_E5_GLOWMOD)
++	{
++		for (i = 0; i < 3; i++)
++			MSG_ReadByte ();
++	}
++	if (bits & DP_E5_COMPLEXANIMATION)
++	{
++		// framegroup blends / skeletal poses: no vkQuake equivalent, skipped by their
++		// in-packet sizes (type 4 carries its own bone count)
++		int type = MSG_ReadByte ();
++		switch (type)
++		{
++		case 0:
++			CLDP7_Skip (2 + 2);
++			break;
++		case 1:
++			CLDP7_Skip (2 * 2 + 2 * 2 + 2);
++			break;
++		case 2:
++			CLDP7_Skip (3 * 2 + 3 * 2 + 3);
++			break;
++		case 3:
++			CLDP7_Skip (4 * 2 + 4 * 2 + 4);
++			break;
++		case 4:
++		{
++			int numbones;
++			MSG_ReadShort (); // modelindex
++			numbones = MSG_ReadByte ();
++			CLDP7_Skip (numbones * 7 * 2);
++			break;
++		}
++		default:
++			CLDP7_Abort (va ("unknown E5_COMPLEXANIMATION type %i", type));
++			break;
++		}
++	}
++	if (bits & DP_E5_TRAILEFFECTNUM)
++		MSG_ReadShort (); // DP effectinfo index -- Phase B
++	return bits;
++}
++
++// DarkPlaces state -> vkQuake netstate (the encodings CL_EntitiesDeltaed expects)
++static void CLDP7_ToNetstate (const dp7state_t *s, entity_state_t *n)
++{
++	unsigned int fx = s->effects;
++
++	*n = nullentitystate;
++	VectorCopy (s->origin, n->origin);
++	VectorCopy (s->angles, n->angles);
++	n->modelindex = (s->modelindex < MAX_MODELS && !(fx & DP_EF_NODRAW)) ? s->modelindex : 0;
++	n->frame = s->frame;
++	n->skin = s->skin;
++	n->colormap = s->colormap;
++	// DP effects 1-8 are Quake's; 24-31 are the model-flag trails, which vkQuake reads
++	// from (effects >> 24) the same way. DP's BLUE/RED are the quad/pent glows. The
++	// rest (16 NODRAW handled above, ADDITIVE, FULLBRIGHT, ...) means other things
++	// in vkQuake's numbering (16/32 = the rerelease's quad/pent lights): dropped.
++	n->effects = (fx & 0x0f) | (fx & 0xff000000u) | ((fx & DP_EF_BLUE) ? 16 : 0) | ((fx & DP_EF_RED) ? 32 : 0);
++	// DP: 255 opaque, 0 invisible. vkQuake: 0 default, 1 invisible, a+1 otherwise --
++	// the same mapping CLFTE_ReadDelta applies to FTE's identical encoding.
++	n->alpha = (s->alpha + 1) & 0xff;
++	n->scale = s->scale;
++	n->eflags = ((s->flags & DP_RENDER_STEP) ? EFLAGS_STEP : 0) | ((s->flags & DP_RENDER_EXTERIORMODEL) ? EFLAGS_EXTERIORMODEL : 0);
++	n->colormod[0] = s->colormod[0];
++	n->colormod[1] = s->colormod[1];
++	n->colormod[2] = s->colormod[2];
++}
++
++static void CLDP7_ParseEntities (void)
++{
++	int		  n, num;
++	entity_t *ent;
++
++	dp7_lastframe = MSG_ReadLong ();
++	dp7_servermoveseq = MSG_ReadLong (); // DP7 and later
++	dp7_frames++;
++
++	// ack the E5 frame number (not the netchan sequence the FTE path acks)
++	if (!cls.demoplayback && cl.ackframes_count < countof (cl.ackframes))
++		cl.ackframes[cl.ackframes_count++] = dp7_lastframe;
++
++	for (;;)
++	{
++		n = (unsigned short)MSG_ReadShort ();
++		if (n == 0x8000 || msg_badread)
++			break; // "remove world" is the terminator
++		num = n & 0x7fff;
++
++		if (num <= 0 || num >= cl.max_edicts || num >= dp7_numstates)
++		{
++			// can't hold it: parse the bytes to stay in sync, drop the result
++			if (!(n & 0x8000))
++				CLDP7_ReadE5Update (&dp7_scratch);
++			continue;
++		}
++
++		ent = CL_EntityNum (num);
++		if (n & 0x8000)
++		{ // removal
++			CLDP7_ResetState (&dp7_states[num]);
++			ent->update_type = false;
++			ent->model = NULL;
++			InvalidateTraceLineCache ();
++			continue;
++		}
++
++		CLDP7_ReadE5Update (&dp7_states[num]);
++		CLDP7_ToNetstate (&dp7_states[num], &ent->netstate);
++		if (ent->update_type)
++		{ // simple update (same as the FTE path)
++			if (ent->msgtime == cl.mtime[0])
++				ent->msgtime = cl.mtime[1];
++		}
++		else
++		{ // new entity: no previous copy to lerp from
++			ent->update_type = true;
++			ent->msgtime = 0;
++		}
++	}
++
++	CL_EntitiesDeltaed ();
++
++	if (cls.signon == SIGNONS - 1)
++	{ // first entity frame is the final signon stage (as in CLFTE_ParseEntitiesUpdate)
++		cls.signon = SIGNONS;
++		CL_SignonReply ();
++	}
++}
++
++// ---------------------------------------------------------------------------
++// DP7 clientdata (DarkPlaces cl_parse.c CL_ParseClientdata). Health, ammo, weapon
++// and viewheight arrive as stats; this carries punch, velocity and the flags.
++// ---------------------------------------------------------------------------
++#define CL_SetStati(stat, val) cl.statsf[stat] = (cl.stats[stat] = val)
++
++static void CLDP7_ParseClientdata (void)
++{
++	unsigned int bits;
++	int			 i;
++
++	bits = (unsigned short)MSG_ReadShort ();
++	if (bits & DP_SU_EXTEND1)
++		bits |= MSG_ReadByte () << 16;
++	if (bits & DP_SU_EXTEND2)
++		bits |= (unsigned int)MSG_ReadByte () << 24;
++
++	if (bits & DP_SU_VIEWHEIGHT)
++		CL_SetStati (STAT_VIEWHEIGHT, MSG_ReadChar ());
++	if (bits & DP_SU_IDEALPITCH)
++		CL_SetStati (STAT_IDEALPITCH, MSG_ReadChar ());
++	else
++		CL_SetStati (STAT_IDEALPITCH, 0);
++
++	VectorCopy (cl.mvelocity[0], cl.mvelocity[1]);
++	for (i = 0; i < 3; i++)
++	{
++		cl.punchangle[i] = (bits & (DP_SU_PUNCH1 << i)) ? MSG_ReadShort () * (360.0f / 65536.0f) : 0;
++		if (bits & (DP_SU_PUNCHVEC1 << i))
++			MSG_ReadFloat (); // punchvector: no vkQuake equivalent
++		cl.mvelocity[0][i] = (bits & (DP_SU_VELOCITY1 << i)) ? MSG_ReadFloat () : 0;
++	}
++	if (v_punchangles[0][0] != cl.punchangle[0] || v_punchangles[0][1] != cl.punchangle[1] || v_punchangles[0][2] != cl.punchangle[2])
++	{
++		v_punchangles_times[1] = v_punchangles_times[0];
++		v_punchangles_times[0] = cl.mtime[0];
++		VectorCopy (v_punchangles[0], v_punchangles[1]);
++		VectorCopy (cl.punchangle, v_punchangles[0]);
++	}
++
++	if (bits & DP_SU_ITEMS)
++		CL_SetStati (STAT_ITEMS, MSG_ReadLong ());
++	cl.onground = (bits & DP_SU_ONGROUND) != 0;
++	cl.inwater = (bits & DP_SU_INWATER) != 0;
++	if (bits & DP_SU_VIEWZOOM)
++		CL_ParseStatInt (STAT_VIEWZOOM, (unsigned short)MSG_ReadShort ());
++}
++
++// DarkPlaces svc_sound: bit 2 is a no-data looping flag (not FTE's moreflags byte)
++// and bit 5 a speed short.
++static void CLDP7_ParseSound (void)
++{
++	vec3_t pos;
++	int	   field_mask, volume, channel, ent, sound_num, i;
++	float  attenuation;
++
++	field_mask = MSG_ReadByte ();
++	volume = (field_mask & DP_SND_VOLUME) ? MSG_ReadByte () : DEFAULT_SOUND_PACKET_VOLUME;
++	attenuation = (field_mask & DP_SND_ATTENUATION) ? MSG_ReadByte () / 64.0 : DEFAULT_SOUND_PACKET_ATTENUATION;
++	if (field_mask & DP_SND_SPEEDUSHORT4000)
++		MSG_ReadShort (); // playback speed: our mixer can't, ignore
++	if (field_mask & DP_SND_LARGEENTITY)
++	{
++		ent = (unsigned short)MSG_ReadShort ();
++		channel = MSG_ReadChar (); // DP: negative = "don't override" flags
++		if (channel < 0)
++			channel = 0;
++	}
++	else
++	{
++		channel = (unsigned short)MSG_ReadShort ();
++		ent = channel >> 3;
++		channel &= 7;
++	}
++	sound_num = (field_mask & DP_SND_LARGESOUND) ? (unsigned short)MSG_ReadShort () : MSG_ReadByte ();
++	for (i = 0; i < 3; i++)
++		pos[i] = MSG_ReadCoord (cl.protocolflags);
++
++	if (sound_num >= MAX_SOUNDS)
++		return;
++	if (ent >= cl.max_edicts)
++		ent = 0; // an entity we can't hold: play it at its position as a world sound
++	S_StartSound (ent, channel, cl.sound_precache[sound_num], pos, volume / 255.0, attenuation);
++}
++
++// Temp entities: Quake's 0-13 and DP's rain/snow (55/56, already in cl_tent.c) go
++// to the shared parser. DP's own types are skipped by size (Phase B draws them);
++// anything else would desync, so it ends the game with a message instead of
++// reaching cl_tent.c's Sys_Error.
++static qboolean CLDP7_TempEntity (void)
++{
++	int type;
++	int vec = 3 * 4; // a DP7 vector: 3 float coords
++
++	if (msg_readcount >= net_message.cursize)
++		return false; // let the shared parser report the bad read
++	type = net_message.data[msg_readcount];
++	if (type <= 13 || type == 55 || type == 56)
++		return false;
++
++	MSG_ReadByte ();
++	switch (type)
++	{
++	case 16: // TE_EXPLOSION3: origin, 3 coord colour
++		CLDP7_Skip (vec + 3 * 4);
++		break;
++	case 17: // TE_LIGHTNING4NEH: model, entity, start, end
++		MSG_ReadString ();
++		CLDP7_Skip (2 + vec + vec);
++		break;
++	case 50: // TE_BLOOD
++	case 51: // TE_SPARK: origin, 3 char vel, byte count
++		CLDP7_Skip (vec + 3 + 1);
++		break;
++	case 52: // TE_BLOODSHOWER: mins, maxs, coord speed, short count
++		CLDP7_Skip (vec + vec + 4 + 2);
++		break;
++	case 53: // TE_EXPLOSIONRGB: origin, 3 byte colour
++		CLDP7_Skip (vec + 3);
++		break;
++	case 54: // TE_PARTICLECUBE: mins, maxs, dir, short count, byte colour, byte gravity, coord randomvel
++		CLDP7_Skip (vec * 3 + 2 + 1 + 1 + 4);
++		break;
++	case 57: // TE_GUNSHOTQUAD
++	case 58: // TE_SPIKEQUAD
++	case 59: // TE_SUPERSPIKEQUAD
++	case 70: // TE_EXPLOSIONQUAD
++	case 72: // TE_SMALLFLASH
++	case 75: // TE_PLASMABURN
++	case 78: // TE_TEI_BIGEXPLOSION
++		CLDP7_Skip (vec);
++		break;
++	case 73: // TE_CUSTOMFLASH: origin, radius, lifetime, rgb
++		CLDP7_Skip (vec + 5);
++		break;
++	case 74: // TE_FLAMEJET: origin, velocity, count
++	case 77: // TE_TEI_SMOKE
++	case 79: // TE_TEI_PLASMAHIT
++		CLDP7_Skip (vec + vec + 1);
++		break;
++	case 76: // TE_TEI_G3: start, end, angles
++		CLDP7_Skip (vec * 3);
++		break;
++	default:
++		CLDP7_Abort (va ("unknown temp entity type %i (a mod-specific effect vkQuake can't parse)", type));
++		return true;
++	}
++	dp7_skipped_te++;
++	return true;
++}
++
++/*
++==================
++CLDP7_ParseCommand
++
++Called by CL_ParseServerMessage BEFORE its switch, only when cl.protocol is
++PROTOCOL_DP7. Returns true when it consumed the message; false lets the shared
++switch handle an opcode whose layout DP7 shares with NetQuake.
++==================
++*/
++qboolean CLDP7_ParseCommand (int cmd)
++{
++	int i;
++
++	switch (cmd)
++	{
++	case svc_sound:
++		CLDP7_ParseSound ();
++		return true;
++	case svc_clientdata:
++		CLDP7_ParseClientdata ();
++		return true;
++	case svc_temp_entity:
++		return CLDP7_TempEntity ();
++	case DP_svc_showlmp: // Nehahra-style overlay pics: not drawn
++		MSG_ReadString ();
++		MSG_ReadString ();
++		MSG_ReadShort ();
++		MSG_ReadShort ();
++		return true;
++	case DP_svc_hidelmp:
++		MSG_ReadString ();
++		return true;
++	case DP_svc_downloaddata: // only sent after a "download" request, which we never make
++		MSG_ReadLong ();
++		i = (unsigned short)MSG_ReadShort ();
++		CLDP7_Skip (i);
++		return true;
++	case svcdp_updatestatbyte:
++		i = MSG_ReadByte ();
++		CL_ParseStatInt (i, MSG_ReadByte ());
++		return true;
++	case DP_svc_effect: // sprite effect -- Phase B
++		CLDP7_Skip (3 * 4 + 4);
++		return true;
++	case DP_svc_effect2:
++		CLDP7_Skip (3 * 4 + 2 + 2 + 1 + 1);
++		return true;
++	case DP_svc_precache: // [short] index (+0x8000 = sound), [string] name
++		CL_ParsePrecache ();
++		return true;
++	case DP_svc_spawnbaseline2:
++		i = MSG_ReadShort ();
++		CL_ParseBaseline (CL_EntityNum (i), 7); // short model, short frame
++		return true;
++	case DP_svc_spawnstatic2:
++		CL_ParseStatic (7);
++		return true;
++	case DP_svc_entities:
++		CLDP7_ParseEntities ();
++		return true;
++	case DP_svc_csqcentities:
++		CLDP7_Abort ("it runs client-side QuakeC (CSQC, e.g. Xonotic), which vkQuake can't run.");
++		return true;
++	case DP_svc_spawnstaticsound2:
++		CL_ParseStaticSound (2); // short sound index
++		return true;
++	case svcdp_trailparticles:
++	case svcdp_pointparticles:
++	case svcdp_pointparticles1:
++		return false; // the shared parser already speaks these (DP effectinfo order)
++	default:
++		// 38-49 and 63+ are rerelease/FTE opcodes in vkQuake's switch; DP7 never sends
++		// them, so seeing one means we've lost sync.
++		if ((cmd >= 38 && cmd <= 49) || cmd >= 63 || cmd == 4 || cmd == 21)
++		{
++			CLDP7_Abort (va ("unexpected message %i", cmd));
++			return true;
++		}
++		return false;
++	}
++}
++
++/*
++==================
++CLDP7_WriteMove
++
++DP7 clc_move (DarkPlaces cl_input.c CL_SendMove, PROTOCOL_DARKPLACES7): 56 bytes.
++==================
++*/
++void CLDP7_WriteMove (sizebuf_t *buf, const usercmd_t *cmd)
++{
++	extern int	 in_impulse;
++	int			 dump = buf->cursize;
++	unsigned int bits = cmd->buttons & 3; // attack, jump
++	int			 i;
++
++	if (cmd->buttons & 4)
++		bits |= 256; // vkQuake's +use bit is DP's button 9 ("use")
++
++	MSG_WriteByte (buf, clc_move);
++	MSG_WriteLong (buf, 0);				// movesequence: 0 = not predicted, nothing to replay
++	MSG_WriteFloat (buf, cl.mtime[0]); // last server time, for ping
++	for (i = 0; i < 3; i++)
++		MSG_WriteShort (buf, Q_rint (cl.viewangles[i] * 65536.0 / 360.0) & 65535);
++	MSG_WriteShort (buf, Q_rint (cmd->forwardmove));
++	MSG_WriteShort (buf, Q_rint (cmd->sidemove));
++	MSG_WriteShort (buf, Q_rint (cmd->upmove));
++	MSG_WriteLong (buf, bits);
++	MSG_WriteByte (buf, cmd->impulse & 0xff);
++	// prydon cursor: screen x/y, start, impact, entity -- unused
++	MSG_WriteShort (buf, 0);
++	MSG_WriteShort (buf, 0);
++	for (i = 0; i < 6; i++)
++		MSG_WriteFloat (buf, 0);
++	MSG_WriteShort (buf, 0);
++	in_impulse = 0;
++
++	cl.movecmds[cl.movemessages & MOVECMDS_MASK] = *cmd;
++	dp7_moves++;
++	// as for every protocol: drop the first two, they may carry the last level's input
++	if (++cl.movemessages <= 2)
++		buf->cursize = dump;
++}
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -24,6 +24,7 @@
+ // cl_parse.c  -- parse a message received from the server
+ 
+ #include "quakedef.h"
++#include "cl_dp7.h" // vkquake-ios 0036
+ #include "bgmusic.h"
+ #include "steam.h"
+ 
+@@ -518,7 +519,7 @@
+ }
+ 
+ // called with both fte+dp deltas
+-static void CL_EntitiesDeltaed (void)
++void CL_EntitiesDeltaed (void) // vkquake-ios 0036: shared with cl_dp7.c
+ {
+ 	int		  newnum;
+ 	qmodel_t *model;
+@@ -1064,7 +1065,7 @@
+ 	}
+ 
+ 	// johnfitz -- support multiple protocols
+-	if (i != PROTOCOL_NETQUAKE && i != PROTOCOL_FITZQUAKE && i != PROTOCOL_RMQ)
++	if (i != PROTOCOL_NETQUAKE && i != PROTOCOL_FITZQUAKE && i != PROTOCOL_RMQ && i != PROTOCOL_DP7) // vkquake-ios 0036: + DP7
+ 	{
+ 		Con_Printf ("\n"); // because there's no newline after serverinfo print
+ 		if (!cls.demoplayback)
+@@ -1086,6 +1087,8 @@
+ 			Con_Warning ("PROTOCOL_RMQ protocolflags %i contains unsupported flags\n", cl.protocolflags);
+ 		}
+ 	}
++	else if (cl.protocol == PROTOCOL_DP7)
++		CLDP7_NewServer (); // vkquake-ios 0036: float coords, 16-bit angles, entity state
+ 	else
+ 		cl.protocolflags = 0;
+ 
+@@ -1621,7 +1624,7 @@
+ CL_ParseBaseline
+ ==================
+ */
+-static void CL_ParseBaseline (entity_t *ent, int version) // johnfitz -- added argument
++void CL_ParseBaseline (entity_t *ent, int version) // johnfitz -- added argument
+ {
+ 	int i;
+ 	int bits; // johnfitz
+@@ -1797,7 +1800,7 @@
+ CL_ParseStatic
+ =====================
+ */
+-static void CL_ParseStatic (int version) // johnfitz -- added a parameter
++void CL_ParseStatic (int version) // johnfitz -- added a parameter
+ {
+ 	entity_t *ent;
+ 	int		  i;
+@@ -1846,7 +1849,7 @@
+ CL_ParseStaticSound
+ ===================
+ */
+-static void CL_ParseStaticSound (int version) // johnfitz -- added argument
++void CL_ParseStaticSound (int version) // johnfitz -- added argument
+ {
+ 	vec3_t org;
+ 	int	   sound_num, vol, atten;
+@@ -1873,7 +1876,7 @@
+ 
+ spike -- added this mostly for particle effects, but its also used for models+sounds (if needed)
+ */
+-static void CL_ParsePrecache (void)
++void CL_ParsePrecache (void)
+ {
+ 	unsigned short code = MSG_ReadShort ();
+ 	unsigned int   index = code & 0x3fff;
+@@ -2042,7 +2045,7 @@
+ {
+ 	CL_ParseStatNumeric (stat, fval, fval);
+ }
+-static void CL_ParseStatInt (int stat, int ival)
++void CL_ParseStatInt (int stat, int ival)
+ {
+ 	CL_ParseStatNumeric (stat, ival, ival);
+ }
+@@ -2119,6 +2122,14 @@
+ 		if (cmd < (int)NUM_SVC_STRINGS)
+ 		{
+ 			SHOWNET (svc_strings[cmd]);
++		}
++
++		// vkquake-ios 0036: DarkPlaces protocol 7 first -- its 52/54/56 are the
++		// rerelease's achievement/levelcompleted/localsound in the switch below
++		if (cl.protocol == PROTOCOL_DP7 && CLDP7_ParseCommand (cmd))
++		{
++			lastcmd = cmd;
++			continue;
+ 		}
+ 
+ 		// other commands
+--- a/Quake/cl_input.c
++++ b/Quake/cl_input.c
+@@ -25,6 +25,7 @@
+ // rights reserved.
+ 
+ #include "quakedef.h"
++#include "cl_dp7.h" // vkquake-ios 0036
+ 
+ extern cvar_t cl_maxpitch; // johnfitz -- variable pitch clamping
+ extern cvar_t cl_minpitch; // johnfitz -- variable pitch clamping
+@@ -494,6 +495,12 @@
+ 	}
+ 	cl.ackframes_count = 0;
+ 
++	if (cmd && cl.protocol == PROTOCOL_DP7)
++	{
++		CLDP7_WriteMove (&buf, cmd); // vkquake-ios 0036: DarkPlaces protocol 7 layout
++		cmd = NULL;
++	}
++
+ 	if (cmd)
+ 	{
+ 		int			 dump = buf.cursize;
+--- a/meson.build
++++ b/meson.build
+@@ -225,6 +225,7 @@
+     'Quake/cfgfile.c',
+     'Quake/chase.c',
+     'Quake/cl_demo.c',
++    'Quake/cl_dp7.c',
+     'Quake/cl_input.c',
+     'Quake/cl_main.c',
+     # vkquake-ios overlay 0028 (MP-DL1): the missing-map downloader. The whole

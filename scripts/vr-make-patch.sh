@@ -12,7 +12,10 @@ OUT="$1"; shift
 tmp="$OUT.tmp"
 : > "$tmp"
 for f in "$@"; do
-	if ! diff -u "$ROOT/build/src-base/$f" "$ROOT/build/src-overlay/$f" \
+	# -N: a file new in this patch (no build/src-base copy) diffs against empty, so
+	# `patch` creates it; a path missing from the overlay is a typo -- fail loudly.
+	[ -f "$ROOT/build/src-overlay/$f" ] || { echo "FATAL: build/src-overlay/$f does not exist" >&2; rm -f "$tmp"; exit 1; }
+	if ! diff -uN "$ROOT/build/src-base/$f" "$ROOT/build/src-overlay/$f" \
 		| sed -e "1s|.*|--- a/$f|" -e "2s|.*|+++ b/$f|" >> "$tmp"; then
 		: # diff exits 1 when files differ; that is the normal case
 	fi
