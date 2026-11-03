@@ -1,0 +1,53 @@
+--- a/Quake/net_dgrm.c
++++ b/Quake/net_dgrm.c
+@@ -1968,14 +1968,30 @@
+ 					 * vkquake-ios (issue #8): mark the rows a join cannot succeed on, with
+ 					 * the same leading '*' upstream already uses for a protocol mismatch:
+ 					 * password-protected servers (FTE refuses after accepting) and
+-					 * DarkPlaces servers that do not advertise an NQ protocol (they answer
+-					 * with DP7, "Server returned version 3504").
++					 * Xonotic servers listed under the Quake game name (Xonotic content
++					 * and CSQC; no Quake client can play them under any protocol).
++					 *
++					 * DarkPlaces rows are NOT starred for being DarkPlaces (0035, DP7 plan
++					 * Phase 0). DP never sends `nqprotocol`, and its `protocol` key is the
++					 * master protocol (3), so nothing in getinfo tells a protocol-15 DP
++					 * server (joinable today: PART1CL3 COOP/Hipnotic/Rogue, Spaceball CTF)
++					 * from a DP7 one; only a connect does, and probing from the browser
++					 * would take a client slot on every listed server. They are tagged
++					 * "DP " instead, and a DP7 join ends in CL_RefuseServerProtocol's
++					 * one-line refusal, which names that tag.
+ 					 */
+-					char needpass[8], gamename[32], nqprot[16];
++					char needpass[8], gamename[32], gamever[16], qcstatus[128];
+ 					Info_ReadKey (info, "needpass", needpass, sizeof (needpass));
+ 					Info_ReadKey (info, "gamename", gamename, sizeof (gamename));
+-					Info_ReadKey (info, "nqprotocol", nqprot, sizeof (nqprot));
+-					if (atoi (needpass) || (!q_strcasecmp (gamename, "DarkPlaces-Quake") && !*nqprot))
++					Info_ReadKey (info, "gameversion", gamever, sizeof (gamever));
++					Info_ReadKey (info, "qcstatus", qcstatus, sizeof (qcstatus));
++					if (!q_strcasecmp (gamename, "DarkPlaces-Quake"))
++					{
++						char tagged[sizeof (hostcache[n].name)];
++						q_snprintf (tagged, sizeof (tagged), "DP %s", hostcache[n].name);
++						q_strlcpy (hostcache[n].name, tagged, sizeof (hostcache[n].name));
++					}
++					if (atoi (needpass) || strstr (qcstatus, "Xonotic") || (!q_strcasecmp (hostcache[n].gamedir, "data") && atoi (gamever) != 0))
+ 						q_strlcpy (tmp, "0", sizeof (tmp)); // fall into the incompatible branch below
+ 				}
+ 				if (atoi (tmp) != NET_PROTOCOL_VERSION)
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -980,8 +980,10 @@
+ 		dp = version - 95; // DP1, DP2
+ 	if (dp)
+ 	{
+-		q_snprintf (line, sizeof (line), "This server uses the DarkPlaces protocol (%i), which vkQuake cannot join.", dp);
+-		q_strlcpy (m_return_reason, "DarkPlaces protocol: can't join", sizeof (m_return_reason));
++		// 0035: the browser can't tell DP7 from protocol 15 before a join (see
++		// net_dgrm.c), so it tags every DarkPlaces row "DP"; say which rows those are.
++		q_snprintf (line, sizeof (line), "DarkPlaces protocol server (DP%i) - tagged DP in the server browser. vkQuake cannot join it.", dp);
++		q_snprintf (m_return_reason, sizeof (m_return_reason), "DP%i server: can't join (DP tag)", dp);
+ 	}
+ 	else
+ 	{
