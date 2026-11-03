@@ -45,7 +45,21 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    r_ssao 0 / vid_fsaa 0 on iOS.
 2. Device checks the sim can't do: real controller gyro/rumble, headset VR (rebuilt
    present path, depth copy), surface-loss recovery on backgrounding.
-3. Wait for robimart's test of 1.2.1.2 (#7 external display, #8 servers incl. TF and
+3. **#7 round 3 (NEXT, right after Phase A frees the tree; RC branch):** reporter's
+   1.2.1.2 dump shows the external panel reported AS `UIScreen.mainScreen` with
+   `screens=1` (the iPad's own panel is not listed while the game is on the monitor),
+   so `UIKit_IsExternalDisplayScene()` / the shell hook (both keyed on
+   "screen != mainScreen") never fire: supported=0x18, scene landscape-right, bounds
+   1692x3008, drawable 3384x6016 ⇒ still rotated. New signal: the panel is
+   LANDSCAPE-NATIVE (`nativeBounds` 6016x3384) while every iPad panel is
+   portrait-native (2064x2752 etc.) ⇒ key both checks on
+   `screen.nativeBounds.size.width > height` (plus the emulation hint). Expected after
+   fix: orient=portrait, bounds 3008x1692, drawable 6016x3384, supported=0x2. Also
+   reporter asks: print CFBundleShortVersionString/CFBundleVersion in `vkq_mouse`
+   (iOS Settings shows no version). Then 1.2.1.3 test build (OTA_PUBLIC_GATE=1).
+   Pointer lock on the external display is still not granted (Apple policy).
+3'. Reporter on #8 (1.2.1.2): other servers "work well"; noticed the `*` rows. Wait for
+   more results of 1.2.1.2 (#7 external display, #8 servers incl. TF and
    pieter). If #7 is still rotated, read the `vkq_mouse` paste (expect external scene
    orient=portrait, bounds 3008x1692, drawable 6016x3384, supported=0x2).
 3a. DarkPlaces support — APPROVED by Austin. Plan: docs/DP7-PLAN.md on branch
