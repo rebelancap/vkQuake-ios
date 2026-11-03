@@ -70,9 +70,22 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    "moddl: a download is already in progress" after an abandoned TF plan blocked
    AirQuake/Copper downloads; (c) hipnotic server 192.99.32.215:27501 stalled on the
    loading screen after the switch+rejoin (no error); (d) noise: `Unknown command
-   "fullserverinfo"`, `UDP_Write, sendto: No route to host` bursts. Read-only Opus
-   diagnosis in flight on the oracle; fix round follows on `dp7` once the tree is free
-   (after #7 round 3 + the DP7 bounds fixes), then 1.2.1.3. (#7 external display, #8 servers incl. TF and
+   "fullserverinfo"`, `UDP_Write, sendto: No route to host` bursts. Diagnosis DONE
+   (scratchpad mp8c/REPORT.md + proposed.diff): (c) not reproduced on the oracle
+   (direct -game hipnotic join completes; moddl is iOS-only) BUT the loading plaque is
+   never lowered on the "Fetching…" Host_EndGame exits (cl_parse.c ~1264/~1312 and
+   0026's) → blank screen up to 60 s hides the console; fix SCR_EndLoadingPlaque
+   there + a 20 s signon watchdog; (a) only moddl issues `game`, nothing switches back;
+   policy: `CL_ContentDownload_PreConnect` at the top of Host_Connect_f switches back
+   when connecting elsewhere; maps install into id1 unless the server gamedir == ours;
+   (b) moddl/mapdl state returns to idle only on reconnect or menu Cancel → PreConnect
+   cancels both plans for a different target, Begin cancels an unattended prompt;
+   (d) FTE sends `fullserverinfo "<info>"` without `//` → run via
+   Cmd_ExecuteString(src_server) in the 0034 stufftext filter (not the cbuf: `;` in
+   the info), fix the 8192-byte memcpy into a 1024 slot in cl_main.c:1348; (e) the
+   "No route to host" bursts = NET_Connect's LAN broadcast search (255.255.255.255 +
+   ff03::1) without Local Network permission; it also busy-waits ~1.5-2 s per
+   connect → skip the LAN search for explicit IPs/DNS names. Fix round next on `dp7`. (#7 external display, #8 servers incl. TF and
    pieter). If #7 is still rotated, read the `vkq_mouse` paste (expect external scene
    orient=portrait, bounds 3008x1692, drawable 6016x3384, supported=0x2).
 3a. DarkPlaces support — APPROVED by Austin. Plan: docs/DP7-PLAN.md on branch
