@@ -52,8 +52,8 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    `dp7-plan` (d59edfc). Survey 2026-11-03: 26 DP servers listed, 13 answer, 0 players
    on any; 4 run protocol 15 and are joinable TODAY but our `*` rule stars them
    (DP never sends `nqprotocol`); 7 are DP7 Quake servers (no CSQC); 2 are Xonotic
-   (CSQC, never joinable). Phase 0 (star rule fix) IN FLIGHT on the RC branch.
-   Phase A next (fresh agent, branch `dp7` from the RC): new cl_dp7.c behind
+   (CSQC, never joinable). Phase 0 DONE (a66b149, patch 0035 on the RC): DP rows tagged "DP ", stars only for needpass/Xonotic; 4 protocol-15 DP servers joinable; oracle joined 47.190.124.72:26001.
+   Phase A IN FLIGHT (Opus agent, branch `dp7` from the RC, patch 0036): new cl_dp7.c behind
    cl.protocol==PROTOCOL_DP7 — entity-delta reader, DP7 clientdata, opcodes 55/56/59,
    56-byte clc_move + frame acks; ~450 lines, 2 rounds; regression gate = identical
    timedemo counts + byte-identical move packet for non-DP7. A 230-line Python
@@ -81,7 +81,7 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-Opus agent in flight: DP7 Phase 0 (browser star rule) on branch
-`issue-7-external-display`; owns the tree + iPhone Air (lane 2). Branches pushed:
-issue-6-7-followup, mod-download, issue-7-external-display (RC, 1.2.1.2), dp7-plan.
+Opus agent in flight: DP7 Phase A on branch `dp7` (from issue-7-external-display
+a66b149); owns the tree + iPhone Air (lane 2). Branches pushed: issue-6-7-followup,
+mod-download, issue-7-external-display (RC: 1.2.1.2 + Phase 0), dp7-plan.
 `main` = `origin/main` = v1.2.1.
