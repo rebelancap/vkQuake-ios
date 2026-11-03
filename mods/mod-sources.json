@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "updated": "2026-11-03",
- "about": "Curated client-content packages for the iOS mod downloader (overlay 0034). An entry is offered only when its `files` contain EVERY model a server is missing. Edit, then run scripts/mod-sources-verify.py (add --write-files to refresh files/bytes/sha256). The app fetches this file from the main branch on GitHub, so a fixed link reaches players without a release.",
+ "about": "Curated client-content packages for the iOS mod downloader (overlay 0034). An entry is offered only when its `files` contain EVERY model a server is missing; when no single entry does, entries whose `gamedirs` name the server's game directory are combined (a mod's pak plus `\"type\": \"file\"` entries for loose map models). Edit, then run scripts/mod-sources-verify.py (add --write-files to refresh files/bytes/sha256). The app fetches this file from the main branch on GitHub, so a fixed link reaches players without a release.",
  "mods": [
   {
    "name": "Team Fortress (FortressOne assets)",
@@ -305,6 +305,66 @@
     "sound/weapons/turridle.wav",
     "sound/weapons/turrset.wav",
     "sound/weapons/turrspot.wav"
+   ]
+  },
+  {
+   "name": "Team Fortress map model: tpad.mdl",
+   "gamedir": "fortress",
+   "gamedirs": [
+    "fortress"
+   ],
+   "url": "https://raw.githubusercontent.com/FortressOne/map-repo/5b31e00e94fb86b6c126828e2df848032ba26989/fortress/package/2nuke2/progs/tpad.mdl",
+   "type": "file",
+   "install": [
+    {
+     "as": "progs/tpad.mdl"
+    }
+   ],
+   "verified": "2026-11-03: FortressOne/map-repo @5b31e00; the one model 2nuke2 (teleporter pad)'s entities need beyond the FortressOne pak (entity-lump scan of the 54 FortressOne loc maps on maps.quakeworld.nu)",
+   "sha256": "b5f2149014484464e2d3b8c443427a278abe03eacfb7d341e25f3fc263e1477f",
+   "bytes": 22958,
+   "files": [
+    "progs/tpad.mdl"
+   ]
+  },
+  {
+   "name": "Team Fortress map model: qpi.mdl",
+   "gamedir": "fortress",
+   "gamedirs": [
+    "fortress"
+   ],
+   "url": "https://raw.githubusercontent.com/FortressOne/map-repo/5b31e00e94fb86b6c126828e2df848032ba26989/fortress/package/2tech3/progs/qpi.mdl",
+   "type": "file",
+   "install": [
+    {
+     "as": "progs/qpi.mdl"
+    }
+   ],
+   "verified": "2026-11-03: FortressOne/map-repo @5b31e00; the one model 2tech3's entities need beyond the FortressOne pak (entity-lump scan of the 54 FortressOne loc maps on maps.quakeworld.nu)",
+   "sha256": "fb794b308a7e688c9734239a25aa434e76967a1f5e7c41629c86c189807a2cf4",
+   "bytes": 114317,
+   "files": [
+    "progs/qpi.mdl"
+   ]
+  },
+  {
+   "name": "Team Fortress map model: ammopack.mdl",
+   "gamedir": "fortress",
+   "gamedirs": [
+    "fortress"
+   ],
+   "url": "https://raw.githubusercontent.com/FortressOne/map-repo/5b31e00e94fb86b6c126828e2df848032ba26989/fortress/package/2trench1/progs/ammopack.mdl",
+   "type": "file",
+   "install": [
+    {
+     "as": "progs/ammopack.mdl"
+    }
+   ],
+   "verified": "2026-11-03: FortressOne/map-repo @5b31e00; the one model 2trench1's entities need beyond the FortressOne pak (entity-lump scan of the 54 FortressOne loc maps on maps.quakeworld.nu)",
+   "sha256": "b055e96ef231c008dfd7f8ae3c01cc3a2dfa32b1d08a0017df34b16e9f218e58",
+   "bytes": 19348,
+   "files": [
+    "progs/ammopack.mdl"
    ]
   },
   {

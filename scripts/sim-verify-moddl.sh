@@ -27,7 +27,14 @@
 #      cl_mapdownload_maxpkg but unpacks to more than 4x it is refused before
 #      anything is extracted
 #   g. (VKQ_MODDL_LIVE=1) a REAL public mod server: NetQuake.io Team Fortress,
-#      FortressOne assets from GitHub + well6.bsp from maps.quakeworld.nu
+#      FortressOne assets from GitHub + the map from maps.quakeworld.nu; on a map
+#      whose entities need a model the pak lacks (2nuke2 -> progs/tpad.mdl) the pak
+#      and that loose-file entry are combined into one plan; a map change that
+#      needs more content gets a fresh attempt instead of "not retrying"
+#  g2. (live) lose that loose model and rejoin: the retry guard is keyed on the
+#      missing SET, so the same server gets a 1-file plan, not a refusal
+#   j. (live) a DarkPlaces-protocol server: one clear console line, no stack
+#      trace, no "Unknown command cl_serverextension_download", back to the menu
 #
 # LANE: iPhone Air on iOS 27.0 (lane 2 by default). Never simctl create. The
 # device, the fixture HTTP server and every game server are shut down on every
@@ -440,45 +447,155 @@ echo "== (g) LIVE: NetQuake.io Team Fortress (52.14.57.255:26023)"
 # The real sources from here on. Written into autoexec.cfg too, not just set:
 # `game fortress` re-execs autoexec.cfg, which would otherwise put the fixture
 # URLs back mid-leg (the first live run fetched the next map from the fixture).
+#
+# Which table: VKQ_MODDL_LIVE_TABLE=bundled (default) makes the live refresh 404
+# so the copy IN THIS BUILD answers — the one that carries this branch's entries.
+# =main fetches mods/mod-sources.json from GitHub main, as players do.
+if [ "${VKQ_MODDL_LIVE_TABLE:-bundled}" = main ]; then
+	LIVE_TABLE="https://raw.githubusercontent.com/rebelancap/vkQuake-ios/main/mods/mod-sources.json"
+else
+	LIVE_TABLE="https://raw.githubusercontent.com/rebelancap/vkQuake-ios/main/mods/no-such-table-harness.json"
+fi
 cat > "$GAMEDIR/autoexec.cfg" <<CFG
 r_indirect 0
 volume 0
 bgmvolume 0
 cl_mapdownload 1
+cl_moddownload_tableurl "$LIVE_TABLE"
 CFG
 back_to_id1
 rm -rf "$BASE/fortress"
+rm -f "$CONT/Library/Caches/mod-sources.json" "$CONT/Library/Caches/mod-sources.json.part"
 say 'cl_mapdownload 1'
 say 'cl_mapdownload_allowhttp 0'
 say 'cl_mapdownload_bspurl "https://maps.quakeworld.nu/all/"'
-say 'cl_moddownload_tableurl "https://raw.githubusercontent.com/rebelancap/vkQuake-ios/main/mods/mod-sources.json"'
+say "cl_moddownload_tableurl \"$LIVE_TABLE\""
 sleep 2
+tfmap () {
+	python3 -I - <<'PY' 2>/dev/null || echo "?"
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
+s.sendto(b"\xff\xff\xff\xffgetstatus t", ("52.14.57.255", 26023))
+kv = s.recvfrom(8192)[0].decode("latin1").split("\n")[1].split("\\")[1:]
+print(dict(zip(kv[0::2], kv[1::2])).get("mapname", "?"))
+PY
+}
+LMAP=$(tfmap)
+echo "   the TF server is on: $LMAP"
+if [ "$LMAP" = "?" ]; then
+	fail "(g) the live TF server does not answer getstatus — it is down; leg (g) proves nothing"
+else
 M=$(mark)
 say "connect 52.14.57.255:26023"
 waitlog 'moddl: (downloaded|bundled) table matched "Team Fortress \(FortressOne assets\)" by gamedir' 60 "$M" \
-	&& pass "(g) TF matched on the server's gamedir" || { fail "(g) no TF match"; showtail "$M" 12; }
-waitlog 'moddl: plan — 2 item\(s\), [0-9]+ bytes, from github\.com and more, into fortress' 60 "$M" \
-	&& pass "(g) one prompt: FortressOne pak + the map ($(tail -n +"$M" "$LOG" | grep -Eo 'plan — 2 item\(s\), [0-9]+ bytes' | tail -1))" \
+	&& pass "(g) TF matched on the server's gamedir ($(tail -n +"$M" "$LOG" | grep -Eo 'moddl: (downloaded|bundled) table' | tail -1))" || { fail "(g) no TF match"; showtail "$M" 12; }
+# the maps whose entities need a model the FortressOne pak lacks (mod-sources.json)
+case "$LMAP" in
+	2nuke2) XMDL=tpad.mdl ;; 2tech3) XMDL=qpi.mdl ;; 2trench1) XMDL=ammopack.mdl ;; *) XMDL= ;;
+esac
+if [ -n "$XMDL" ]; then
+	waitlog "moddl: (downloaded|bundled) table matched \"Team Fortress map model: ${XMDL//./\\.}\" by gamedir" 30 "$M" \
+		&& pass "(g) $LMAP: the pak AND the loose $XMDL entry combined into one plan" || { fail "(g) $XMDL not planned with the pak"; showtail "$M" 12; }
+fi
+waitlog 'moddl: plan — [0-9]+ item\(s\), [0-9]+ bytes, from github\.com( and more)?, into fortress' 60 "$M" \
+	&& pass "(g) one prompt: $(tail -n +"$M" "$LOG" | grep -Eo 'plan — [0-9]+ item\(s\), [0-9]+ bytes' | tail -1)" \
 	|| { fail "(g) unexpected plan"; showtail "$M" 12; }
 sleep 1; shot 09-g-live-tf-prompt
 say 'moddl_accept'
 waitlog 'moddl: installed fortress/pak0\.pak' 240 "$M" && pass "(g) FortressOne pak0.pak installed" || { fail "(g) pak not installed"; showtail "$M" 12; }
+if [ -n "$XMDL" ]; then
+	waitlog "moddl: installed fortress/progs/${XMDL//./\\.}" 60 "$M" && pass "(g) fortress/progs/$XMDL installed" || { fail "(g) $XMDL not installed"; showtail "$M" 12; }
+fi
 waitlog 'moddl: rejoining 52\.14\.57\.255:26023' 120 "$M" && pass "(g) rejoining the live server" || { fail "(g) no rejoin"; showtail "$M" 12; }
-[ -f "$BASE/fortress/maps/well6.bsp" ] && pass "(g) maps/well6.bsp installed with it" || echo "   note  (g) well6.bsp not in fortress/maps (server may have changed map)"
-RM=$(mark)
-# In-game proof as soon as the signon lands (a live server can change map
-# under us — the first live run caught it switching to blitzkrieg2).
-waitlog 'Using protocol' 60 "$RM" && { sleep 6; shot 10-g-live-tf-in-game; }
-sleep 4
-if tail -n +"$RM" "$LOG" | grep -Eq 'which you do not have|moddl: FAILED|Host_Error'; then
-	fail "(g) the rejoin still failed:"; showtail "$RM" 12
-elif tail -n +"$RM" "$LOG" | grep -q 'Using protocol'; then
-	pass "(g) signon completed on the live TF server with no missing content"
+# A live server can change map under us (the first live run caught it moving on
+# to a map with a model the pak lacks). A NEW missing set must get a fresh
+# attempt now — accept it and rejoin again — instead of "not retrying".
+ingame=0
+for round in 1 2 3; do
+	RM=$(mark)
+	for _ in $(seq 1 90); do
+		tail -n +"$RM" "$LOG" | grep -Eq 'Using protocol|moddl: plan —|moddl: FAILED|not retrying|Host_Error' && break
+		sleep 1
+	done
+	sleep 5
+	if tail -n +"$RM" "$LOG" | grep -q 'moddl: plan —'; then
+		pass "(g) round $round: the server needs more content (map change?) — a fresh attempt was offered: $(tail -n +"$RM" "$LOG" | grep -Eo 'plan — [0-9]+ item\(s\), [0-9]+ bytes' | tail -1)"
+		say 'moddl_accept'
+		waitlog 'moddl: rejoining 52\.14\.57\.255:26023' 180 "$RM" || { fail "(g) round $round: no rejoin"; showtail "$RM" 12; break; }
+		continue
+	fi
+	if tail -n +"$RM" "$LOG" | grep -Eq 'which you do not have|moddl: FAILED|not retrying|Host_Error'; then
+		fail "(g) the rejoin still failed:"; showtail "$RM" 12; break
+	fi
+	if tail -n +"$RM" "$LOG" | grep -q 'Using protocol'; then
+		ingame=1; shot 10-g-live-tf-in-game
+		pass "(g) signon completed on the live TF server with no missing content"
+	else
+		fail "(g) no signon after the rejoin"; showtail "$RM" 12
+	fi
+	break
+done
+[ -f "$BASE/fortress/maps/$LMAP.bsp" ] && pass "(g) maps/$LMAP.bsp installed with it" || echo "   note  (g) $LMAP.bsp not in fortress/maps (server may have changed map)"
+
+echo
+echo "== (g2) retry guard is keyed on the MISSING SET: lose one map model, rejoin -> a 1-file plan, not \"not retrying\""
+GMDL=$(cd "$BASE/fortress/progs" 2>/dev/null && ls *.mdl 2>/dev/null | head -1 || true)
+if [ "$ingame" = 1 ] && [ -n "$GMDL" ]; then
+	say 'disconnect'; sleep 2
+	rm -f "$BASE/fortress/progs/$GMDL"
+	M=$(mark)
+	say "connect 52.14.57.255:26023"
+	waitlog "moddl: (downloaded|bundled) table matched \"Team Fortress map model: ${GMDL//./\\.}\" by gamedir" 60 "$M" \
+		&& pass "(g2) a second attempt on the same server, for the new set: the loose $GMDL entry alone" \
+		|| { fail "(g2) no second attempt"; showtail "$M" 12; }
+	tail -n +"$M" "$LOG" | grep -q 'not retrying' && fail "(g2) the guard refused a different missing set" || true
+	waitlog 'moddl: plan — 1 item\(s\), [0-9]+ bytes, from raw\.githubusercontent\.com, into fortress' 30 "$M" \
+		&& pass "(g2) plan: 1 item from raw.githubusercontent.com" || { fail "(g2) unexpected plan"; showtail "$M" 12; }
+	say 'moddl_accept'
+	waitlog "moddl: installed fortress/progs/${GMDL//./\\.}" 60 "$M" && pass "(g2) $GMDL reinstalled (sha256-pinned, IDPO checked)" || { fail "(g2) not installed"; showtail "$M" 12; }
+	RM=$(mark)
+	waitlog 'Using protocol' 90 "$RM" && { sleep 5; tail -n +"$RM" "$LOG" | grep -Eq 'which you do not have|moddl: FAILED|Host_Error' \
+		&& { fail "(g2) rejoin failed"; showtail "$RM" 12; } || { pass "(g2) back in the game"; shot 10b-g2-live-tf-rejoined; }; } \
+		|| { fail "(g2) no signon"; showtail "$RM" 12; }
+	say 'disconnect'; sleep 2
 else
-	fail "(g) no signon after the rejoin"; showtail "$RM" 12
+	echo "   note  (g2) skipped: the server's map ($LMAP) needed no loose map model (or (g) did not get in)"
 fi
-say 'disconnect'
 fi
+
+echo
+echo "== (j) LIVE: a DarkPlaces-protocol server -> one clear line, no stack trace, back to the menu (#8)"
+# ===========================================================================
+back_to_id1
+DPSRV=""
+for cand in 5.196.63.132:26000 47.190.124.72:26004 47.190.124.72:26001; do
+	if python3 -I - "$cand" <<'PY' >/dev/null 2>&1
+import socket, sys
+h, p = sys.argv[1].rsplit(":", 1)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
+s.sendto(b"\xff\xff\xff\xffgetinfo t", (h, int(p)))
+assert b"DarkPlaces-Quake" in s.recvfrom(4096)[0]
+PY
+	then DPSRV=$cand; break; fi
+done
+if [ -z "$DPSRV" ]; then
+	fail "(j) none of the known DarkPlaces servers answered getinfo — leg (j) proves nothing"
+else
+	M=$(mark)
+	say "connect $DPSRV"
+	waitlog 'This server uses the DarkPlaces protocol \(7\), which vkQuake cannot join\.' 60 "$M" \
+		&& pass "(j) $DPSRV: \"This server uses the DarkPlaces protocol (7), which vkQuake cannot join.\"" \
+		|| { fail "(j) no DarkPlaces refusal line"; tail -n +"$M" "$LOG" | tail -12 >&2; }
+	sleep 3
+	tail -n +"$M" "$LOG" | grep -q 'STACK TRACE' && fail "(j) a stack trace was printed" || pass "(j) no stack trace"
+	tail -n +"$M" "$LOG" | grep -q 'Host_Error' && fail "(j) Host_Error" || pass "(j) no Host_Error"
+	tail -n +"$M" "$LOG" | grep -q 'Unknown command "cl_serverextension_download"' && fail "(j) \"Unknown command cl_serverextension_download\" printed" \
+		|| pass "(j) DarkPlaces' cl_serverextension_download stufftext is silent"
+	alive && pass "(j) the app is alive" || fail "(j) the app stopped answering"
+	shot 11-j-darkplaces-refused-menu
+	say 'toggleconsole'; sleep 2; shot 12-j-darkplaces-refused-console; say 'toggleconsole'; sleep 1
+fi
+fi # VKQ_MODDL_LIVE
 
 # ---------------------------------------------------------------------------
 echo

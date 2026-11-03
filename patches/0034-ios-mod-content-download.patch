@@ -1,6 +1,66 @@
 --- a/Quake/cl_parse.c
 +++ b/Quake/cl_parse.c
-@@ -1163,11 +1163,69 @@
+@@ -959,6 +959,50 @@
+ static qboolean cl_late_bmodel_precache;
+ 
+ /*
++ * vkquake-ios (issue #8): the server answered with a protocol vkQuake has no
++ * parser for -- in practice DarkPlaces (DP7 = 3504), whose servers accept a
++ * NetQuake connect and only then say what they speak. Upstream raises a
++ * Host_Error, which on a phone is a wall of stack trace for what is simply "this
++ * server is not for this client". Say that in one line, put the reason on the
++ * join screen (like 0033's CCREP_REJECT path in cl_main.c) and end the game
++ * cleanly. Demo playback keeps upstream's error.
++ */
++static void CL_RefuseServerProtocol (int version)
++{
++	extern enum m_state_e m_return_state;
++	extern char			 m_return_reason[32];
++	char				 line[128];
++	int					 dp = 0;
++
++	if (version >= 3500 && version <= 3504)
++		dp = version - 3497; // DP3..DP7
++	else if (version == 96 || version == 97)
++		dp = version - 95; // DP1, DP2
++	if (dp)
++	{
++		q_snprintf (line, sizeof (line), "This server uses the DarkPlaces protocol (%i), which vkQuake cannot join.", dp);
++		q_strlcpy (m_return_reason, "DarkPlaces protocol: can't join", sizeof (m_return_reason));
++	}
++	else
++	{
++		q_snprintf (line, sizeof (line), "This server uses protocol %i, which vkQuake cannot join.", version);
++		q_snprintf (m_return_reason, sizeof (m_return_reason), "Unsupported protocol %i", version);
++	}
++	Con_Printf ("\n%s\n", line);
++	key_dest = key_menu;
++	m_state = (m_return_state == m_slist || m_return_state == m_lanconfig) ? m_return_state : m_main;
++	IN_Deactivate (true);
++	// Host_Connect_f raised the loading plaque; with it up nothing (the menu
++	// included) is drawn until its 60 s "load failed" timeout.
++	SCR_EndLoadingPlaque ();
++	// A join leaves the demo loop for good; without this, Host_EndGame would start
++	// the next attract demo over the menu when the loop was armed (+connect at
++	// launch runs before quake.rc's startdemos).
++	cls.demonum = -1;
++	Host_EndGame ("%s\n", line);
++}
++
++/*
+ ==================
+ CL_ParseServerInfo
+ ==================
+@@ -1021,6 +1065,8 @@
+ 	if (i != PROTOCOL_NETQUAKE && i != PROTOCOL_FITZQUAKE && i != PROTOCOL_RMQ)
+ 	{
+ 		Con_Printf ("\n"); // because there's no newline after serverinfo print
++		if (!cls.demoplayback)
++			CL_RefuseServerProtocol (i); // vkquake-ios (issue #8): no stack trace
+ 		Host_Error ("Server returned version %i, not %i or %i or %i", i, PROTOCOL_NETQUAKE, PROTOCOL_FITZQUAKE, PROTOCOL_RMQ);
+ 	}
+ 	cl.protocol = i;
+@@ -1163,11 +1209,69 @@
  	 * world model also catches a missing custom progs model, which is the other half
  	 * of this failure in the wild — and naming the first missing file is what makes
  	 * the message actionable.
@@ -60,17 +120,17 @@
  	for (i = 1; i < nummodels; i++)
  	{
  		if (model_precache[i][0] == '*') // inline bmodels live inside the world
-+			continue;
+ 			continue;
 +#ifdef VKQ_IOS
 +		// overlay 0034: on a mod server, name the missing MODEL (and its mod), not
 +		// the map that happens to be precache slot 1.
 +		if (modelgap && !q_strncasecmp (model_precache[i], "maps/", 5))
- 			continue;
++			continue;
 +#endif
  		if (!COM_FileExists (model_precache[i], NULL))
  		{
  			extern qboolean	     m_return_onerror;
-@@ -1197,7 +1255,7 @@
+@@ -1197,7 +1301,7 @@
  			 * a missing map needs — that path re-enters here with no menu
  			 * interaction behind it, and cl_connect_target still holds the address.
  			 */
@@ -79,6 +139,33 @@
  			{
  				// The menu screen and key_dest are already set by the downloader.
  				// Host_EndGame, not Host_Error, for R6.5's reasons (see below).
+@@ -2044,7 +2148,11 @@
+ 			i = MSG_ReadLong ();
+ 			// johnfitz -- support multiple protocols
+ 			if (i != PROTOCOL_NETQUAKE && i != PROTOCOL_FITZQUAKE && i != PROTOCOL_RMQ)
++			{
++				if (!cls.demoplayback)
++					CL_RefuseServerProtocol (i); // vkquake-ios (issue #8)
+ 				Host_Error ("Server returned version %i, not %i or %i or %i", i, PROTOCOL_NETQUAKE, PROTOCOL_FITZQUAKE, PROTOCOL_RMQ);
++			}
+ 			cl.protocol = i;
+ 			// johnfitz
+ 			break;
+@@ -2094,6 +2202,14 @@
+ 			{
+ 				if (!Cmd_ExecuteString (str + 2, src_server))
+ 					Con_DPrintf ("Server sent unknown command %s\n", Cmd_Argv (0));
++			}
++			else if (!q_strncasecmp (str, "cl_serverextension_download ", 28) && !strchr (str, ';') && (!strchr (str, '\n') || !strchr (str, '\n')[1]))
++			{
++				// vkquake-ios (issue #8): DarkPlaces sends this WITHOUT the "//" that
++				// marks a server command, so it reached the console buffer, where the
++				// server-command no-op registered in CL_Init is not visible, and
++				// printed "Unknown command". It is only an offer to send downloads.
++				Con_DPrintf2 ("Ignoring stufftext: %s", str);
+ 			}
+ 			else
+ 				Cbuf_AddText (str);
 --- a/Quake/client.h
 +++ b/Quake/client.h
 @@ -387,6 +387,21 @@
@@ -246,7 +333,7 @@
      'Quake/cmd.c',
 --- /dev/null
 +++ b/Quake/cl_moddl.c
-@@ -0,0 +1,1469 @@
+@@ -0,0 +1,1562 @@
 +/*
 +Copyright (C) 1996-2001 Id Software, Inc.
 +Copyright (C) 2010-2014 QuakeSpasm developers
@@ -311,6 +398,7 @@
 +// ============================================================================
 +
 +#include "quakedef.h"
++#include "q_ctype.h"
 +
 +#ifdef VKQ_IOS
 +
@@ -365,13 +453,14 @@
 +typedef enum
 +{
 +	ITEM_FILE = 0, // one precache file from the server's download URL
-+	ITEM_PKG,	   // the curated package
++	ITEM_PKG,	   // a curated package (mod.pkgs[item.pkg])
 +	ITEM_MAP	   // a missing map from 0028's bare-.bsp mirror
 +} mod_kind_t;
 +
 +#define MOD_MAX_ITEMS	 384
 +#define MOD_MISSING_SIZE 16384
 +#define MOD_MAX_TRIED	 16
++#define MOD_MAX_PKGS	 8 // curated packages one plan may combine (same gamedir)
 +
 +typedef struct
 +{
@@ -380,7 +469,17 @@
 +	long long  size;
 +	mod_kind_t kind;
 +	qboolean   optional; // a sound: dropped (not fatal) when the source lacks it
++	int		   pkg;		 // ITEM_PKG: index into mod.pkgs
 +} mod_item_t;
++
++// One curated package. A plan usually has one; when no single table entry has
++// every missing model, the resolver may combine several entries for the SAME
++// game directory (the mod's main pak plus a loose map model, say).
++typedef struct
++{
++	char	  url[512], sha[80], type[8], install[512], name[64];
++	long long bytes;
++} mod_pkg_t;
 +
 +static struct
 +{
@@ -395,9 +494,9 @@
 +	int			source;		   // 1 = server URL, 2 = curated table
 +	char		missing[MOD_MISSING_SIZE]; // newline-separated game paths
 +	int			nmodels;	   // missing non-map models (the fatal ones)
-+	// curated package
-+	char		pkgurl[512], pkgsha[80], pkgtype[8], pkginstall[512];
-+	long long	pkgbytes;
++	// curated package(s)
++	mod_pkg_t	pkgs[MOD_MAX_PKGS];
++	int			npkgs;
 +	// the plan
 +	mod_item_t	items[MOD_MAX_ITEMS];
 +	int			nitems, cur;
@@ -409,7 +508,7 @@
 +	int			frames; // MOD_SWITCH countdown
 +} mod;
 +
-+static char mod_tried[MOD_MAX_TRIED][256]; // targets offered this session
++static char mod_tried[MOD_MAX_TRIED][256]; // "<target>|<hash of the missing set>" offered this session
 +static int	mod_tried_count;
 +static char mod_switched[MOD_MAX_TRIED][256]; // targets we already switched game for
 +static int	mod_switched_count;
@@ -429,16 +528,36 @@
 +		q_strlcpy (list[(*n)++], s, 256);
 +}
 +
-+static void mod_forget_tried (const char *s)
++// The retry guard is keyed on the server AND what it is missing: a server that
++// changes map after an install can need content the first package did not have
++// (FortressOne's pak has no progs/tpad.mdl, which 2nuke2 uses), and that new set
++// deserves one attempt of its own. The same set twice still stops — that is a
++// package that did not deliver, and retrying it would loop.
++static void mod_tried_key (char *out, size_t len, const char *target, const char *missing)
 +{
-+	int i;
-+	for (i = 0; i < mod_tried_count; i++)
-+		if (!q_strcasecmp (mod_tried[i], s))
++	unsigned int h = 2166136261u; // FNV-1a over the case-folded missing list
++	const char	*p;
++	for (p = missing; *p; p++)
++	{
++		h ^= (unsigned char)q_tolower (*p);
++		h *= 16777619u;
++	}
++	q_snprintf (out, len, "%s|%08x", target, h);
++}
++
++// Forget every attempt recorded for this server (all of its missing sets).
++static void mod_forget_tried (const char *target)
++{
++	size_t tl = strlen (target);
++	int	   i;
++	for (i = 0; i < mod_tried_count;)
++		if (!q_strncasecmp (mod_tried[i], target, tl) && mod_tried[i][tl] == '|')
 +		{
 +			memmove (mod_tried[i], mod_tried[i + 1], (mod_tried_count - i - 1) * sizeof (mod_tried[0]));
 +			mod_tried_count--;
-+			return;
 +		}
++		else
++			i++;
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -1171,16 +1290,36 @@
 +// The package install: a .pak goes in as-is; a .zip is extracted into the
 +// staging tree (COM_UnzipToDir refuses traversal) and ONLY the files its install
 +// rules name are moved out of it.
-+static qboolean mod_install_pkg (const char *file)
++static qboolean mod_install_pkg (const char *file, const mod_pkg_t *pkg)
 +{
 +	char rules[512], *rule, *save = NULL;
 +	char stage[MAX_OSPATH], xdir[MAX_OSPATH], src[MAX_OSPATH], err[128];
 +
-+	if (!q_strcasecmp (mod.pkgtype, "pak"))
++	if (!q_strcasecmp (pkg->type, "pak"))
 +		return mod_place_pak (file);
-+	if (q_strcasecmp (mod.pkgtype, "zip"))
++	if (!q_strcasecmp (pkg->type, "file"))
 +	{
-+		mod_fail ("unknown package type \"%s\"", mod.pkgtype);
++		// One loose file (a map's model): the download IS the file, and its one
++		// install rule names the game path. mod_place_file checks the path and the
++		// magic number and never overwrites.
++		char why[128];
++		const char *as = strchr (pkg->install, '>');
++		if (pkg->install[0] != '>' || !as || !as[1] || strchr (as + 1, ';'))
++		{
++			mod_fail ("a \"file\" package needs exactly one install rule");
++			return false;
++		}
++		if (!mod_place_file (file, as + 1, why, sizeof (why)))
++		{
++			mod_fail ("%s", why);
++			return false;
++		}
++		Con_Printf ("moddl: installed %s/%s\n", mod.gamedir[0] ? mod.gamedir : COM_SkipPath (com_gamedir), as + 1);
++		return true;
++	}
++	if (q_strcasecmp (pkg->type, "zip"))
++	{
++		mod_fail ("unknown package type \"%s\"", pkg->type);
 +		return false;
 +	}
 +	mod_stage_dir (stage, sizeof (stage));
@@ -1195,7 +1334,7 @@
 +		mod_fail ("%s", err);
 +		return false;
 +	}
-+	q_strlcpy (rules, mod.pkginstall, sizeof (rules));
++	q_strlcpy (rules, pkg->install, sizeof (rules));
 +	for (rule = strtok_r (rules, ";", &save); rule; rule = strtok_r (NULL, ";", &save))
 +	{
 +		char *as = strchr (rule, '>');
@@ -1237,7 +1376,7 @@
 +	char file[MAX_OSPATH];
 +	q_strlcpy (file, mod.tmpfile, sizeof (file));
 +	mod.tmpfile[0] = 0;
-+	if (!mod_install_pkg (file))
++	if (!mod_install_pkg (file, &mod.pkgs[mod.items[mod.cur].pkg]))
 +		return;
 +	remove (file);
 +	mod.cur++;
@@ -1410,12 +1549,29 @@
 +			mod_fail (mod.servergd[0] ? "no known download for mod \"%.32s\"" : "no known download for this mod", mod.servergd);
 +			return;
 +		}
-+		q_strlcpy (mod.pkgurl, VKQ_DL_Result (mod.job, "url"), sizeof (mod.pkgurl));
-+		q_strlcpy (mod.pkgsha, VKQ_DL_Result (mod.job, "sha256"), sizeof (mod.pkgsha));
-+		q_strlcpy (mod.pkgtype, VKQ_DL_Result (mod.job, "type"), sizeof (mod.pkgtype));
-+		q_strlcpy (mod.pkginstall, VKQ_DL_Result (mod.job, "install"), sizeof (mod.pkginstall));
-+		q_strlcpy (mod.title, VKQ_DL_Result (mod.job, "name"), sizeof (mod.title));
-+		mod.pkgbytes = strtoll (VKQ_DL_Result (mod.job, "bytes"), NULL, 10);
++		// Package 0 under the plain keys; any further packages the resolver had to
++		// combine (same gamedir) under "<key>.<n>". VKQ_DL_Result returns one static
++		// buffer, so every value is copied before the next call.
++		{
++			int n = atoi (VKQ_DL_Result (mod.job, "count")), k;
++			if (n < 1)
++				n = 1;
++			if (n > MOD_MAX_PKGS)
++				n = MOD_MAX_PKGS;
++			mod.npkgs = n;
++			for (k = 0; k < n; k++)
++			{
++				mod_pkg_t  *pk = &mod.pkgs[k];
++				const char *sfx = k ? va (".%d", k) : "";
++				q_strlcpy (pk->url, VKQ_DL_Result (mod.job, va ("url%s", sfx)), sizeof (pk->url));
++				q_strlcpy (pk->sha, VKQ_DL_Result (mod.job, va ("sha256%s", sfx)), sizeof (pk->sha));
++				q_strlcpy (pk->type, VKQ_DL_Result (mod.job, va ("type%s", sfx)), sizeof (pk->type));
++				q_strlcpy (pk->install, VKQ_DL_Result (mod.job, va ("install%s", sfx)), sizeof (pk->install));
++				q_strlcpy (pk->name, VKQ_DL_Result (mod.job, va ("name%s", sfx)), sizeof (pk->name));
++				pk->bytes = strtoll (VKQ_DL_Result (mod.job, va ("bytes%s", sfx)), NULL, 10);
++			}
++		}
++		q_strlcpy (mod.title, mod.pkgs[0].name, sizeof (mod.title));
 +		// Install where the SERVER says the mod lives when the match was on its
 +		// gamedir; otherwise into the table's directory for the package.
 +		if (!strcmp (VKQ_DL_Result (mod.job, "rank"), "gamedir") && mod.servergd[0])
@@ -1427,7 +1583,10 @@
 +			char which[16], rank[16];
 +			q_strlcpy (which, VKQ_DL_Result (mod.job, "table"), sizeof (which));
 +			q_strlcpy (rank, VKQ_DL_Result (mod.job, "rank"), sizeof (rank));
-+			Con_Printf ("moddl: %s table matched \"%s\" by %s (%lld bytes) -> %s\n", which, mod.title, rank, mod.pkgbytes, gd[0] ? gd : "?");
++			int	 k;
++			for (k = 0; k < mod.npkgs; k++)
++				Con_Printf (
++					"moddl: %s table matched \"%s\" by %s (%lld bytes) -> %s\n", which, mod.pkgs[k].name, rank, mod.pkgs[k].bytes, gd[0] ? gd : "?");
 +		}
 +		mod_job_release ();
 +		if (!gd[0])
@@ -1435,26 +1594,39 @@
 +			mod_fail ("the mod table entry has no usable game directory");
 +			return;
 +		}
-+		if (!mod_url_ok (mod.pkgurl))
 +		{
-+			mod_fail ("the mod table entry has no usable https download");
-+			return;
-+		}
-+		if (!mod.pkgsha[0])
-+		{
-+			// Curated entries are pinned by hash; an entry without one is a table bug.
-+			mod_fail ("the mod table entry carries no sha256");
-+			return;
++			int k;
++			for (k = 0; k < mod.npkgs; k++)
++			{
++				if (!mod_url_ok (mod.pkgs[k].url))
++				{
++					mod_fail ("the mod table entry has no usable https download");
++					return;
++				}
++				if (!mod.pkgs[k].sha[0])
++				{
++					// Curated entries are pinned by hash; an entry without one is a table bug.
++					mod_fail ("the mod table entry carries no sha256");
++					return;
++				}
++			}
 +		}
 +		if (mod_try_local_switch (gd))
 +			return;
 +		q_strlcpy (mod.gamedir, gd, sizeof (mod.gamedir));
 +		mod.nitems = 0;
 +		{
-+			int i = mod_add_item ("", mod.pkgurl, ITEM_PKG, false);
-+			mod.items[i].size = mod.pkgbytes;
++			int k;
++			for (k = 0; k < mod.npkgs; k++)
++			{
++				int i = mod_add_item ("", mod.pkgs[k].url, ITEM_PKG, false);
++				if (i < 0)
++					break;
++				mod.items[i].size = mod.pkgs[k].bytes;
++				mod.items[i].pkg = k;
++			}
 +		}
-+		mod_host_of (mod.pkgurl, mod.srcname, sizeof (mod.srcname));
++		mod_host_of (mod.pkgs[0].url, mod.srcname, sizeof (mod.srcname));
 +		mod_add_maps_and_probe ();
 +		return;
 +	}
@@ -1511,14 +1683,15 @@
 +
 +	case MOD_HASH:
 +	{
-+		const char *h = (r == DLP_DONE) ? VKQ_DL_Result (mod.job, "sha256") : "";
-+		if (r != DLP_DONE || !h || q_strcasecmp (h, mod.pkgsha))
++		const char		*h = (r == DLP_DONE) ? VKQ_DL_Result (mod.job, "sha256") : "";
++		const mod_pkg_t *pk = &mod.pkgs[mod.items[mod.cur].pkg];
++		if (r != DLP_DONE || !h || q_strcasecmp (h, pk->sha))
 +		{
 +			mod_fail ("package sha256 mismatch — refusing to install");
 +			return;
 +		}
 +		mod_job_release ();
-+		Con_Printf ("moddl: sha256 verified (%.16s...)\n", mod.pkgsha);
++		Con_Printf ("moddl: sha256 verified (%.16s...)\n", pk->sha);
 +		mod.state = MOD_INSTALL;
 +		return;
 +	}
@@ -1565,15 +1738,22 @@
 +	// to once per server, so a mod folder that is still short cannot loop.
 +	if (mod_try_local_switch (mod.servergd))
 +		return true;
-+	if (mod_in_list (mod_tried, mod_tried_count, target))
 +	{
-+		// We already installed (or were refused) content for this server this
-+		// session and it is STILL short. Retrying would loop; say what is wrong.
-+		Con_Printf ("moddl: already fetched content for %s this session — not retrying\n", target);
-+		memset (&mod, 0, sizeof (mod));
-+		return false;
++		char key[256];
++		mod_tried_key (key, sizeof (key), target, missing);
++		if (mod_in_list (mod_tried, mod_tried_count, key) || mod_tried_count >= MOD_MAX_TRIED)
++		{
++			// We already installed (or were refused) content for exactly this
++			// missing set on this server, and it is STILL short. Retrying would
++			// loop; say what is wrong. (A NEW set — the server changed map — is a
++			// fresh attempt; MOD_MAX_TRIED bounds how many a session gets.)
++			Con_Printf ("moddl: already tried to fetch these files for %s this session — not retrying\n", target);
++			Con_Printf ("moddl: no known download provides them; install the mod's full content to join\n");
++			memset (&mod, 0, sizeof (mod));
++			return false;
++		}
++		mod_add_list (mod_tried, &mod_tried_count, key);
 +	}
-+	mod_add_list (mod_tried, &mod_tried_count, target);
 +	mod_stage_clear ();
 +
 +	Con_Printf ("moddl: %d model(s) missing for %s; asking the server what it offers\n", nmodels, mod.servergd[0] ? mod.servergd : "this server");

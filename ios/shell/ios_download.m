@@ -738,6 +738,13 @@ int VKQ_DL_StartStatus (const char *target, int defaultport)
 // files is not an accident. Missing sounds and maps never decide a match — a
 // missing sound does not stop a join, and maps have their own source (0028).
 //
+// When no single entry has every missing model but the server names its game
+// directory, entries for THAT directory may be combined: greedily, the one that
+// covers the most of what is still missing first, until everything is covered
+// (or the plan is refused). This is how a mod's main pak and a separately
+// hosted map model (FortressOne's pak + 2nuke2's progs/tpad.mdl) make one plan.
+// Entries are never combined across game directories, nor without a gamedir.
+//
 // Two copies of the table, tried in order: the one fetched from the repository
 // (so a dead link is fixed without a release) and the one in the app bundle.
 // A cached copy that does not parse, or has the wrong schema, is ignored rather
@@ -806,7 +813,9 @@ int VKQ_DL_StartModResolve (const char *cachedpath, const char *bundledpath, con
 					return;
 				}
 				NSDictionary *best = nil;
-				int			  bestRank = 0; // 2 = gamedir + coverage, 1 = coverage only
+				int			  bestRank = 0;					   // 2 = gamedir + coverage, 1 = coverage only
+				NSMutableArray *gdEntries = [NSMutableArray array]; // valid entries naming the server's gamedir
+				NSMutableArray *gdHave = [NSMutableArray array];	   // ... and the files each provides
 				for (id o in mods)
 				{
 					if (![o isKindOfClass:NSDictionary.class])
@@ -819,52 +828,97 @@ int VKQ_DL_StartModResolve (const char *cachedpath, const char *bundledpath, con
 					for (id f in m[@"files"])
 						if ([f isKindOfClass:NSString.class])
 							[have addObject:[f lowercaseString]];
-					if (![need isSubsetOfSet:have])
-						continue;
 					int rank = 1;
 					if (gd.length && [m[@"gamedirs"] isKindOfClass:NSArray.class])
 						for (id g in m[@"gamedirs"])
 							if ([g isKindOfClass:NSString.class] && [[g lowercaseString] isEqualToString:gd])
 								rank = 2;
+					if (rank == 2)
+					{
+						[gdEntries addObject:m];
+						[gdHave addObject:have];
+					}
+					if (![need isSubsetOfSet:have])
+						continue;
 					if (rank > bestRank)
 					{
 						best = m;
 						bestRank = rank;
 					}
 				}
-				if (!best)
+				NSMutableArray *chosen = [NSMutableArray array];
+				if (best)
+					[chosen addObject:best];
+				else if (gdEntries.count)
+				{
+					// Greedy cover over this gamedir's entries (see the comment above).
+					NSMutableSet *left = [need mutableCopy];
+					while (left.count && chosen.count < 8)
+					{
+						NSUInteger pick = NSNotFound, pickN = 0;
+						for (NSUInteger k = 0; k < gdEntries.count; k++)
+						{
+							if ([chosen containsObject:gdEntries[k]])
+								continue;
+							NSMutableSet *hit = [left mutableCopy];
+							[hit intersectSet:gdHave[k]];
+							if (hit.count > pickN)
+							{
+								pick = k;
+								pickN = hit.count;
+							}
+						}
+						if (pick == NSNotFound)
+							break;
+						[chosen addObject:gdEntries[pick]];
+						[left minusSet:gdHave[pick]];
+					}
+					if (left.count)
+						[chosen removeAllObjects];
+					else
+						bestRank = 2;
+				}
+				if (!chosen.count)
 				{
 					vkq_dl_finish (j, VKQDL_FAILED, [NSString stringWithFormat:@"no package in the %@ mod table has all %lu missing models", which, (unsigned long)need.count]);
 					return;
 				}
-				// install rules flattened to "from>as;from>as" (from may be empty:
-				// the download itself is the file). Anything malformed is dropped
-				// here and the engine validates every path again before using it.
-				NSMutableArray *rules = [NSMutableArray array];
-				if ([best[@"install"] isKindOfClass:NSArray.class])
-					for (id r in best[@"install"])
-					{
-						if (![r isKindOfClass:NSDictionary.class])
-							continue;
-						NSString *from = [r[@"from"] isKindOfClass:NSString.class] ? r[@"from"] : @"";
-						NSString *as = [r[@"as"] isKindOfClass:NSString.class] ? r[@"as"] : @"";
-						if (!as.length || [from containsString:@">"] || [from containsString:@";"] || [as containsString:@">"] || [as containsString:@";"])
-							continue;
-						[rules addObject:[NSString stringWithFormat:@"%@>%@", from, as]];
-					}
-				id		  bytes = best[@"bytes"];
-				NSString *name = [best[@"name"] isKindOfClass:NSString.class] ? best[@"name"] : best[@"gamedir"];
 				[vkq_dl_lock lock];
-				j.result[@"name"] = name;
-				j.result[@"gamedir"] = best[@"gamedir"];
-				j.result[@"url"] = best[@"url"];
-				j.result[@"sha256"] = [best[@"sha256"] isKindOfClass:NSString.class] ? best[@"sha256"] : @"";
-				j.result[@"type"] = [best[@"type"] isKindOfClass:NSString.class] ? best[@"type"] : @"zip";
-				j.result[@"bytes"] = [bytes respondsToSelector:@selector (stringValue)] ? [bytes stringValue] : @"0";
-				j.result[@"install"] = [rules componentsJoinedByString:@";"];
+				j.result[@"count"] = [NSString stringWithFormat:@"%lu", (unsigned long)chosen.count];
+				j.result[@"gamedir"] = ((NSDictionary *)chosen[0])[@"gamedir"];
 				j.result[@"table"] = which;
 				j.result[@"rank"] = bestRank == 2 ? @"gamedir" : @"files";
 				[vkq_dl_lock unlock];
+				for (NSUInteger k = 0; k < chosen.count; k++)
+				{
+					NSDictionary *pk = chosen[k];
+					NSString	 *sfx = k ? [NSString stringWithFormat:@".%lu", (unsigned long)k] : @"";
+					// install rules flattened to "from>as;from>as" (from may be empty:
+					// the download itself is the file). Anything malformed is dropped
+					// here and the engine validates every path again before using it.
+					NSMutableArray *rules = [NSMutableArray array];
+					if ([pk[@"install"] isKindOfClass:NSArray.class])
+						for (id r in pk[@"install"])
+						{
+							if (![r isKindOfClass:NSDictionary.class])
+								continue;
+							NSString *from = [r[@"from"] isKindOfClass:NSString.class] ? r[@"from"] : @"";
+							NSString *as = [r[@"as"] isKindOfClass:NSString.class] ? r[@"as"] : @"";
+							if (!as.length || [from containsString:@">"] || [from containsString:@";"] || [as containsString:@">"] || [as containsString:@";"])
+								continue;
+							[rules addObject:[NSString stringWithFormat:@"%@>%@", from, as]];
+						}
+					id		  bytes = pk[@"bytes"];
+					NSString *name = [pk[@"name"] isKindOfClass:NSString.class] ? pk[@"name"] : pk[@"gamedir"];
+					[vkq_dl_lock lock];
+					j.result[[@"name" stringByAppendingString:sfx]] = name;
+					j.result[[@"url" stringByAppendingString:sfx]] = pk[@"url"];
+					j.result[[@"sha256" stringByAppendingString:sfx]] = [pk[@"sha256"] isKindOfClass:NSString.class] ? pk[@"sha256"] : @"";
+					j.result[[@"type" stringByAppendingString:sfx]] = [pk[@"type"] isKindOfClass:NSString.class] ? pk[@"type"] : @"zip";
+					j.result[[@"bytes" stringByAppendingString:sfx]] = [bytes respondsToSelector:@selector (stringValue)] ? [bytes stringValue] : @"0";
+					j.result[[@"install" stringByAppendingString:sfx]] = [rules componentsJoinedByString:@";"];
+					[vkq_dl_lock unlock];
+				}
 				vkq_dl_finish (j, VKQDL_DONE, nil);
 			}
 		});

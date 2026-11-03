@@ -3,7 +3,8 @@
 
 The table is what overlay 0034's mod downloader offers players, so every entry
 must be TRUE: the URL answers, the bytes hash to `sha256`, the size is `bytes`,
-every install rule names a file that is in the archive, no installed .pak
+every install rule names a file that is in the archive (a "file" entry is one
+loose file whose single rule names its game path), no installed .pak
 carries a .cfg/.rc, and `files` is exactly what the installed paks/files
 provide (the client matches a server's missing models against `files`).
 
@@ -62,6 +63,14 @@ def installed_parts(entry, data):
         for r in entry["install"]:
             parts.append((r["as"], data))
         return parts
+    if entry["type"] == "file":
+        # one loose file: the download IS the file; exactly one rule names its path
+        rules = entry["install"]
+        if len(rules) != 1 or rules[0].get("from", "") or rules[0]["as"] == "pak":
+            raise ValueError("a file entry needs exactly one {\"as\": \"<game path>\"} rule")
+        if rules[0]["as"].lower().endswith(".mdl") and data[:4] != b"IDPO":
+            raise ValueError("%s is not an alias model (no IDPO magic)" % rules[0]["as"])
+        return [(rules[0]["as"], data)]
     z = zipfile.ZipFile(io.BytesIO(data))
     names = {i.filename: i for i in z.infolist()}
     for r in entry["install"]:
