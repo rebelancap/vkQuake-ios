@@ -20,6 +20,12 @@
 #   e. cl_mapdownload 0 leaves the old failure, naming the mod
 #   f. BUNDLED TABLE + REAL HOST: the live table is unreachable, the copy in the
 #      app bundle is used, and Copper comes from www.quaddicted.com over TLS
+#   h. NO GAMEDIR: a server advertising sv_dlURL while running the mod as "id1"
+#      is NOT trusted to write into id1 — the client goes to the curated table,
+#      which names its own folder (copper); the server URL is never fetched
+#   i. UNPACK CAP: a correctly-pinned zip that downloads under
+#      cl_mapdownload_maxpkg but unpacks to more than 4x it is refused before
+#      anything is extracted
 #   g. (VKQ_MODDL_LIVE=1) a REAL public mod server: NetQuake.io Team Fortress,
 #      FortressOne assets from GitHub + well6.bsp from maps.quakeworld.nu
 #
@@ -36,6 +42,8 @@ SRV_URL=26111					# qdlmod server that advertises sv_dlURL
 SRV_TAB=26112					# qdlmod server with no URL (curated table legs)
 SRV_BUN=26113					# qdlmod server for the bundled-table leg
 SRV_WARM=26110					# plain id1 server: the warm-up join (see below)
+SRV_NOGD=26114					# mod content in id1 + sv_dlURL: no usable gamedir (leg h)
+SRV_BIG=26115					# qdlmod server, no URL: the oversized-zip leg (i)
 UDID=${VKQ_SIM_UDID:-45A5059C-8751-4FC5-9BB2-A3EF6FFCCC22} # iPhone Air, iOS 27.0 (lane 2)
 APP="$ROOT/build/ios-sim/xcode/Release-iphonesimulator/vkQuake.app"
 ORACLE="$ROOT/build/oracle/vkquake"
@@ -130,12 +138,20 @@ start_server $SRV_URL url
 PIDS+=($!)
 start_server $SRV_TAB tab
 start_server $SRV_BUN bun
-for tag in url tab bun; do
+start_server $SRV_BIG big
+# the no-gamedir server: Copper's content as id1/pak1.pak, no -game
+: > "$FIX/srvcmd-nogd"; mkdir -p "$FIX/serveruser-nogd"
+( tail -n +1 -f "$FIX/srvcmd-nogd" | script -q /dev/null "$ORACLE" -dedicated 4 \
+	-basedir "$FIX/server-nogd" -userdir "$FIX/serveruser-nogd" -port $SRV_NOGD +map e1m1 \
+	> "$FIX/server-nogd.log" 2>&1 ) &
+PIDS+=($!)
+for tag in url tab bun big nogd; do
 	for _ in $(seq 1 40); do grep -q "UDP4 Initialized" "$FIX/server-$tag.log" 2>/dev/null && break; sleep 1; done
 	sleep 3
 	srv $tag "sv_public -1"   # answer getstatus, never heartbeat to the masters
 done
 srv url 'sv_dlURL "http://127.0.0.1:'$FIXPORT'/dl/"'
+srv nogd 'sv_dlURL "http://127.0.0.1:'$FIXPORT'/nogd/"'
 st=$(python3 -I - $SRV_URL <<'PY'
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2)
@@ -146,6 +162,16 @@ PY
 echo "$st" | grep -q 'sv_dlURL\\http://127.0.0.1' || die "getstatus does not carry sv_dlURL: $st"
 echo "$st" | grep -q 'modname\\qdlmod' || die "getstatus does not carry modname qdlmod"
 pass "three qdlmod servers up; :$SRV_URL advertises sv_dlURL in its status reply"
+st=$(python3 -I - $SRV_NOGD <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(2)
+s.sendto(b"\xff\xff\xff\xffgetstatus t", ("127.0.0.1", int(sys.argv[1])))
+print(s.recvfrom(4096)[0].decode("latin1"))
+PY
+) || die "the no-gamedir server does not answer getstatus"
+echo "$st" | grep -q 'sv_dlURL\\http://127.0.0.1' || die "no-gamedir server: getstatus does not carry sv_dlURL: $st"
+echo "$st" | grep -q 'modname\\qdlmod' && die "no-gamedir server reports a mod folder: $st"
+pass "no-gamedir server :$SRV_NOGD up: sv_dlURL advertised, game is id1"
 
 # ---------------------------------------------------------------------------
 # simulator
@@ -344,6 +370,48 @@ sleep 1; shot 07-e-off
 
 # ===========================================================================
 echo
+echo "== (h) sv_dlURL but no mod folder named -> nothing goes into id1; the table is used"
+# ===========================================================================
+say 'cl_mapdownload 1'; sleep 1
+rm -rf "$BASE/copper"
+M=$(mark); FM=$(wc -l < "$FIX/fixture.log" | tr -d ' ')
+say "connect 127.0.0.1:$SRV_NOGD"
+waitlog 'moddl: the server advertises a download URL but names no mod folder; not installing into id1, trying the mod table' 40 "$M" \
+	&& pass "(h) the gamedir-less server URL was refused for id1" || { fail "(h) the server URL was not refused"; showtail "$M"; }
+waitlog 'moddl: (downloaded|bundled) table matched "Copper 1\.30" by files' 40 "$M" \
+	&& pass "(h) fell through to the table (Copper matched by files)" || { fail "(h) no table match"; showtail "$M"; }
+waitlog 'moddl: plan — 1 item\(s\), 5197459 bytes, from 127\.0\.0\.1:'$FIXPORT', into copper' 40 "$M" \
+	&& pass "(h) planned into copper, not id1" || { fail "(h) unexpected plan"; showtail "$M"; }
+tail -n +"$((FM + 1))" "$FIX/fixture.log" | grep -q '/nogd/' && fail "(h) the client fetched from the server URL" || pass "(h) nothing was requested from the server URL"
+[ -e "$GAMEDIR/progs/v_axe2.mdl" ] && fail "(h) mod files were written into id1" || pass "(h) id1 untouched"
+sleep 1; shot 08h-nogd-table-prompt
+say 'moddl_cancel'; sleep 2
+
+# ===========================================================================
+echo
+echo "== (i) a correctly-pinned zip that unpacks past 4x cl_mapdownload_maxpkg -> refused"
+# ===========================================================================
+cp "$FIX/www/table/big.json" "$FIX/www/table/mod-sources.json"
+say 'cl_mapdownload_maxpkg 6'; sleep 1
+M=$(mark)
+say "connect 127.0.0.1:$SRV_BIG"
+waitlog 'moddl: plan — 1 item\(s\), 5242799 bytes, from 127\.0\.0\.1:'$FIXPORT', into copper' 40 "$M" \
+	&& pass "(i) the padded package is planned (5242799 bytes, under the 6 MB download limit)" || { fail "(i) unexpected plan"; showtail "$M"; }
+say 'moddl_accept'
+waitlog 'moddl: sha256 verified' 60 "$M" && pass "(i) the padded package matches its pin" || { fail "(i) sha not verified"; showtail "$M"; }
+waitlog 'moddl: FAILED — the package unpacks to more than the 24 MB limit' 60 "$M" \
+	&& pass "(i) refused: unpacks past 4 x 6 MB" || { fail "(i) the oversized zip was not refused"; showtail "$M"; }
+find "$BASE/copper" -type f 2>/dev/null | grep -q . && fail "(i) something was installed: $(find "$BASE/copper" -type f | head -3 | tr '\n' ' ')" || pass "(i) nothing installed"
+[ -d "$BASE/.moddl" ] && fail "(i) staging dir left behind" || pass "(i) staging dir cleaned up"
+alive || die "(i) the app stopped answering"
+sleep 1; shot 08i-unpack-cap-refused
+say 'moddl_cancel'; sleep 2
+say 'cl_mapdownload_maxpkg 512'
+cp "$FIX/www/table/good.json" "$FIX/www/table/mod-sources.json"
+say 'disconnect'; sleep 2
+
+# ===========================================================================
+echo
 echo "== (f) bundled table + the REAL host: Copper from www.quaddicted.com over TLS"
 # ===========================================================================
 rm -rf "$BASE/copper"
@@ -416,7 +484,7 @@ fi
 echo
 echo "== artifacts"
 cp "$LOG" "$PFX-console.log" 2>/dev/null && echo "   client log: $PFX-console.log"
-for tag in url tab bun; do
+for tag in url tab bun big nogd; do
 	sed -E 's/^(tcp\/ip:[[:space:]]*).*/\1<redacted>/' "$FIX/server-$tag.log" > "$PFX-server-$tag.log" 2>/dev/null
 done
 ( cd "$BASE" && find . -path ./id1 -prune -o -type f -print | sort ) > "$PFX-installed.txt" 2>/dev/null

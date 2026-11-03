@@ -246,7 +246,7 @@
      'Quake/cmd.c',
 --- /dev/null
 +++ b/Quake/cl_moddl.c
-@@ -0,0 +1,1455 @@
+@@ -0,0 +1,1469 @@
 +/*
 +Copyright (C) 1996-2001 Id Software, Inc.
 +Copyright (C) 2010-2014 QuakeSpasm developers
@@ -949,9 +949,19 @@
 +	char		line[MAX_QPATH], url[512];
 +	int			first = -1;
 +
++	// A URL with no usable game directory would install SERVER-CHOSEN files
++	// straight into the base game (com_gamedir = id1 here). Never do that: the
++	// curated table names its own folder for whatever it matches.
++	if (!mod.servergd[0])
++	{
++		Con_Printf ("moddl: the server advertises a download URL but names no mod folder; not installing into %s, trying the mod table\n",
++			COM_SkipPath (com_gamedir));
++		mod_begin_table ();
++		return;
++	}
 +	mod.nitems = 0;
 +	mod.source = 1;
-+	mod.layout = mod.servergd[0] ? 0 : 1;
++	mod.layout = 0;
 +	while (*p)
 +	{
 +		const char *e = strchr (p, '\n');
@@ -1176,7 +1186,11 @@
 +	mod_stage_dir (stage, sizeof (stage));
 +	q_snprintf (xdir, sizeof (xdir), "%s/x", stage);
 +	Sys_mkdir (xdir);
-+	if (COM_UnzipToDir (file, xdir, stage, err, sizeof (err)) < 0)
++	// Cap what the archive may unpack to (a zip bomb would otherwise fill the
++	// device): 4x the download limit. The curated zips unpack to 2.4-3.1x their
++	// download size (Copper 12.7 MB, AirQuake 13.4 MB, Threewave 9.3 MB) — far
++	// under 4 x the 512 MB default.
++	if (COM_UnzipToDirMax (file, xdir, stage, (long long)(cl_mapdownload_maxpkg.value * 4.0 * 1024.0 * 1024.0), err, sizeof (err)) < 0)
 +	{
 +		mod_fail ("%s", err);
 +		return false;
@@ -1702,3 +1716,58 @@
 +}
 +
 +#endif // VKQ_IOS
+--- a/Quake/common.h
++++ b/Quake/common.h
+@@ -487,6 +487,7 @@
+  * common.c because that is where miniz already lives (exactly one copy). Both
+  * refuse to write outside `boundary` and never overwrite an existing file. */
+ int		 COM_UnzipToDir (const char *zippath, const char *destdir, const char *boundary, char *err, size_t errlen);
++int		 COM_UnzipToDirMax (const char *zippath, const char *destdir, const char *boundary, long long maxbytes, char *err, size_t errlen);
+ qboolean COM_FindExtractedFile (const char *root, const char *basename, char *out, size_t outlen);
+ #endif
+ 
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -4402,6 +4402,15 @@
+ ================
+ */
+ int COM_UnzipToDir (const char *zippath, const char *destdir, const char *boundary, char *err, size_t errlen)
++{
++	return COM_UnzipToDirMax (zippath, destdir, boundary, 0, err, errlen);
++}
++
++// As COM_UnzipToDir, but refuses the whole archive (writes nothing) when its
++// entries' declared uncompressed sizes add up to more than maxbytes (0 = no
++// cap). miniz checks each entry's real output against its declared size, so a
++// lying central directory cannot slip past the sum.
++int COM_UnzipToDirMax (const char *zippath, const char *destdir, const char *boundary, long long maxbytes, char *err, size_t errlen)
+ {
+ #ifdef USE_SDL3
+ 	SDL_IOStream *rw = SDL_IOFromFile (zippath, "rb");
+@@ -4443,6 +4452,26 @@
+ 	}
+ 
+ 	count = mz_zip_reader_get_num_files (&ar);
++	if (maxbytes > 0)
++	{
++		const unsigned long long cap = (unsigned long long)maxbytes;
++		unsigned long long		 total = 0;
++		for (i = 0; i < count; i++)
++		{
++			mz_zip_archive_file_stat st;
++			if (!mz_zip_reader_file_stat (&ar, i, &st))
++			{
++				q_strlcpy (err, "the package has an unreadable zip entry", errlen);
++				goto fail;
++			}
++			if (st.m_uncomp_size > cap - total) // no overflow: total <= cap here
++			{
++				q_snprintf (err, errlen, "the package unpacks to more than the %.0f MB limit", (double)cap / 1048576.0);
++				goto fail;
++			}
++			total += st.m_uncomp_size;
++		}
++	}
+ 	for (i = 0; i < count; i++)
+ 	{
+ 		mz_zip_archive_file_stat st;
