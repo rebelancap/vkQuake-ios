@@ -75,5 +75,10 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-None. Simulators shut down (iPhone Air lane 2, iPad Air 13" M4); no agents running;
-`main` = `origin/main` = v1.2.1; `issue-6-7-followup` pushed, one commit ahead.
+Round in flight (2026-11-03): Opus agent A owns the tree + sims (iPhone Air lane 2,
+iPad Air 13" M4) fixing the #6 menu double-click (SDL mouse→touch synthesis,
+SDL_HINT_MOUSE_TOUCH_EVENTS defaults on for iOS) and retrying #7 on the sim's external
+display; Opus agent B is read-only, diagnosing #8 on the macOS oracle. Plan agreed with
+Austin: fix #6/#7/#8, then ship a 1.2.1.x OTA dev build and attach its IPA to the
+issue for the reporter; public 1.2.2 only after they confirm. Branch
+`issue-6-7-followup` pushed; `main` = `origin/main` = v1.2.1.
