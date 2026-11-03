@@ -200,6 +200,74 @@ static void vkq_pointer_lock_tick (BOOL mouse, BOOL inGame)
 	}
 }
 
+// Issue #7 (external display drawn rotated 90 degrees): every screen and every
+// window scene with the numbers that decide the rotation — the scene's reported
+// interface orientation vs. its bounds, the window's transform, the SDL view's
+// frame and the Metal drawable size. Printed by vkq_mouse (so a player's console
+// paste carries it) and logged whenever a screen connects/disconnects/changes
+// mode or a scene activates. Main thread only.
+static const char *vkq_orient_name (UIInterfaceOrientation o)
+{
+	switch (o)
+	{
+	case UIInterfaceOrientationPortrait:
+		return "portrait";
+	case UIInterfaceOrientationPortraitUpsideDown:
+		return "portrait-upsidedown";
+	case UIInterfaceOrientationLandscapeLeft:
+		return "landscape-left";
+	case UIInterfaceOrientationLandscapeRight:
+		return "landscape-right";
+	default:
+		return "unknown";
+	}
+}
+static void vkq_log_displays (BOOL to_console)
+{
+	NSMutableArray<NSString *> *lines = [NSMutableArray array];
+	NSArray<UIScreen *>		*screens = nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+	screens = UIScreen.screens; // deprecated, still the only list of physical screens
+#pragma clang diagnostic pop
+	for (UIScreen *scr in screens)
+		[lines addObject:[NSString stringWithFormat:@"  screen%s: bounds=%.0fx%.0f native=%.0fx%.0f scale=%.1f mode=%.0fx%.0f mirrored=%d", scr == UIScreen.mainScreen ? "(main)" : "(EXTERNAL)",
+												   scr.bounds.size.width, scr.bounds.size.height, scr.nativeBounds.size.width, scr.nativeBounds.size.height, scr.scale,
+												   scr.currentMode.size.width, scr.currentMode.size.height, scr.mirroredScreen != nil]];
+	for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+	{
+		if (![sc isKindOfClass:UIWindowScene.class])
+			continue;
+		UIWindowScene *ws = (UIWindowScene *)sc;
+		CGSize		   cs = ws.coordinateSpace.bounds.size;
+		NSString	  *geo = @"";
+		if (@available(iOS 16.0, *))
+			geo = [NSString stringWithFormat:@" geomOrient=%s", vkq_orient_name (ws.effectiveGeometry.interfaceOrientation)];
+		[lines addObject:[NSString stringWithFormat:@"  scene%s role=%@ state=%ld orient=%s%@ bounds=%.0fx%.0f fullscreen=%d", ws.screen == UIScreen.mainScreen ? "(main)" : "(EXTERNAL)",
+												   sc.session.role, (long)sc.activationState, vkq_orient_name (ws.interfaceOrientation), geo, cs.width, cs.height,
+												   CGSizeEqualToSize (cs, ws.screen.bounds.size) ? 1 : 0]];
+		for (UIWindow *w in ws.windows)
+		{
+			UIView *v = w.rootViewController.view;
+			CGSize	ds = CGSizeZero;
+			for (UIView *sub in [@[ v ?: w ] arrayByAddingObjectsFromArray:v.subviews ?: @[]])
+				if ([sub.layer isKindOfClass:CAMetalLayer.class])
+					ds = ((CAMetalLayer *)sub.layer).drawableSize;
+			if (!v || w.hidden)
+				continue;
+			[lines addObject:[NSString stringWithFormat:@"    window=%.0fx%.0f transform=%@ view=%@ drawable=%.0fx%.0f", w.bounds.size.width, w.bounds.size.height,
+													   CGAffineTransformIsIdentity (w.transform) ? @"identity" : NSStringFromCGAffineTransform (w.transform), NSStringFromCGRect (v.frame),
+													   ds.width, ds.height]];
+		}
+	}
+	for (NSString *l in lines)
+	{
+		NSLog (@"[vkquake] display:%@", l);
+		if (to_console)
+			Con_Printf ("%s\n", l.UTF8String);
+	}
+}
+
 // Everything the mouse path depends on, UIKit side (the engine prints its half
 // first — see IN_MouseDiag_f). Goes to the console so a player can paste it.
 void VKQ_iOS_MouseDiag (void)
@@ -231,6 +299,7 @@ void VKQ_iOS_MouseDiag (void)
 		NSLog (@"[vkquake] vkq_mouse: mice=%lu kb=%d lock=%@ prefers=%d state=%ld orient=%ld main=%d screen=%@ window=%@ key=%d vc=%@", (unsigned long)mice, kb, lock, prefers,
 			   (long)ws.activationState, (long)ws.interfaceOrientation, ws.screen == UIScreen.mainScreen, NSStringFromCGRect (sb), NSStringFromCGRect (wb), win.isKeyWindow,
 			   vc.class);
+		vkq_log_displays (YES);
 	});
 }
 
@@ -242,6 +311,12 @@ void VKQ_iOS_MouseDiag (void)
 // (UIKit_GetSupportedOrientations), so answer for it: any orientation on a
 // screen other than the main one, landscape as before on the iPad itself.
 // SDL's delegate class has no such method of its own; it is added at load.
+// Its other half is SDL patch 0003 (UIKit_GetInterfaceOrientation): once portrait
+// is allowed there, the external scene may report Portrait while its bounds are
+// wide, and SDL's UIKit_ComputeViewFrame would swap a full-screen view to
+// portrait — so for a non-main screen the patch derives orientation from bounds.
+// Neither half could be exercised on the simulator (its external TVOut screen
+// neither mirrors nor extends); vkq_mouse prints the display table to check.
 static NSUInteger vkq_orientations_for_window (id self, SEL _cmd, UIApplication *app, UIWindow *window)
 {
 	UIWindowScene *ws = window.windowScene;
@@ -256,6 +331,16 @@ static NSUInteger vkq_orientations_for_window (id self, SEL _cmd, UIApplication 
 {
 	Class c = NSClassFromString (@"SDLUIKitDelegate");
 	SEL	  sel = @selector (application:supportedInterfaceOrientationsForWindow:);
+	// Log every display change (issue #7) — NSLog only; vkq_mouse prints the same
+	// table to the console for players.
+	for (NSNotificationName n in @[ UIScreenDidConnectNotification, UIScreenDidDisconnectNotification, UIScreenModeDidChangeNotification, UISceneDidActivateNotification ])
+		[NSNotificationCenter.defaultCenter addObserverForName:n
+														object:nil
+														 queue:NSOperationQueue.mainQueue
+													usingBlock:^(NSNotification *note) {
+														NSLog (@"[vkquake] display: %@", note.name);
+														vkq_log_displays (NO);
+													}];
 	if (!c || class_getInstanceMethod (c, sel))
 		return; // no SDL delegate, or it grew its own answer — leave it
 	class_addMethod (c, sel, (IMP)vkq_orientations_for_window, "Q@:@@");

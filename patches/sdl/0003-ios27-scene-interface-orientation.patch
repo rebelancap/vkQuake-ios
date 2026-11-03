@@ -46,10 +46,10 @@ index 3db7f9b..d5e21f0 100644
  extern void UIKit_SetGameControllerInteraction(bool enabled);
  extern void UIKit_SetViewGameControllerInteraction(UIView *view, bool enabled);
 diff --git a/src/video/uikit/SDL_uikitvideo.m b/src/video/uikit/SDL_uikitvideo.m
-index 97aeb94..58f8c7e 100644
+index 97aeb94..8a9b4f0 100644
 --- a/src/video/uikit/SDL_uikitvideo.m
 +++ b/src/video/uikit/SDL_uikitvideo.m
-@@ -210,6 +210,30 @@ SDL_SystemTheme UIKit_GetSystemTheme(void)
+@@ -210,6 +210,40 @@ SDL_SystemTheme UIKit_GetSystemTheme(void)
      return SDL_SYSTEM_THEME_UNKNOWN;
  }
  
@@ -69,6 +69,16 @@ index 97aeb94..58f8c7e 100644
 +        if (!scene) {
 +            scene = UIKit_GetActiveWindowScene();
 +        }
++        /* vkquake-ios issue #7: a scene on an EXTERNAL display. That screen never
++         * rotates; UIKit can report the scene Portrait while its bounds are wide
++         * (a 16:9 monitor), and UIKit_ComputeViewFrame would then swap a
++         * full-screen view to portrait. The bounds are the truth there. */
++        if (scene && scene.screen && scene.screen != [UIScreen mainScreen]) {
++            CGSize size = scene.coordinateSpace.bounds.size;
++            if (size.width > 0 && size.height > 0) {
++                return (size.width > size.height) ? UIInterfaceOrientationLandscapeRight : UIInterfaceOrientationPortrait;
++            }
++        }
 +        if (scene && scene.interfaceOrientation != UIInterfaceOrientationUnknown) {
 +            return scene.interfaceOrientation;
 +        }
@@ -80,7 +90,7 @@ index 97aeb94..58f8c7e 100644
  #ifdef SDL_PLATFORM_VISIONOS
  CGRect UIKit_ComputeViewFrame(SDL_Window *window)
  {
-@@ -237,7 +261,7 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
+@@ -237,7 +271,7 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
       * https://bugzilla.libsdl.org/show_bug.cgi?id=3505
       * https://bugzilla.libsdl.org/show_bug.cgi?id=3465
       * https://forums.developer.apple.com/thread/65337 */
