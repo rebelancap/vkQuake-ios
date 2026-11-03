@@ -9,6 +9,19 @@ Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` ho
 unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
 
 ## Last round (2026-11-03) — issue #6 follow-up + issue #7, branch `issue-6-7-followup` (pushed, NOT merged)
+- **Reporter replies after the branch was pushed (2026-11-03 10:10–15:40 UTC), not
+  yet acted on:** iPad Pro M5, iPadOS 27.2. Turning OFF Stage Manager fixed the
+  mouse on the iPad screen instantly (pointer locked, no acceleration), even with the
+  external display still attached — confirms the diagnosis. On the EXTERNAL display
+  pointer lock never engages (windowed or full screen) and the game stays rotated 90°
+  with Stage Manager on or off (#7). New niggle on #6: in menus each mouse click
+  registers as a double-click (likely both the SDL mouse-button path and the
+  indirect-pointer touch path in `ios_touch.m` firing — check `vkq_direct_touches`
+  / the `!SDL_HasMouse()` gate, or the engine's `M_Keydown` K_MOUSE1 + touch
+  activation). New issue **#8**: public multiplayer — crash on join, stuck on
+  loading screen, jerky at claimed 120 fps (skybox pans at ~3 fps), and "map can't
+  be downloaded" errors (see MP map downloads memory: Tier 2 download open).
+  No replies posted to #6-niggle, #7 round 2, or #8 yet.
 - robimart on 1.2.1: bindings + touch-hiding work, but the pointer stays visible and
   motion stops at the screen edge (= iPadOS did not grant pointer lock); aim feels
   accelerated. New issue #7: on an external 4K display the game is drawn rotated 90°.
@@ -37,7 +50,14 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    r_ssao 0 / vid_fsaa 0 on iOS.
 2. Device checks the sim can't do: real controller gyro/rumble, headset VR (rebuilt
    present path, depth copy), surface-loss recovery on backgrounding.
-3. Issue #6/#7: when Austin OKs a release, bump to 1.2.2 on `issue-6-7-followup`,
+3. Issue #6 double-click in menus, #7 external display (orientation hook on the
+   branch is still the untested candidate; also consider forcing the external
+   scene's geometry via `UIWindowScene.requestGeometryUpdate:` or rendering the
+   external screen as a plain mirror), and #8 multiplayer (reproduce against a
+   public NetQuake server on the sim via the console bridge: `connect <ip>`; watch
+   crash.txt in Documents; the 3-fps skybox at 120 fps smells like net/physics
+   tick coupling, see host_maxfps notes). Reply on all three.
+3b. Release: when Austin OKs, bump to 1.2.2 on `issue-6-7-followup`,
    merge, release (RELEASING.md loop), ask robimart for `vkq_mouse` output and the
    external-display result. If the orientation hook does not fix #7, next candidates:
    log the scene's interfaceOrientation/screen on `windowScene:didUpdateEffectiveGeometry:`
@@ -48,8 +68,10 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- Release the `issue-6-7-followup` branch as 1.2.2? Default if unanswered: wait (release
-  numbers are Austin's call); the reporter cannot reach the OTA hub.
+- Release the `issue-6-7-followup` branch as 1.2.2 now, or fold in the menu
+  double-click fix (and anything from #7/#8) first? Default if unanswered: wait
+  (release numbers are Austin's call). The reporter cannot reach the OTA hub, so a
+  GitHub release (or an IPA attached to the issue) is the only way they can test.
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
