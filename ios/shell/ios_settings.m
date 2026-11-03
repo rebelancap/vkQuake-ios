@@ -406,9 +406,11 @@ static NSArray<NSString *> *vkq_choice_details (NSString *key)
 		return VKQ_iOS_AudioModeDetails ();
 	if ([key isEqualToString:@"mapDownload"])
 		return @[
-			@"Joining a server running a map you do not have simply fails, with a message.",
-			@"Offer to fetch the map from the community archives, showing its size first. Recommended.",
-			@"Fetch it and rejoin without asking. Uses cellular data if that is all you have.",
+			@"Joining a server running a map or mod you do not have simply fails, with a message.",
+			@"Offer to fetch the missing map or mod files (from the community archives, the server's own download "
+			@"address, or a curated list of mod packages), showing the size and source first. Recommended.",
+			@"Fetch them and rejoin without asking. Uses cellular data if that is all you have; mod packages can be "
+			@"several megabytes.",
 		];
 	if ([key isEqualToString:@"gameData"])
 		return @[
@@ -707,7 +709,7 @@ int VKQ_iOS_SettingsSheetOpen (void) { return vkq_settings_depth > 0 ? 1 : 0; }
 			// cvar is the engine's truth and is archived in config.cfg; this row is
 			// the way a phone player reaches it, and ApplySettingsToEngine pushes it
 			// down at boot and on every change.
-			mkrow (@"Download Missing Maps", @"mapDownload", ROW_CHOICE, 0, 2, 1),
+			mkrow (@"Download Missing Content", @"mapDownload", ROW_CHOICE, 0, 2, 1),
 		]];
 #ifdef VKQ_DEV_BUILD
 		// DEV BUILDS ONLY — compiled out of anything with a public version number.

@@ -1,0 +1,1623 @@
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -1163,11 +1163,69 @@
+ 	 * world model also catches a missing custom progs model, which is the other half
+ 	 * of this failure in the wild — and naming the first missing file is what makes
+ 	 * the message actionable.
++	 */
++#ifdef VKQ_IOS
++	/*
++	 * vkquake-ios overlay 0034 (MOD-DL) — MISSING MOD CONTENT.
++	 *
++	 * Before 0026's per-file loop below: sweep the WHOLE precache list once. If
++	 * any non-map MODEL is missing (the fatal case — a missing sound only warns),
++	 * this is a mod server and the mod downloader gets the full picture: every
++	 * missing model, map and sound, plus the server's gamedir when it sent one.
++	 * The list is collected here because this is the only point where all of it
++	 * is known and nothing has been loaded yet.
++	 *
++	 * When this fires, 0028's map flow is skipped (modelgap below): fetching the
++	 * map of a mod server whose models we cannot get would be a wasted download
++	 * followed by the same failure. The mod flow adds the map to its own plan.
+ 	 */
++	qboolean modelgap = false;
++	{
++		static char moddl_missing[16384];
++		int			nmodelgap = 0;
++		size_t		used = 0;
++		moddl_missing[0] = 0;
++		for (i = 1; i < nummodels; i++)
++		{
++			if (model_precache[i][0] == '*' || COM_FileExists (model_precache[i], NULL))
++				continue;
++			if (q_strncasecmp (model_precache[i], "maps/", 5))
++			{
++				modelgap = true;
++				nmodelgap++;
++			}
++			if (used + strlen (model_precache[i]) + 2 < sizeof (moddl_missing))
++				used += q_snprintf (moddl_missing + used, sizeof (moddl_missing) - used, "%s\n", model_precache[i]);
++		}
++		if (modelgap)
++		{
++			for (i = 1; i < numsounds; i++)
++			{
++				const char *sp = va ("sound/%s", sound_precache[i]);
++				if (COM_FileExists (sp, NULL))
++					continue;
++				if (used + strlen (sp) + 2 < sizeof (moddl_missing))
++					used += q_snprintf (moddl_missing + used, sizeof (moddl_missing) - used, "%s\n", sp);
++			}
++			if (CL_ModDownload_Begin (moddl_missing, nmodelgap, gamedir, cl_connect_target))
++			{
++				// The menu screen is already up; same clean teardown as 0028.
++				Host_EndGame ("Fetching content this server needs\n");
++			}
++		}
++	}
++#endif
++
+ 	for (i = 1; i < nummodels; i++)
+ 	{
+ 		if (model_precache[i][0] == '*') // inline bmodels live inside the world
++			continue;
++#ifdef VKQ_IOS
++		// overlay 0034: on a mod server, name the missing MODEL (and its mod), not
++		// the map that happens to be precache slot 1.
++		if (modelgap && !q_strncasecmp (model_precache[i], "maps/", 5))
+ 			continue;
++#endif
+ 		if (!COM_FileExists (model_precache[i], NULL))
+ 		{
+ 			extern qboolean	     m_return_onerror;
+@@ -1197,7 +1255,7 @@
+ 			 * a missing map needs — that path re-enters here with no menu
+ 			 * interaction behind it, and cl_connect_target still holds the address.
+ 			 */
+-			if (ismap && CL_MapDownload_Begin (model_precache[i], gamedir, cl_connect_target))
++			if (ismap && !modelgap && CL_MapDownload_Begin (model_precache[i], gamedir, cl_connect_target))
+ 			{
+ 				// The menu screen and key_dest are already set by the downloader.
+ 				// Host_EndGame, not Host_Error, for R6.5's reasons (see below).
+--- a/Quake/client.h
++++ b/Quake/client.h
+@@ -387,6 +387,21 @@
+ qboolean	CL_MapDownload_Failed (void);
+ const char *CL_MapDownload_Line1 (void);
+ const char *CL_MapDownload_Line2 (void);
++
++// cl_moddl.c — vkquake-ios overlay 0034: fetch the MOD content (models, sounds)
++// a server precaches and we lack: the server's own sv_dlURL first, then the
++// curated mods/mod-sources.json table. Shares 0028's consent cvar, menu screen
++// and rejoin.
++void		CL_ModDownload_Init (void);
++void		CL_ModDownload_Frame (void);
++qboolean	CL_ModDownload_Begin (const char *missing, int nmodels, const char *servergamedir, const char *target);
++void		CL_ModDownload_Accept (void);
++void		CL_ModDownload_Cancel (void);
++qboolean	CL_ModDownload_Active (void);
++qboolean	CL_ModDownload_Prompting (void);
++qboolean	CL_ModDownload_Failed (void);
++const char *CL_ModDownload_Line1 (void);
++const char *CL_ModDownload_Line2 (void);
+ #endif
+ 
+ void SV_UpdateInfo (int edict, const char *keyname, const char *value);
+--- a/Quake/cl_main.c
++++ b/Quake/cl_main.c
+@@ -1557,6 +1557,7 @@
+ 	// mapdl_accept/cancel/status commands. Before the config exec (Host_Init runs
+ 	// CL_Init first), so the archived value restores.
+ 	CL_MapDownload_Init ();
++	CL_ModDownload_Init (); // overlay 0034
+ #endif
+ 
+ 	Cvar_RegisterVariable (&cl_name);
+--- a/Quake/host.c
++++ b/Quake/host.c
+@@ -1258,6 +1258,7 @@
+ 	 * a network stall. It costs one predicate per frame while idle.
+ 	 */
+ 	CL_MapDownload_Frame ();
++	CL_ModDownload_Frame (); // overlay 0034, same reasoning
+ #endif
+ 
+ 	NET_Poll ();
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -5533,6 +5533,8 @@
+ {
+ 	// Prompt: Download / Cancel. Anything else: a single row, which is Cancel
+ 	// while work is in flight and Back once it has failed.
++	if (CL_ModDownload_Active ()) // overlay 0034 shares this screen
++		return CL_ModDownload_Prompting () ? 2 : 1;
+ 	return CL_MapDownload_Prompting () ? 2 : 1;
+ }
+ 
+@@ -5540,15 +5542,16 @@
+ {
+ 	qpic_t	 *p;
+ 	const int rows = M_MapDownload_Rows ();
+-	qboolean  failed = CL_MapDownload_Failed ();
++	const qboolean mod = CL_ModDownload_Active (); // overlay 0034
++	qboolean	   failed = mod ? CL_ModDownload_Failed () : CL_MapDownload_Failed ();
+ 
+ 	p = Draw_CachePic ("gfx/p_multi.lmp");
+ 	M_DrawPic (cbx, (320 - p->width) / 2, 4, p);
+ 
+-	M_PrintWhite (cbx, 40, 48, "This server needs a map");
+-	M_PrintWhite (cbx, 40, 56, "you do not have:");
+-	M_Print (cbx, 40, 72, CL_MapDownload_Line1 ());
+-	M_Print (cbx, 40, 84, CL_MapDownload_Line2 ());
++	M_PrintWhite (cbx, 40, 48, mod ? "This server needs mod" : "This server needs a map");
++	M_PrintWhite (cbx, 40, 56, mod ? "content you do not have:" : "you do not have:");
++	M_Print (cbx, 40, 72, mod ? CL_ModDownload_Line1 () : CL_MapDownload_Line1 ());
++	M_Print (cbx, 40, 84, mod ? CL_ModDownload_Line2 () : CL_MapDownload_Line2 ());
+ 
+ 	M_Mouse_UpdateListCursor (&mapdl_cursor, 40, 320, MAPDL_TOP_Y, CHARACTER_SIZE, rows, 0);
+ 	if (mapdl_cursor >= rows)
+@@ -5577,7 +5580,7 @@
+ 		// Escape is CANCEL in every state, which is what makes this screen safe to
+ 		// land on: the worst case is exactly overlay 0026's behaviour.
+ 		S_LocalSound ("misc/menu1.wav");
+-		Cbuf_AddText ("mapdl_cancel\n");
++		Cbuf_AddText (CL_ModDownload_Active () ? "moddl_cancel\n" : "mapdl_cancel\n");
+ 		break;
+ 
+ 	case K_DOWNARROW:
+@@ -5598,9 +5601,9 @@
+ 	case K_ABUTTON:
+ 		m_entersound = true;
+ 		if (rows == 2 && mapdl_cursor == 0)
+-			Cbuf_AddText ("mapdl_accept\n");
++			Cbuf_AddText (CL_ModDownload_Active () ? "moddl_accept\n" : "mapdl_accept\n");
+ 		else
+-			Cbuf_AddText ("mapdl_cancel\n");
++			Cbuf_AddText (CL_ModDownload_Active () ? "moddl_cancel\n" : "mapdl_cancel\n");
+ 		break;
+ 
+ 	default:
+--- a/Quake/net_dgrm.c
++++ b/Quake/net_dgrm.c
+@@ -1253,6 +1253,19 @@
+ 			}
+ 			MSG_WriteString (&net_message, va ("\\sv_maxclients\\%i", svs.maxclients));
+ 			net_message.cursize--;
++			/*
++			 * vkquake-ios overlay 0034: getstatus carries the serverinfo string too,
++			 * the way FTE's status reply does. It is public by definition (any
++			 * client can read it with `serverinfo`), and it is how a server
++			 * advertises sv_dlURL to a client that has not joined yet — which is
++			 * what the iOS mod downloader asks for, and what lets the simulator
++			 * harness stand a vkQuake dedicated server in for an FTE one.
++			 */
++			if (full && svs.serverinfo[0] == '\\' && strlen (svs.serverinfo) < 1024)
++			{
++				MSG_WriteString (&net_message, svs.serverinfo);
++				net_message.cursize--;
++			}
+ 			if (*cookie)
+ 			{
+ 				MSG_WriteString (&net_message, va ("\\challenge\\%s", cookie));
+--- a/meson.build
++++ b/meson.build
+@@ -234,6 +234,9 @@
+     # (scripts/build-sim.sh, scripts/build-ios.sh) and a conditional entry here
+     # would silently drop the file from the device build.
+     'Quake/cl_mapdl.c',
++    # vkquake-ios overlay 0034 (MOD-DL): missing mod content. Same rule as above:
++    # #ifdef VKQ_IOS inside, listed unconditionally.
++    'Quake/cl_moddl.c',
+     'Quake/cl_parse.c',
+     'Quake/cl_tent.c',
+     'Quake/cmd.c',
+--- /dev/null
++++ b/Quake/cl_moddl.c
+@@ -0,0 +1,1407 @@
++/*
++Copyright (C) 1996-2001 Id Software, Inc.
++Copyright (C) 2010-2014 QuakeSpasm developers
++
++This program is free software; you can redistribute it and/or
++modify it under the terms of the GNU General Public License
++as published by the Free Software Foundation; either version 2
++of the License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++
++See the GNU General Public License for more details.
++
++You should have received a copy of the GNU General Public License
++along with this program; if not, write to the Free Software
++Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
++
++*/
++// cl_moddl.c -- vkquake-ios overlay 0034: fetch the MOD CONTENT a server needs.
++//
++// ============================================================================
++// WHY THIS EXISTS
++//
++// Overlay 0028 fetches a missing maps/*.bsp. Joining a public MOD server
++// (Team Fortress, Threewave CTF, AirQuake, Copper coop...) still failed on the
++// first custom MODEL with "install that mod's folder next to id1". In NetQuake
++// the mod's progs run on the server; the client needs only the files in the
++// precache lists, so this is the same per-file problem as a map, one level up.
++//
++// SOURCES, tried in this order:
++//
++//  1. The SERVER'S OWN download URL. FTE advertises it as the serverinfo key
++//     sv_dlURL (alias of DarkPlaces' sv_curl_defaulturl), and an FTE client
++//     fetches <url>/<gamedir>/<path> per file (fteqw engine/client/cl_parse.c,
++//     CL_CheckOrEnqueDownloadFile). NetQuake clients only see serverinfo in-band
++//     via a `fullserverinfo` stufftext sent during prespawn — AFTER
++//     svc_serverinfo, i.e. after this check has already killed the connection —
++//     so it is read out of band with a `getstatus` to the same address.
++//     Survey 2026-11-03: none of the 38 public servers that answer getstatus set
++//     it. It is implemented because it is the convention, it costs one UDP
++//     round trip, and it is the only source a server operator controls.
++//  2. A CURATED TABLE (mods/mod-sources.json): package URL + sha256 + the exact
++//     file list of each package, written by downloading the package and listing
++//     it. A package is offered only if it contains EVERY missing model. The copy
++//     in the repository is fetched first so a dead link can be fixed without a
++//     release; the copy in the app bundle is the fallback.
++//
++// Missing maps found along the way are added to the same plan from 0028's bare
++// .bsp mirror, so a Team Fortress join is ONE prompt for the mod and its map.
++//
++// WHAT IS DELIBERATELY NOT HERE
++//  - Arbitrary server-chosen archives. Source 1 fetches individual precache
++//    files only, each validated by magic number; archives come only from the
++//    curated table, sha256-pinned.
++//  - Executable config. Nothing ending in .cfg/.rc is ever installed, loose or
++//    inside a .pak — `game <mod>` execs quake.rc/autoexec.cfg from the search
++//    path, and a download must not be able to rebind the player's keys.
++//  - Overwriting. Every placement refuses an existing file; a .pak lands in the
++//    next free pakN.pak slot.
++// ============================================================================
++
++#include "quakedef.h"
++
++#ifdef VKQ_IOS
++
++#include <sys/stat.h>
++#include <dirent.h>
++
++// shell services (ios/shell/ios_download.m) — same poll-only contract as 0028
++extern int			VKQ_DL_StartHead (const char *url);
++extern int			VKQ_DL_StartGetMax (const char *url, const char *destpath, long long maxbytes);
++extern int			VKQ_DL_StartSha256 (const char *path);
++extern int			VKQ_DL_StartStatus (const char *target, int defaultport);
++extern int			VKQ_DL_StartModResolve (const char *cachedpath, const char *bundledpath, const char *missing, const char *gamedir);
++extern int			VKQ_DL_Poll (int job, long long *got, long long *total, int *httpstatus);
++extern const char  *VKQ_DL_Error (int job);
++extern const char  *VKQ_DL_Result (int job, const char *field);
++extern void			VKQ_DL_Free (int job);
++extern const char  *VKQ_DL_CachesPath (void);
++extern const char  *VKQ_DL_BundledModTablePath (void);
++extern void			VKQ_DL_RemoveStaging (const char *path);
++
++#define DLP_RUNNING 0
++#define DLP_DONE	1
++#define DLP_FAILED	2
++
++// One consent cvar for maps and mods (cl_mapdownload 0/1/2 and its Settings
++// row): the decision a player makes — "never / ask me / just do it" — is about
++// fetching game content for a server, not about which kind of file it is, and
++// the prompt states the size and the host either way. A second cvar would be a
++// second row that means the same thing.
++extern cvar_t cl_mapdownload, cl_mapdownload_allowhttp, cl_mapdownload_bspurl, cl_mapdownload_maxbsp, cl_mapdownload_maxpkg;
++
++// Where the live copy of the curated table is fetched from. A cvar so the
++// simulator harness can point it at its fixture; https-only like the 0028 URLs.
++cvar_t cl_moddownload_tableurl = {"cl_moddownload_tableurl", "https://raw.githubusercontent.com/rebelancap/vkQuake-ios/main/mods/mod-sources.json", CVAR_ARCHIVE};
++
++typedef enum
++{
++	MOD_IDLE = 0,
++	MOD_STATUS,	   // getstatus in flight (server download URL, modname)
++	MOD_PROBE,	   // HEAD per planned file (server URL files, or the map mirror)
++	MOD_TABLE,	   // fetching the live mod table
++	MOD_RESOLVE,   // matching the missing models against the table
++	MOD_PROMPT,	   // waiting for the player
++	MOD_GET,	   // downloading plan item `cur`
++	MOD_HASH,	   // sha256 of the package
++	MOD_INSTALL,   // place files (synchronous, its own frame)
++	MOD_SWITCH,	   // `game <mod>` issued; connect follows on a later frame
++	MOD_RECONNECT, // connect issued
++	MOD_FAILED
++} mod_state_t;
++
++typedef enum
++{
++	ITEM_FILE = 0, // one precache file from the server's download URL
++	ITEM_PKG,	   // the curated package
++	ITEM_MAP	   // a missing map from 0028's bare-.bsp mirror
++} mod_kind_t;
++
++#define MOD_MAX_ITEMS	 384
++#define MOD_MISSING_SIZE 16384
++#define MOD_MAX_TRIED	 16
++
++typedef struct
++{
++	char	   path[MAX_QPATH]; // game path (progs/x.mdl, sound/x.wav, maps/x.bsp); "" for a package
++	char	   url[512];
++	long long  size;
++	mod_kind_t kind;
++	qboolean   optional; // a sound: dropped (not fatal) when the source lacks it
++} mod_item_t;
++
++static struct
++{
++	mod_state_t state;
++	char		target[256];   // what the player connected with
++	char		servergd[64];  // the server's game directory, sanitized ("" = unknown)
++	char		gamedir[64];   // where content is installed ("" = the running gamedir)
++	char		title[64];	   // line 1 of the screen
++	char		srcname[64];   // host the bytes come from
++	char		dlurl[256];	   // server-advertised base URL (source 1)
++	int			layout;		   // 0 = <dlurl>/<gamedir>/<path>, 1 = <dlurl>/<path>
++	int			source;		   // 1 = server URL, 2 = curated table
++	char		missing[MOD_MISSING_SIZE]; // newline-separated game paths
++	int			nmodels;	   // missing non-map models (the fatal ones)
++	// curated package
++	char		pkgurl[512], pkgsha[80], pkgtype[8], pkginstall[512];
++	long long	pkgbytes;
++	// the plan
++	mod_item_t	items[MOD_MAX_ITEMS];
++	int			nitems, cur;
++	qboolean	probing_first; // PROBE: still deciding the server URL layout
++	long long	plantotal, donebytes, got;
++	char		tmpfile[MAX_OSPATH];
++	char		reason[128];
++	int			job;
++	int			frames; // MOD_SWITCH countdown
++} mod;
++
++static char mod_tried[MOD_MAX_TRIED][256]; // targets offered this session
++static int	mod_tried_count;
++static char mod_switched[MOD_MAX_TRIED][256]; // targets we already switched game for
++static int	mod_switched_count;
++
++static qboolean mod_in_list (char list[][256], int n, const char *s)
++{
++	int i;
++	for (i = 0; i < n; i++)
++		if (!q_strcasecmp (list[i], s))
++			return true;
++	return false;
++}
++
++static void mod_add_list (char list[][256], int *n, const char *s)
++{
++	if (*n < MOD_MAX_TRIED && !mod_in_list (list, *n, s))
++		q_strlcpy (list[(*n)++], s, 256);
++}
++
++static void mod_forget_tried (const char *s)
++{
++	int i;
++	for (i = 0; i < mod_tried_count; i++)
++		if (!q_strcasecmp (mod_tried[i], s))
++		{
++			memmove (mod_tried[i], mod_tried[i + 1], (mod_tried_count - i - 1) * sizeof (mod_tried[0]));
++			mod_tried_count--;
++			return;
++		}
++}
++
++// ---------------------------------------------------------------------------
++// helpers
++// ---------------------------------------------------------------------------
++static void mod_job_release (void)
++{
++	if (mod.job)
++	{
++		VKQ_DL_Free (mod.job);
++		mod.job = 0;
++	}
++}
++
++static void mod_stage_dir (char *out, size_t len)
++{
++	q_snprintf (out, len, "%s/.moddl", com_basedir);
++}
++
++static void mod_stage_clear (void)
++{
++	char d[MAX_OSPATH];
++	mod_stage_dir (d, sizeof (d));
++	VKQ_DL_RemoveStaging (d);
++}
++
++static void mod_fail (const char *fmt, ...)
++{
++	va_list argptr;
++	char	string[128];
++
++	va_start (argptr, fmt);
++	q_vsnprintf (string, sizeof (string), fmt, argptr);
++	va_end (argptr);
++
++	mod_job_release ();
++	mod.tmpfile[0] = 0;
++	mod_stage_clear ();
++	q_strlcpy (mod.reason, string, sizeof (mod.reason));
++	mod.state = MOD_FAILED;
++	Con_Printf ("moddl: FAILED — %s\n", string);
++}
++
++static qboolean mod_url_ok (const char *url)
++{
++	if (!q_strncasecmp (url, "https://", 8))
++		return true;
++	return cl_mapdownload_allowhttp.value >= 0.5f && !q_strncasecmp (url, "http://", 7);
++}
++
++static void mod_host_of (const char *url, char *out, size_t len)
++{
++	const char *p = strstr (url, "://");
++	const char *e;
++	size_t		n;
++
++	p = p ? p + 3 : url;
++	e = strchr (p, '/');
++	n = e ? (size_t)(e - p) : strlen (p);
++	if (n >= len)
++		n = len - 1;
++	memcpy (out, p, n);
++	out[n] = 0;
++}
++
++static void mod_join_url (char *out, size_t len, const char *base, const char *tail)
++{
++	size_t n = strlen (base);
++	q_snprintf (out, len, (n && base[n - 1] == '/') ? "%s%s" : "%s/%s", base, tail);
++}
++
++/*
++ * A game directory NAME, nothing else: [A-Za-z0-9_-], 1..31 chars, and not one
++ * of the base directories (installing "mod content" into id1 under the name of
++ * a mod is exactly the pollution this file avoids). Servers send the gamedir as
++ * a ';' list ("id1;fortress", FTE also adds "qw"); the last real component is
++ * the mod. Anything that is not a plain name — CRMod reports "CRMod 7
++ * (v1.26.11)" as its modname — is treated as unknown.
++ */
++static void mod_sanitize_gamedir (const char *in, char *out, size_t len)
++{
++	char		tmp[256], *tok, *save = NULL;
++	const char *c;
++
++	out[0] = 0;
++	if (!in || !*in)
++		return;
++	q_strlcpy (tmp, in, sizeof (tmp));
++	for (tok = strtok_r (tmp, ";", &save); tok; tok = strtok_r (NULL, ";", &save))
++	{
++		if (!q_strcasecmp (tok, GAMENAME) || !q_strcasecmp (tok, "qw") || !*tok || strlen (tok) > 31)
++			continue;
++		for (c = tok; *c; c++)
++			if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '-'))
++				break;
++		if (*c)
++			continue;
++		q_strlcpy (out, tok, len);
++	}
++}
++
++/*
++ * A relative game path we are willing to WRITE: plain characters, no absolute,
++ * no "..", no hidden components, a short whitelist of content extensions.
++ * Server-chosen strings (precache names) and table-chosen strings (install
++ * rules) both pass through here before they become a filesystem path.
++ */
++static qboolean mod_relpath_ok (const char *p)
++{
++	static const char *exts[] = {"mdl", "spr", "bsp", "lit", "wav", "ogg", "mp3", "lmp", "pcx", "tga", "png", "wad", "loc", "pak", NULL};
++	const char		  *s, *ext;
++	int				   i;
++
++	if (!p || !*p || strlen (p) >= MAX_QPATH || *p == '/' || strstr (p, "..") || strstr (p, "//") || strstr (p, "/."))
++		return false;
++	if (*p == '.')
++		return false;
++	for (s = p; *s; s++)
++		if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') || (*s >= '0' && *s <= '9') || *s == '_' || *s == '-' || *s == '.' || *s == '/' ||
++			  *s == '+'))
++			return false;
++	ext = COM_FileGetExtension (p);
++	for (i = 0; exts[i]; i++)
++		if (!q_strcasecmp (ext, exts[i]))
++			return true;
++	return false;
++}
++
++// The first bytes of a downloaded file must be what its extension says it is:
++// this is what stops an HTML error page (or anything else) from landing under a
++// name the engine will later parse as a model.
++static qboolean mod_magic_ok (const char *path, const char *gamepath, char *why, size_t whylen)
++{
++	FILE		 *f = fopen (path, "rb");
++	unsigned char h[4];
++	const char	 *ext = COM_FileGetExtension (gamepath);
++
++	if (!f)
++	{
++		q_strlcpy (why, "cannot read the downloaded file", whylen);
++		return false;
++	}
++	if (fread (h, 1, 4, f) != 4)
++	{
++		fclose (f);
++		q_snprintf (why, whylen, "%s is too small", gamepath);
++		return false;
++	}
++	fclose (f);
++	if (!q_strcasecmp (ext, "bsp"))
++	{
++		unsigned int v = (unsigned int)h[0] | ((unsigned int)h[1] << 8) | ((unsigned int)h[2] << 16) | ((unsigned int)h[3] << 24);
++		if (v == 29 || !memcmp (h, "BSP2", 4) || !memcmp (h, "2PSB", 4))
++			return true;
++	}
++	else if (!q_strcasecmp (ext, "mdl"))
++	{
++		if (!memcmp (h, "IDPO", 4) || !memcmp (h, "MD16", 4))
++			return true;
++	}
++	else if (!q_strcasecmp (ext, "spr"))
++	{
++		if (!memcmp (h, "IDSP", 4))
++			return true;
++	}
++	else if (!q_strcasecmp (ext, "wav"))
++	{
++		if (!memcmp (h, "RIFF", 4))
++			return true;
++	}
++	else if (!q_strcasecmp (ext, "ogg"))
++	{
++		if (!memcmp (h, "OggS", 4))
++			return true;
++	}
++	else if (!q_strcasecmp (ext, "lit"))
++	{
++		if (!memcmp (h, "QLIT", 4))
++			return true;
++	}
++	else if (!q_strcasecmp (ext, "pak"))
++	{
++		if (!memcmp (h, "PACK", 4))
++			return true;
++	}
++	else
++		return true; // lmp/pcx/tga/... have no reliable magic; the path rules still apply
++	q_snprintf (why, whylen, "%s is not a valid .%s (%02x%02x%02x%02x)", gamepath, ext, h[0], h[1], h[2], h[3]);
++	return false;
++}
++
++/*
++ * Validate a .pak before it goes anywhere the engine will mount it: a sane
++ * directory, entry names that are plain relative paths, and NO .cfg/.rc entry
++ * (a pak's quake.rc/autoexec.cfg would run on `game <mod>`).
++ */
++static qboolean mod_pak_ok (const char *path, char *why, size_t whylen)
++{
++	FILE		 *f = fopen (path, "rb");
++	unsigned char hdr[12];
++	int			  dirofs, dirlen, n, i;
++	long		  fsize;
++
++	if (!f)
++	{
++		q_strlcpy (why, "cannot read the package", whylen);
++		return false;
++	}
++	fseek (f, 0, SEEK_END);
++	fsize = ftell (f);
++	fseek (f, 0, SEEK_SET);
++	if (fread (hdr, 1, 12, f) != 12 || memcmp (hdr, "PACK", 4))
++	{
++		fclose (f);
++		q_strlcpy (why, "not a Quake .pak", whylen);
++		return false;
++	}
++	dirofs = hdr[4] | (hdr[5] << 8) | (hdr[6] << 16) | (hdr[7] << 24);
++	dirlen = hdr[8] | (hdr[9] << 8) | (hdr[10] << 16) | (hdr[11] << 24);
++	n = dirlen / 64;
++	if (dirofs < 12 || dirlen < 64 || dirlen % 64 || (long)dirofs + dirlen > fsize || n > 65536)
++	{
++		fclose (f);
++		q_strlcpy (why, "the .pak directory is malformed", whylen);
++		return false;
++	}
++	fseek (f, dirofs, SEEK_SET);
++	for (i = 0; i < n; i++)
++	{
++		unsigned char e[64];
++		char		  name[57];
++		const char	 *ext;
++		if (fread (e, 1, 64, f) != 64)
++		{
++			fclose (f);
++			q_strlcpy (why, "the .pak directory is truncated", whylen);
++			return false;
++		}
++		memcpy (name, e, 56);
++		name[56] = 0;
++		ext = COM_FileGetExtension (name);
++		if (!name[0] || name[0] == '/' || name[0] == '\\' || strstr (name, "..") || strchr (name, ':'))
++		{
++			fclose (f);
++			q_snprintf (why, whylen, "the .pak has an unsafe entry \"%.40s\"", name);
++			return false;
++		}
++		if (!q_strcasecmp (ext, "cfg") || !q_strcasecmp (ext, "rc"))
++		{
++			fclose (f);
++			q_snprintf (why, whylen, "the .pak carries config \"%.40s\"", name);
++			return false;
++		}
++	}
++	fclose (f);
++	return true;
++}
++
++static void mod_mkparents (const char *root, const char *full)
++{
++	char   tmp[MAX_OSPATH];
++	char  *p;
++	size_t rootlen = strlen (root);
++
++	q_strlcpy (tmp, full, sizeof (tmp));
++	for (p = tmp + rootlen + 1; *p; p++)
++	{
++		if (*p != '/')
++			continue;
++		*p = 0;
++		Sys_mkdir (tmp);
++		*p = '/';
++	}
++}
++
++static qboolean mod_same_file (const char *a, const char *b)
++{
++	FILE	*fa = fopen (a, "rb"), *fb = fopen (b, "rb");
++	qboolean same = (fa && fb);
++	char	 ba[8192], bb[8192];
++	size_t	 na, nb;
++
++	while (same)
++	{
++		na = fread (ba, 1, sizeof (ba), fa);
++		nb = fread (bb, 1, sizeof (bb), fb);
++		if (na != nb || memcmp (ba, bb, na))
++			same = false;
++		if (!na)
++			break;
++	}
++	if (fa)
++		fclose (fa);
++	if (fb)
++		fclose (fb);
++	return same;
++}
++
++// The directory content is installed into.
++static void mod_install_root (char *out, size_t len)
++{
++	if (mod.gamedir[0])
++		q_snprintf (out, len, "%s/%s", com_basedir, mod.gamedir);
++	else
++		q_strlcpy (out, com_gamedir, len);
++	Sys_mkdir (out);
++}
++
++// Place a validated .pak in the next free pakN.pak slot. An identical pak that
++// is already installed is not added twice (a retried install, or the player's
++// own copy of the same release).
++static qboolean mod_place_pak (const char *src)
++{
++	char root[MAX_OSPATH], dest[MAX_OSPATH], why[128];
++	int	 i;
++
++	if (!mod_pak_ok (src, why, sizeof (why)))
++	{
++		mod_fail ("%s", why);
++		return false;
++	}
++	mod_install_root (root, sizeof (root));
++	for (i = 0; i < 64; i++)
++	{
++		q_snprintf (dest, sizeof (dest), "%s/pak%i.pak", root, i);
++		if (!(Sys_FileType (dest) & FS_ENT_FILE))
++			break;
++		if (mod_same_file (src, dest))
++		{
++			Con_Printf ("moddl: pak%i.pak is already this package — not adding it twice\n", i);
++			return true;
++		}
++	}
++	if (i == 64)
++	{
++		mod_fail ("no free pak slot in %s", root);
++		return false;
++	}
++	if (rename (src, dest) != 0)
++	{
++		mod_fail ("could not move the package into %s", root);
++		return false;
++	}
++	Con_Printf ("moddl: installed %s/pak%i.pak\n", mod.gamedir[0] ? mod.gamedir : COM_SkipPath (com_gamedir), i);
++	return true;
++}
++
++// Place one loose file under the install root. Never overwrites.
++static qboolean mod_place_file (const char *src, const char *gamepath)
++{
++	char root[MAX_OSPATH], dest[MAX_OSPATH], why[128];
++
++	if (!mod_relpath_ok (gamepath))
++	{
++		mod_fail ("refusing unsafe path \"%.48s\"", gamepath);
++		return false;
++	}
++	if (!mod_magic_ok (src, gamepath, why, sizeof (why)))
++	{
++		mod_fail ("%s", why);
++		return false;
++	}
++	mod_install_root (root, sizeof (root));
++	q_snprintf (dest, sizeof (dest), "%s/%s", root, gamepath);
++	if (Sys_FileType (dest) & FS_ENT_FILE)
++	{
++		Con_Printf ("moddl: skip (exists) %s\n", gamepath);
++		remove (src);
++		return true;
++	}
++	mod_mkparents (root, dest);
++	if (rename (src, dest) != 0)
++	{
++		mod_fail ("could not install %s", gamepath);
++		return false;
++	}
++	Con_DPrintf ("moddl: installed %s\n", gamepath);
++	return true;
++}
++
++// Does a usable copy of this mod already exist on disk (in any content root)?
++static qboolean mod_local_has (const char *gd)
++{
++	char p[MAX_OSPATH];
++	int	 i;
++	for (i = 0; i < com_numbasedirs; i++)
++	{
++		q_snprintf (p, sizeof (p), "%s/%s/pak0.pak", com_basedirs[i], gd);
++		if (Sys_FileType (p) & FS_ENT_FILE)
++			return true;
++		q_snprintf (p, sizeof (p), "%s/%s/progs.dat", com_basedirs[i], gd);
++		if (Sys_FileType (p) & FS_ENT_FILE)
++			return true;
++		q_snprintf (p, sizeof (p), "%s/%s/progs", com_basedirs[i], gd);
++		if (Sys_FileType (p) & FS_ENT_DIRECTORY)
++			return true;
++	}
++	return false;
++}
++
++static qboolean mod_needs_switch (void)
++{
++	return mod.gamedir[0] && !COM_GameDirMatches (mod.gamedir);
++}
++
++// ---------------------------------------------------------------------------
++// rejoin
++// ---------------------------------------------------------------------------
++static void mod_rejoin (void)
++{
++	mod_job_release ();
++	mod.tmpfile[0] = 0;
++	mod_stage_clear ();
++	if (!mod.target[0])
++	{
++		Con_Printf ("moddl: installed, but there is no server address to rejoin\n");
++		mod.state = MOD_IDLE;
++		key_dest = key_menu;
++		m_state = m_main;
++		return;
++	}
++	if (mod_needs_switch ())
++	{
++		/*
++		 * `game` FIRST, `connect` on a later frame. COM_SwitchGame appends
++		 * "exec quake.rc" and "vid_unlock" to the command buffer; a connect queued
++		 * in the same breath would run BEFORE them, inside the VID_Lock window and
++		 * ahead of the new game's configs. Two frames is the buffer draining.
++		 */
++		Con_Printf ("moddl: switching to game \"%s\" to rejoin\n", mod.gamedir);
++		Cbuf_AddText (va ("game \"%s\"\n", mod.gamedir));
++		mod.state = MOD_SWITCH;
++		mod.frames = 2;
++		return;
++	}
++	Con_Printf ("moddl: rejoining %s\n", mod.target);
++	IN_Activate ();
++	key_dest = key_game;
++	m_state = m_none;
++	Cbuf_AddText (va ("connect \"%s\"\n", mod.target));
++	mod.state = MOD_RECONNECT;
++}
++
++// ---------------------------------------------------------------------------
++// planning
++// ---------------------------------------------------------------------------
++static int mod_add_item (const char *path, const char *url, mod_kind_t kind, qboolean optional)
++{
++	mod_item_t *it;
++	if (mod.nitems >= MOD_MAX_ITEMS)
++		return -1;
++	it = &mod.items[mod.nitems];
++	memset (it, 0, sizeof (*it));
++	q_strlcpy (it->path, path, sizeof (it->path));
++	q_strlcpy (it->url, url, sizeof (it->url));
++	it->kind = kind;
++	it->optional = optional;
++	it->size = -1;
++	return mod.nitems++;
++}
++
++static void mod_remove_item (int i)
++{
++	memmove (&mod.items[i], &mod.items[i + 1], (mod.nitems - i - 1) * sizeof (mod.items[0]));
++	mod.nitems--;
++}
++
++static void mod_server_url_for (char *out, size_t len, const char *path)
++{
++	if (mod.layout == 0 && mod.servergd[0])
++		mod_join_url (out, len, mod.dlurl, va ("%s/%s", mod.servergd, path));
++	else
++		mod_join_url (out, len, mod.dlurl, path);
++}
++
++static void mod_begin_table (void);
++static void mod_to_prompt (void);
++
++// Start (or continue) the HEAD probe over the plan. Every item gets a size, so
++// the prompt can state a real total.
++static void mod_probe_next (void)
++{
++	mod_job_release ();
++	while (mod.cur < mod.nitems && mod.items[mod.cur].kind == ITEM_PKG)
++		mod.cur++;
++	if (mod.cur >= mod.nitems)
++	{
++		mod_to_prompt ();
++		return;
++	}
++	mod.job = VKQ_DL_StartHead (mod.items[mod.cur].url);
++	if (!mod.job)
++	{
++		mod_fail ("could not start a probe");
++		return;
++	}
++	mod.state = MOD_PROBE;
++}
++
++// Source 1: the server's download URL. Plan every missing file under it.
++static void mod_begin_server (void)
++{
++	const char *p = mod.missing;
++	char		line[MAX_QPATH], url[512];
++	int			first = -1;
++
++	mod.nitems = 0;
++	mod.source = 1;
++	mod.layout = mod.servergd[0] ? 0 : 1;
++	while (*p)
++	{
++		const char *e = strchr (p, '\n');
++		size_t		n = e ? (size_t)(e - p) : strlen (p);
++		if (n && n < sizeof (line))
++		{
++			memcpy (line, p, n);
++			line[n] = 0;
++			if (mod_relpath_ok (line))
++			{
++				qboolean ismodel = q_strncasecmp (line, "sound/", 6) && q_strncasecmp (line, "maps/", 5);
++				int		 idx;
++				mod_server_url_for (url, sizeof (url), line);
++				idx = mod_add_item (line, url, ITEM_FILE, !ismodel);
++				if (ismodel && first < 0)
++					first = idx;
++			}
++		}
++		p = e ? e + 1 : p + n;
++	}
++	if (first < 0)
++	{
++		mod_begin_table ();
++		return;
++	}
++	// Probe the first MODEL first: it decides the URL layout before the rest is
++	// probed (FTE's own form is <url>/<gamedir>/<path>; a bare <url>/<path> is
++	// the fallback for servers that host the tree flat).
++	if (first != 0)
++	{
++		mod_item_t t = mod.items[0];
++		mod.items[0] = mod.items[first];
++		mod.items[first] = t;
++	}
++	q_strlcpy (mod.gamedir, mod.servergd, sizeof (mod.gamedir));
++	mod_host_of (mod.dlurl, mod.srcname, sizeof (mod.srcname));
++	q_snprintf (mod.title, sizeof (mod.title), "%s (from the server)", mod.servergd[0] ? mod.servergd : "mod content");
++	mod.probing_first = true;
++	mod.cur = 0;
++	Con_Printf ("moddl: server advertises a download URL (%s); probing %s\n", mod.dlurl, mod.items[0].url);
++	mod_probe_next ();
++}
++
++// Source 2: the curated table. Fetch the live copy (it may be newer than the
++// bundled one), then resolve against whichever parses.
++static void mod_table_cache_path (char *out, size_t len, qboolean part)
++{
++	q_snprintf (out, len, "%s/mod-sources.json%s", VKQ_DL_CachesPath (), part ? ".part" : "");
++}
++
++static void mod_begin_resolve (void)
++{
++	char cached[MAX_OSPATH];
++	mod_job_release ();
++	mod_table_cache_path (cached, sizeof (cached), false);
++	mod.job = VKQ_DL_StartModResolve (cached, VKQ_DL_BundledModTablePath (), mod.missing, mod.servergd);
++	if (!mod.job)
++	{
++		mod_fail ("could not read the mod table");
++		return;
++	}
++	mod.state = MOD_RESOLVE;
++}
++
++static void mod_begin_table (void)
++{
++	char part[MAX_OSPATH];
++
++	mod_job_release ();
++	mod.nitems = 0;
++	mod.source = 2;
++	q_strlcpy (mod.srcname, "the mod table", sizeof (mod.srcname));
++	if (!VKQ_DL_CachesPath ()[0] || !mod_url_ok (cl_moddownload_tableurl.string))
++	{
++		Con_Printf ("moddl: not refreshing the mod table (no cache dir, or the URL is not https)\n");
++		mod_begin_resolve ();
++		return;
++	}
++	mod_table_cache_path (part, sizeof (part), true);
++	remove (part);
++	q_strlcpy (mod.tmpfile, part, sizeof (mod.tmpfile));
++	mod.job = VKQ_DL_StartGetMax (cl_moddownload_tableurl.string, part, 1024 * 1024);
++	if (!mod.job)
++	{
++		mod.tmpfile[0] = 0;
++		mod_begin_resolve ();
++		return;
++	}
++	mod.state = MOD_TABLE;
++	Con_Printf ("moddl: refreshing the mod table from %s\n", cl_moddownload_tableurl.string);
++}
++
++// After a source is chosen: add the missing maps from 0028's mirror, then probe.
++static void mod_add_maps_and_probe (void)
++{
++	const char *p = mod.missing;
++	char		line[MAX_QPATH], url[512];
++
++	while (*p)
++	{
++		const char *e = strchr (p, '\n');
++		size_t		n = e ? (size_t)(e - p) : strlen (p);
++		if (n && n < sizeof (line))
++		{
++			memcpy (line, p, n);
++			line[n] = 0;
++			if (!q_strncasecmp (line, "maps/", 5) && mod_relpath_ok (line))
++			{
++				mod_join_url (url, sizeof (url), cl_mapdownload_bspurl.string, COM_SkipPath (line));
++				if (mod_url_ok (url))
++					mod_add_item (line, url, ITEM_MAP, true);
++			}
++		}
++		p = e ? e + 1 : p + n;
++	}
++	mod.cur = 0;
++	mod.probing_first = false;
++	mod_probe_next ();
++}
++
++static void mod_to_prompt (void)
++{
++	int i;
++	mod_job_release ();
++	mod.plantotal = 0;
++	for (i = 0; i < mod.nitems; i++)
++		if (mod.items[i].size > 0)
++			mod.plantotal += mod.items[i].size;
++	if ((double)mod.plantotal > cl_mapdownload_maxpkg.value * 1024.0 * 1024.0)
++	{
++		mod_fail ("%.0f MB is over the %.0f MB limit", (double)mod.plantotal / 1048576.0, cl_mapdownload_maxpkg.value);
++		return;
++	}
++	Con_Printf (
++		"moddl: plan — %d item(s), %lld bytes, from %s, into %s\n", mod.nitems, mod.plantotal, mod.srcname,
++		mod.gamedir[0] ? mod.gamedir : COM_SkipPath (com_gamedir));
++	mod.state = MOD_PROMPT;
++	if (cl_mapdownload.value >= 1.5f)
++		CL_ModDownload_Accept ();
++}
++
++// Switch to a copy of the mod the player already has, instead of downloading.
++static qboolean mod_try_local_switch (const char *gd)
++{
++	if (!gd[0] || COM_GameDirMatches (gd) || !mod_local_has (gd) || mod_in_list (mod_switched, mod_switched_count, mod.target))
++		return false;
++	mod_add_list (mod_switched, &mod_switched_count, mod.target);
++	// A switch is not a download: let a later attempt on this server still offer one.
++	mod_forget_tried (mod.target);
++	q_strlcpy (mod.gamedir, gd, sizeof (mod.gamedir));
++	Con_Printf ("moddl: you already have \"%s\" — switching to it and rejoining\n", gd);
++	q_snprintf (mod.title, sizeof (mod.title), "%s", gd);
++	mod_rejoin ();
++	return true;
++}
++
++// ---------------------------------------------------------------------------
++// download / install
++// ---------------------------------------------------------------------------
++static void mod_begin_get (void)
++{
++	char		stage[MAX_OSPATH];
++	mod_item_t *it;
++	long long	cap;
++
++	mod_job_release ();
++	if (mod.cur >= mod.nitems)
++	{
++		mod_rejoin ();
++		return;
++	}
++	it = &mod.items[mod.cur];
++	mod_stage_dir (stage, sizeof (stage));
++	Sys_mkdir (stage);
++	q_snprintf (mod.tmpfile, sizeof (mod.tmpfile), "%s/%d.part", stage, mod.cur);
++	remove (mod.tmpfile);
++	cap = (long long)((it->kind == ITEM_PKG ? cl_mapdownload_maxpkg.value : cl_mapdownload_maxbsp.value) * 1024.0 * 1024.0);
++	mod.job = VKQ_DL_StartGetMax (it->url, mod.tmpfile, cap);
++	if (!mod.job)
++	{
++		mod_fail ("could not start the download");
++		return;
++	}
++	mod.got = 0;
++	mod.state = MOD_GET;
++	Con_Printf ("moddl: downloading %s\n", it->url);
++}
++
++// The package install: a .pak goes in as-is; a .zip is extracted into the
++// staging tree (COM_UnzipToDir refuses traversal) and ONLY the files its install
++// rules name are moved out of it.
++static qboolean mod_install_pkg (const char *file)
++{
++	char rules[512], *rule, *save = NULL;
++	char stage[MAX_OSPATH], xdir[MAX_OSPATH], src[MAX_OSPATH], err[128];
++
++	if (!q_strcasecmp (mod.pkgtype, "pak"))
++		return mod_place_pak (file);
++	if (q_strcasecmp (mod.pkgtype, "zip"))
++	{
++		mod_fail ("unknown package type \"%s\"", mod.pkgtype);
++		return false;
++	}
++	mod_stage_dir (stage, sizeof (stage));
++	q_snprintf (xdir, sizeof (xdir), "%s/x", stage);
++	Sys_mkdir (xdir);
++	if (COM_UnzipToDir (file, xdir, stage, err, sizeof (err)) < 0)
++	{
++		mod_fail ("%s", err);
++		return false;
++	}
++	q_strlcpy (rules, mod.pkginstall, sizeof (rules));
++	for (rule = strtok_r (rules, ";", &save); rule; rule = strtok_r (NULL, ";", &save))
++	{
++		char *as = strchr (rule, '>');
++		if (!as)
++			continue;
++		*as++ = 0;
++		// `from` is a path inside the archive: same rules as anything we write.
++		if (!mod_relpath_ok (rule))
++		{
++			mod_fail ("install rule names an unsafe path \"%.40s\"", rule);
++			return false;
++		}
++		q_snprintf (src, sizeof (src), "%s/%s", xdir, rule);
++		if (!(Sys_FileType (src) & FS_ENT_FILE))
++		{
++			mod_fail ("the package has no %.48s", rule);
++			return false;
++		}
++		if (!strcmp (as, "pak"))
++		{
++			if (!mod_place_pak (src))
++				return false;
++		}
++		else if (!mod_place_file (src, as))
++			return false;
++	}
++	return true;
++}
++
++static void mod_do_install (void)
++{
++	char file[MAX_OSPATH];
++	q_strlcpy (file, mod.tmpfile, sizeof (file));
++	mod.tmpfile[0] = 0;
++	if (!mod_install_pkg (file))
++		return;
++	remove (file);
++	mod.cur++;
++	mod_begin_get ();
++}
++
++// ---------------------------------------------------------------------------
++// per-frame pump (host.c, next to 0028's)
++// ---------------------------------------------------------------------------
++void CL_ModDownload_Frame (void)
++{
++	long long got = 0, total = 0;
++	int		  status = 0, r;
++
++	switch (mod.state)
++	{
++	case MOD_IDLE:
++	case MOD_PROMPT:
++	case MOD_FAILED:
++		return;
++	case MOD_INSTALL:
++		mod_do_install ();
++		return;
++	case MOD_SWITCH:
++		if (--mod.frames > 0)
++			return;
++		Con_Printf ("moddl: rejoining %s\n", mod.target);
++		IN_Activate ();
++		key_dest = key_game;
++		m_state = m_none;
++		Cbuf_AddText (va ("connect \"%s\"\n", mod.target));
++		mod.state = MOD_RECONNECT;
++		return;
++	case MOD_RECONNECT:
++		// Same reason as 0028: back to idle on the very next frame, so a
++		// changelevel into more missing content can start a fresh flow.
++		memset (&mod, 0, sizeof (mod));
++		mod.state = MOD_IDLE;
++		return;
++	default:
++		break;
++	}
++
++	if (!mod.job)
++	{
++		mod_fail ("internal: no job");
++		return;
++	}
++	r = VKQ_DL_Poll (mod.job, &got, &total, &status);
++	mod.got = got;
++	if (r == DLP_RUNNING)
++		return;
++
++	switch (mod.state)
++	{
++	case MOD_STATUS:
++	{
++		char		gd[64];
++		const char *u = "";
++		if (r == DLP_DONE)
++		{
++			mod_sanitize_gamedir (VKQ_DL_Result (mod.job, "modname"), gd, sizeof (gd));
++			if (!mod.servergd[0] && gd[0])
++			{
++				q_strlcpy (mod.servergd, gd, sizeof (mod.servergd));
++				Con_Printf ("moddl: server reports mod \"%s\"\n", gd);
++			}
++			u = VKQ_DL_Result (mod.job, "sv_dlurl");
++			if (!*u)
++				u = VKQ_DL_Result (mod.job, "sv_curl_defaulturl");
++			q_strlcpy (mod.dlurl, u, sizeof (mod.dlurl));
++		}
++		else
++			Con_Printf ("moddl: status query: %s\n", VKQ_DL_Error (mod.job));
++		mod_job_release ();
++		if (mod_try_local_switch (mod.servergd))
++			return;
++		if (mod.dlurl[0] && !mod_url_ok (mod.dlurl))
++		{
++			Con_Printf ("moddl: ignoring the server's download URL (not https): %s\n", mod.dlurl);
++			mod.dlurl[0] = 0;
++		}
++		if (mod.dlurl[0])
++			mod_begin_server ();
++		else
++			mod_begin_table ();
++		return;
++	}
++
++	case MOD_PROBE:
++	{
++		mod_item_t *it = &mod.items[mod.cur];
++		qboolean	ok = (r == DLP_DONE && status == 200);
++		if (ok)
++		{
++			it->size = total > 0 ? total : 0;
++			if ((double)it->size > cl_mapdownload_maxbsp.value * 1024.0 * 1024.0)
++			{
++				mod_fail ("%s is %.0f MB (limit %.0f MB)", it->path, (double)it->size / 1048576.0, cl_mapdownload_maxbsp.value);
++				return;
++			}
++			if (mod.probing_first)
++			{
++				char url[512];
++				int	 i;
++				mod.probing_first = false;
++				// Layout decided: rewrite every server URL in the plan to match.
++				for (i = 0; i < mod.nitems; i++)
++					if (mod.items[i].kind == ITEM_FILE)
++					{
++						mod_server_url_for (url, sizeof (url), mod.items[i].path);
++						q_strlcpy (mod.items[i].url, url, sizeof (mod.items[i].url));
++					}
++				Con_Printf ("moddl: server URL layout: %s\n", mod.layout == 0 ? "<url>/<gamedir>/<path>" : "<url>/<path>");
++			}
++			mod.cur++;
++			mod_probe_next ();
++			return;
++		}
++		if (mod.probing_first && mod.layout == 0)
++		{
++			// Not under <gamedir>/; try the flat layout once.
++			mod.layout = 1;
++			mod_server_url_for (it->url, sizeof (it->url), it->path);
++			mod_probe_next ();
++			return;
++		}
++		if (it->optional)
++		{
++			Con_Printf ("moddl: %s not available (http %d) — skipping it\n", it->path, status);
++			mod_remove_item (mod.cur);
++			mod_probe_next ();
++			return;
++		}
++		// A required model is not on the server's URL: that source cannot finish
++		// the job, so fall through to the curated table with a clean plan.
++		Con_Printf ("moddl: the server's URL lacks %s (http %d) — trying the mod table\n", it->path, status);
++		mod.dlurl[0] = 0;
++		mod.gamedir[0] = 0;
++		mod_begin_table ();
++		return;
++	}
++
++	case MOD_TABLE:
++	{
++		char part[MAX_OSPATH], cached[MAX_OSPATH];
++		mod_table_cache_path (part, sizeof (part), true);
++		mod_table_cache_path (cached, sizeof (cached), false);
++		if (r == DLP_DONE && status == 200 && got > 0)
++		{
++			rename (part, cached);
++			Con_Printf ("moddl: mod table refreshed (%lld bytes)\n", got);
++		}
++		else
++		{
++			remove (part);
++			Con_Printf ("moddl: mod table refresh failed (%s) — using the cached or bundled copy\n", VKQ_DL_Error (mod.job));
++		}
++		mod.tmpfile[0] = 0;
++		mod_begin_resolve ();
++		return;
++	}
++
++	case MOD_RESOLVE:
++	{
++		char gd[64];
++		if (r != DLP_DONE)
++		{
++			Con_Printf ("moddl: mod table: %s\n", VKQ_DL_Error (mod.job));
++			mod_fail (mod.servergd[0] ? "no known download for mod \"%.32s\"" : "no known download for this mod", mod.servergd);
++			return;
++		}
++		q_strlcpy (mod.pkgurl, VKQ_DL_Result (mod.job, "url"), sizeof (mod.pkgurl));
++		q_strlcpy (mod.pkgsha, VKQ_DL_Result (mod.job, "sha256"), sizeof (mod.pkgsha));
++		q_strlcpy (mod.pkgtype, VKQ_DL_Result (mod.job, "type"), sizeof (mod.pkgtype));
++		q_strlcpy (mod.pkginstall, VKQ_DL_Result (mod.job, "install"), sizeof (mod.pkginstall));
++		q_strlcpy (mod.title, VKQ_DL_Result (mod.job, "name"), sizeof (mod.title));
++		mod.pkgbytes = strtoll (VKQ_DL_Result (mod.job, "bytes"), NULL, 10);
++		// Install where the SERVER says the mod lives when the match was on its
++		// gamedir; otherwise into the table's directory for the package.
++		if (!strcmp (VKQ_DL_Result (mod.job, "rank"), "gamedir") && mod.servergd[0])
++			q_strlcpy (gd, mod.servergd, sizeof (gd));
++		else
++			mod_sanitize_gamedir (VKQ_DL_Result (mod.job, "gamedir"), gd, sizeof (gd));
++		Con_Printf (
++			"moddl: %s table matched \"%s\" by %s (%lld bytes) -> %s\n", VKQ_DL_Result (mod.job, "table"), mod.title, VKQ_DL_Result (mod.job, "rank"),
++			mod.pkgbytes, gd[0] ? gd : "?");
++		mod_job_release ();
++		if (!gd[0])
++		{
++			mod_fail ("the mod table entry has no usable game directory");
++			return;
++		}
++		if (!mod_url_ok (mod.pkgurl))
++		{
++			mod_fail ("the mod table entry has no usable https download");
++			return;
++		}
++		if (!mod.pkgsha[0])
++		{
++			// Curated entries are pinned by hash; an entry without one is a table bug.
++			mod_fail ("the mod table entry carries no sha256");
++			return;
++		}
++		if (mod_try_local_switch (gd))
++			return;
++		q_strlcpy (mod.gamedir, gd, sizeof (mod.gamedir));
++		mod.nitems = 0;
++		{
++			int i = mod_add_item ("", mod.pkgurl, ITEM_PKG, false);
++			mod.items[i].size = mod.pkgbytes;
++		}
++		mod_host_of (mod.pkgurl, mod.srcname, sizeof (mod.srcname));
++		mod_add_maps_and_probe ();
++		return;
++	}
++
++	case MOD_GET:
++	{
++		mod_item_t *it = &mod.items[mod.cur];
++		if (r != DLP_DONE || status != 200)
++		{
++			if (it->optional && it->kind != ITEM_PKG)
++			{
++				Con_Printf ("moddl: %s failed (%s) — continuing without it\n", it->path, VKQ_DL_Error (mod.job));
++				mod_job_release ();
++				remove (mod.tmpfile);
++				mod.tmpfile[0] = 0;
++				mod.cur++;
++				mod_begin_get ();
++				return;
++			}
++			mod_fail ("download failed (%s)", VKQ_DL_Error (mod.job));
++			return;
++		}
++		mod_job_release ();
++		mod.donebytes += got;
++		if (it->kind == ITEM_PKG)
++		{
++			mod.job = VKQ_DL_StartSha256 (mod.tmpfile);
++			if (!mod.job)
++			{
++				mod_fail ("could not hash the package");
++				return;
++			}
++			mod.state = MOD_HASH;
++			return;
++		}
++		{
++			char tmp[MAX_OSPATH];
++			q_strlcpy (tmp, mod.tmpfile, sizeof (tmp));
++			mod.tmpfile[0] = 0;
++			if (!mod_place_file (tmp, it->path))
++				return;
++		}
++		mod.cur++;
++		mod_begin_get ();
++		return;
++	}
++
++	case MOD_HASH:
++	{
++		const char *h = (r == DLP_DONE) ? VKQ_DL_Result (mod.job, "sha256") : "";
++		if (r != DLP_DONE || !h || q_strcasecmp (h, mod.pkgsha))
++		{
++			mod_fail ("package sha256 mismatch — refusing to install");
++			return;
++		}
++		mod_job_release ();
++		Con_Printf ("moddl: sha256 verified (%.16s...)\n", mod.pkgsha);
++		mod.state = MOD_INSTALL;
++		return;
++	}
++
++	default:
++		break;
++	}
++}
++
++// ---------------------------------------------------------------------------
++// entry point: CL_ParseServerInfo, when at least one NON-MAP model is missing.
++// `missing` is every missing precache as a game path, newline-separated
++// (progs/x.mdl, maps/x.bsp, sound/x.wav). Returns true if this flow took over
++// (the caller still tears the connection down).
++// ---------------------------------------------------------------------------
++qboolean CL_ModDownload_Begin (const char *missing, int nmodels, const char *servergamedir, const char *target)
++{
++	if (cl_mapdownload.value < 0.5f)
++	{
++		Con_Printf ("moddl: cl_mapdownload is 0 — not offering to download mod content\n");
++		return false;
++	}
++	if (mod.state != MOD_IDLE && mod.state != MOD_FAILED)
++	{
++		Con_Printf ("moddl: a download is already in progress\n");
++		return false;
++	}
++	if (CL_MapDownload_State () != 0 && !CL_MapDownload_Failed ())
++		return false;
++	if (!target || !*target || !q_strcasecmp (target, "local"))
++		return false;
++	if (mod_in_list (mod_tried, mod_tried_count, target))
++	{
++		// We already installed (or were refused) content for this server this
++		// session and it is STILL short. Retrying would loop; say what is wrong.
++		Con_Printf ("moddl: already fetched content for %s this session — not retrying\n", target);
++		return false;
++	}
++
++	memset (&mod, 0, sizeof (mod));
++	q_strlcpy (mod.target, target, sizeof (mod.target));
++	q_strlcpy (mod.missing, missing, sizeof (mod.missing));
++	mod.nmodels = nmodels;
++	mod_sanitize_gamedir (servergamedir, mod.servergd, sizeof (mod.servergd));
++	q_snprintf (mod.title, sizeof (mod.title), "%s", mod.servergd[0] ? mod.servergd : "mod content");
++	q_strlcpy (mod.srcname, "checking...", sizeof (mod.srcname));
++	mod_add_list (mod_tried, &mod_tried_count, target);
++	mod_stage_clear ();
++
++	Con_Printf ("moddl: %d model(s) missing for %s; asking the server what it offers\n", nmodels, mod.servergd[0] ? mod.servergd : "this server");
++	mod.job = VKQ_DL_StartStatus (target, 26000);
++	if (mod.job)
++		mod.state = MOD_STATUS;
++	else
++	{
++		// No queryable address: go straight to the table.
++		if (mod_try_local_switch (mod.servergd))
++			return true;
++		mod_begin_table ();
++	}
++	M_Menu_MapDownload_f ();
++	return true;
++}
++
++// ---------------------------------------------------------------------------
++// menu-facing accessors
++// ---------------------------------------------------------------------------
++qboolean CL_ModDownload_Active (void) { return mod.state != MOD_IDLE; }
++qboolean CL_ModDownload_Prompting (void) { return mod.state == MOD_PROMPT; }
++qboolean CL_ModDownload_Failed (void) { return mod.state == MOD_FAILED; }
++
++const char *CL_ModDownload_Line1 (void)
++{
++	static char buf[64];
++	q_snprintf (buf, sizeof (buf), "%.34s", mod.title);
++	return buf;
++}
++
++const char *CL_ModDownload_Line2 (void)
++{
++	static char buf[80];
++	switch (mod.state)
++	{
++	case MOD_STATUS:
++		q_snprintf (buf, sizeof (buf), "Asking the server...");
++		break;
++	case MOD_TABLE:
++	case MOD_RESOLVE:
++		q_snprintf (buf, sizeof (buf), "Looking for it online...");
++		break;
++	case MOD_PROBE:
++		q_snprintf (buf, sizeof (buf), "Checking %d file(s)...", mod.nitems);
++		break;
++	case MOD_PROMPT:
++		q_snprintf (buf, sizeof (buf), "%.1f MB from %.28s", (double)mod.plantotal / 1048576.0, mod.srcname);
++		break;
++	case MOD_GET:
++		if (mod.plantotal > 0)
++			q_snprintf (
++				buf, sizeof (buf), "Downloading %lld / %lld KB (%d%%)", (mod.donebytes + mod.got) / 1024, mod.plantotal / 1024,
++				(int)((mod.donebytes + mod.got) * 100 / mod.plantotal));
++		else
++			q_snprintf (buf, sizeof (buf), "Downloading %lld KB", (mod.donebytes + mod.got) / 1024);
++		break;
++	case MOD_HASH:
++		q_snprintf (buf, sizeof (buf), "Verifying...");
++		break;
++	case MOD_INSTALL:
++		q_snprintf (buf, sizeof (buf), "Installing...");
++		break;
++	case MOD_SWITCH:
++	case MOD_RECONNECT:
++		q_snprintf (buf, sizeof (buf), "Rejoining...");
++		break;
++	case MOD_FAILED:
++		q_strlcpy (buf, mod.reason, sizeof (buf));
++		break;
++	default:
++		buf[0] = 0;
++		break;
++	}
++	return buf;
++}
++
++void CL_ModDownload_Accept (void)
++{
++	if (mod.state != MOD_PROMPT)
++		return;
++	mod.cur = 0;
++	mod.donebytes = 0;
++	mod_begin_get ();
++}
++
++void CL_ModDownload_Cancel (void)
++{
++	if (mod.state == MOD_IDLE)
++		return;
++	mod_job_release ();
++	mod_stage_clear ();
++	{
++		char part[MAX_OSPATH];
++		mod_table_cache_path (part, sizeof (part), true);
++		remove (part);
++	}
++	// An explicit "no" is not a failed attempt: joining again should ask again.
++	if (mod.state == MOD_PROMPT || mod.state == MOD_FAILED)
++		mod_forget_tried (mod.target);
++	Con_Printf ("moddl: cancelled\n");
++	memset (&mod, 0, sizeof (mod));
++	mod.state = MOD_IDLE;
++}
++
++static void CL_ModDownload_Accept_f (void)
++{
++	if (mod.state != MOD_PROMPT)
++	{
++		Con_Printf ("moddl: nothing to accept\n");
++		return;
++	}
++	Con_Printf ("moddl: accepted\n");
++	CL_ModDownload_Accept ();
++}
++
++static void CL_ModDownload_Cancel_f (void)
++{
++	CL_ModDownload_Cancel ();
++	key_dest = key_menu;
++	m_state = m_main;
++	IN_Deactivate (true);
++}
++
++static void CL_ModDownload_Status_f (void)
++{
++	static const char *names[] = {"idle", "status", "probe", "table", "resolve", "prompt", "get", "hash", "install", "switch", "reconnect", "failed"};
++	Con_Printf (
++		"moddl status: state=%s title=%s gamedir=%s source=%d items=%d cur=%d total=%lld target=%s reason=%s\n", names[mod.state],
++		mod.title[0] ? mod.title : "-", mod.gamedir[0] ? mod.gamedir : "-", mod.source, mod.nitems, mod.cur, mod.plantotal,
++		mod.target[0] ? mod.target : "-", mod.reason[0] ? mod.reason : "-");
++}
++
++void CL_ModDownload_Init (void)
++{
++	Cvar_RegisterVariable (&cl_moddownload_tableurl);
++	Cmd_AddCommand ("moddl_accept", CL_ModDownload_Accept_f);
++	Cmd_AddCommand ("moddl_cancel", CL_ModDownload_Cancel_f);
++	Cmd_AddCommand ("moddl_status", CL_ModDownload_Status_f);
++}
++
++#endif // VKQ_IOS

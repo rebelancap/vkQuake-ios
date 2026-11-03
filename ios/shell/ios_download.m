@@ -53,6 +53,11 @@ typedef NS_ENUM (int, VKQDLState) {
 @property (nonatomic, strong) NSURLSessionTask *task;
 @property (nonatomic, strong) NSURLSession	   *session;
 @property (nonatomic) FILE					   *out;
+// overlay 0034: a hard byte ceiling for a GET (0 = none). Enforced against the
+// advertised Content-Length AND against the bytes actually received, because a
+// chunked response has no length to check up front and a hostile one can lie.
+@property (nonatomic) long long				   maxBytes;
+@property (nonatomic) BOOL					   overCap;
 @end
 
 @implementation VKQDLJob
@@ -123,7 +128,7 @@ static NSURLSessionConfiguration *vkq_dl_config (void)
 	cfg.timeoutIntervalForResource = 600.0;
 	cfg.waitsForConnectivity = NO;
 	cfg.HTTPShouldSetCookies = NO;
-	cfg.HTTPAdditionalHeaders = @{@"User-Agent" : @"vkQuake-iOS/1.1 (map downloader)"};
+	cfg.HTTPAdditionalHeaders = @{@"User-Agent" : @"vkQuake-iOS/1.2 (content downloader)"};
 	return cfg;
 }
 
@@ -144,8 +149,11 @@ static NSURLSessionConfiguration *vkq_dl_config (void)
 	// non-positive total as "unknown size" and draws bytes-so-far instead of a
 	// percentage, which is honest rather than a fabricated denominator.
 	self.total = response.expectedContentLength;
+	BOOL tooBig = self.maxBytes > 0 && response.expectedContentLength > self.maxBytes;
+	if (tooBig)
+		self.overCap = YES;
 	[vkq_dl_lock unlock];
-	completionHandler (NSURLSessionResponseAllow);
+	completionHandler (tooBig ? NSURLSessionResponseCancel : NSURLSessionResponseAllow);
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data
@@ -157,11 +165,22 @@ static NSURLSessionConfiguration *vkq_dl_config (void)
 				*stop = YES;
 		}];
 	self.got += (long long)data.length;
+	BOOL tooBig = self.maxBytes > 0 && self.got > self.maxBytes;
+	if (tooBig)
+		self.overCap = YES;
 	[vkq_dl_lock unlock];
+	if (tooBig)
+		[dataTask cancel];
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error
 {
+	if (self.overCap)
+	{
+		// overlay 0034: our own cancel, so say why instead of "cancelled".
+		vkq_dl_finish (self, VKQDL_FAILED, @"larger than the size limit");
+		return;
+	}
 	if (error)
 	{
 		vkq_dl_finish (self, VKQDL_FAILED, error.localizedDescription);
@@ -196,7 +215,13 @@ static NSURLSessionConfiguration *vkq_dl_config (void)
 }
 @end
 
+static int vkq_dl_start_http_max (const char *url, const char *destpath, BOOL headOnly, long long maxBytes);
 static int vkq_dl_start_http (const char *url, const char *destpath, BOOL headOnly)
+{
+	return vkq_dl_start_http_max (url, destpath, headOnly, 0);
+}
+
+static int vkq_dl_start_http_max (const char *url, const char *destpath, BOOL headOnly, long long maxBytes)
 {
 	@autoreleasepool
 	{
@@ -210,6 +235,7 @@ static int vkq_dl_start_http (const char *url, const char *destpath, BOOL headOn
 		j.state = VKQDL_RUNNING;
 		j.result = [NSMutableDictionary dictionary];
 		j.total = -1;
+		j.maxBytes = maxBytes;
 
 		if (destpath && *destpath)
 		{
@@ -238,6 +264,12 @@ static int vkq_dl_start_http (const char *url, const char *destpath, BOOL headOn
 
 int VKQ_DL_StartHead (const char *url) { return vkq_dl_start_http (url, NULL, YES); }
 int VKQ_DL_StartGet (const char *url, const char *destpath) { return vkq_dl_start_http (url, destpath, NO); }
+// overlay 0034: GET with a byte ceiling (the mod-content downloader's files are
+// chosen by a server or a remote table, so every one of them is capped).
+int VKQ_DL_StartGetMax (const char *url, const char *destpath, long long maxbytes)
+{
+	return vkq_dl_start_http_max (url, destpath, NO, maxbytes);
+}
 
 // ---------------------------------------------------------------------------
 // RESOLVE — find the archive package that contains <map>.bsp
@@ -543,4 +575,330 @@ const char *VKQ_DL_CachesPath (void)
 			buf[0] = 0;
 	}
 	return buf;
+}
+
+// ===========================================================================
+// overlay 0034 (MOD-DL) — services for Quake/cl_moddl.c, the missing MOD
+// CONTENT downloader. Same job contract as everything above: start, poll, read,
+// free; nothing here touches engine state.
+// ===========================================================================
+#include <netdb.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+// ---------------------------------------------------------------------------
+// STATUS — one connectionless `getstatus` to the game server we were just
+// dropped from, read back as key/value pairs.
+//
+// WHY THIS IS HOW THE SERVER'S DOWNLOAD URL IS READ. FTE advertises it as the
+// serverinfo key sv_dlURL (registered as an alias of DarkPlaces' cvar name
+// sv_curl_defaulturl, flagged CVAR_SERVERINFO; fteqw engine/common/fs.c). A
+// NetQuake client only sees serverinfo in-band through FTE's `fullserverinfo`
+// stufftext, and FTE sends that during PRESPAWN — after svc_serverinfo, which is
+// where the precache list is checked and the connection dies. So in-band it
+// always arrives one message too late. The status reply carries the same
+// serverinfo out of band, from the same address, before we ever rejoin.
+// ---------------------------------------------------------------------------
+static BOOL vkq_dl_split_target (NSString *target, int defport, NSString **host, int *port)
+{
+	NSString *t = [target stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+	if ([t hasPrefix:@"udp:"])
+		t = [t substringFromIndex:4];
+	if (!t.length)
+		return NO;
+	*port = defport;
+	if ([t hasPrefix:@"["]) // [v6]:port
+	{
+		NSRange close = [t rangeOfString:@"]"];
+		if (close.location == NSNotFound)
+			return NO;
+		*host = [t substringWithRange:NSMakeRange (1, close.location - 1)];
+		NSString *rest = [t substringFromIndex:close.location + 1];
+		if ([rest hasPrefix:@":"])
+			*port = [rest substringFromIndex:1].intValue;
+	}
+	else
+	{
+		NSRange c = [t rangeOfString:@":" options:NSBackwardsSearch];
+		NSRange first = [t rangeOfString:@":"];
+		if (c.location != NSNotFound && c.location == first.location) // exactly one colon: host:port
+		{
+			*host = [t substringToIndex:c.location];
+			*port = [t substringFromIndex:c.location + 1].intValue;
+		}
+		else
+			*host = t; // a name, a v4 literal, or a bare v6 literal
+	}
+	return (*host).length > 0 && *port > 0 && *port < 65536;
+}
+
+int VKQ_DL_StartStatus (const char *target, int defaultport)
+{
+	@autoreleasepool
+	{
+		if (!target || !*target)
+			return 0;
+		NSString *host = nil;
+		int		  port = 0;
+		if (!vkq_dl_split_target ([NSString stringWithUTF8String:target], defaultport, &host, &port))
+			return 0;
+
+		VKQDLJob *j = [VKQDLJob new];
+		j.state = VKQDL_RUNNING;
+		j.result = [NSMutableDictionary dictionary];
+		int handle = vkq_dl_add (j);
+
+		dispatch_async (dispatch_get_global_queue (QOS_CLASS_UTILITY, 0), ^{
+			@autoreleasepool
+			{
+				struct addrinfo hints, *res = NULL;
+				memset (&hints, 0, sizeof (hints));
+				hints.ai_family = AF_UNSPEC;
+				hints.ai_socktype = SOCK_DGRAM;
+				char portstr[16];
+				snprintf (portstr, sizeof (portstr), "%d", port);
+				if (getaddrinfo (host.UTF8String, portstr, &hints, &res) != 0 || !res)
+				{
+					vkq_dl_finish (j, VKQDL_FAILED, @"cannot resolve the server address");
+					return;
+				}
+				int s = socket (res->ai_family, res->ai_socktype, res->ai_protocol);
+				if (s < 0)
+				{
+					freeaddrinfo (res);
+					vkq_dl_finish (j, VKQDL_FAILED, @"no socket");
+					return;
+				}
+				static const char req[] = "\xff\xff\xff\xffgetstatus vkqmoddl";
+				char			  buf[8192];
+				ssize_t			  n = -1;
+				// Two tries, 1.5 s each: UDP to a server that just dropped us is
+				// normally instant, and a dead one must not hold the screen long.
+				for (int attempt = 0; attempt < 2 && n <= 0; attempt++)
+				{
+					sendto (s, req, sizeof (req) - 1, 0, res->ai_addr, res->ai_addrlen);
+					struct pollfd pfd = {s, POLLIN, 0};
+					double		  until = CFAbsoluteTimeGetCurrent () + 1.5;
+					while (CFAbsoluteTimeGetCurrent () < until)
+					{
+						int ms = (int)((until - CFAbsoluteTimeGetCurrent ()) * 1000.0);
+						if (poll (&pfd, 1, ms > 0 ? ms : 1) <= 0)
+							continue;
+						n = recv (s, buf, sizeof (buf) - 1, 0);
+						if (n > 4 && !memcmp (buf, "\xff\xff\xff\xff", 4) && n > 18 && !strncmp (buf + 4, "statusResponse", 14))
+							break;
+						n = -1; // something else (a stray reply): keep listening
+					}
+				}
+				close (s);
+				freeaddrinfo (res);
+				if (n <= 0)
+				{
+					vkq_dl_finish (j, VKQDL_FAILED, @"the server did not answer a status query");
+					return;
+				}
+				buf[n] = 0;
+				// "\xff\xff\xff\xffstatusResponse\n\\k\\v\\k\\v\n<players...>"
+				char *info = strchr (buf + 4, '\n');
+				if (!info)
+				{
+					vkq_dl_finish (j, VKQDL_FAILED, @"malformed status reply");
+					return;
+				}
+				info++;
+				char *end = strchr (info, '\n');
+				if (end)
+					*end = 0;
+				NSString *line = [[NSString alloc] initWithBytes:info length:strlen (info) encoding:NSISOLatin1StringEncoding];
+				NSArray	 *parts = [line componentsSeparatedByString:@"\\"];
+				[vkq_dl_lock lock];
+				// parts[0] is the empty string before the leading backslash.
+				for (NSUInteger i = 1; i + 1 < parts.count; i += 2)
+					if ([parts[i] length] && [parts[i] length] < 64)
+						j.result[[parts[i] lowercaseString]] = parts[i + 1];
+				[vkq_dl_lock unlock];
+				vkq_dl_finish (j, VKQDL_DONE, nil);
+			}
+		});
+		return handle;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MOD RESOLVE — pick the curated package (mods/mod-sources.json) that covers
+// every missing MODEL the server asked for.
+//
+// Coverage, not names, decides. A table entry is offered only if the package
+// provably contains every missing non-map model (its `files` list was taken
+// from the real archive when the entry was written). An entry whose `gamedirs`
+// names the server's game directory is preferred; with no usable gamedir (many
+// NetQuake servers never send one) a pure coverage match is accepted, because a
+// package that contains progs/plane1.mdl, progs/helo1.mdl and 60 other specific
+// files is not an accident. Missing sounds and maps never decide a match — a
+// missing sound does not stop a join, and maps have their own source (0028).
+//
+// Two copies of the table, tried in order: the one fetched from the repository
+// (so a dead link is fixed without a release) and the one in the app bundle.
+// A cached copy that does not parse, or has the wrong schema, is ignored rather
+// than trusted.
+// ---------------------------------------------------------------------------
+static NSArray *vkq_dl_load_modtable (NSString *path, NSString **why)
+{
+	if (!path.length)
+		return nil;
+	NSData *data = [NSData dataWithContentsOfFile:path];
+	if (!data)
+		return nil;
+	id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+	if (![root isKindOfClass:NSDictionary.class] || ![root[@"schema"] respondsToSelector:@selector (intValue)] || [root[@"schema"] intValue] != 1 ||
+		![root[@"mods"] isKindOfClass:NSArray.class])
+	{
+		if (why)
+			*why = @"table did not parse or has an unknown schema";
+		return nil;
+	}
+	return root[@"mods"];
+}
+
+int VKQ_DL_StartModResolve (const char *cachedpath, const char *bundledpath, const char *missing, const char *gamedir)
+{
+	@autoreleasepool
+	{
+		NSString *cached = cachedpath ? [NSString stringWithUTF8String:cachedpath] : @"";
+		NSString *bundled = bundledpath ? [NSString stringWithUTF8String:bundledpath] : @"";
+		NSString *miss = missing ? [NSString stringWithUTF8String:missing] : @"";
+		NSString *gd = gamedir ? [NSString stringWithUTF8String:gamedir].lowercaseString : @"";
+
+		VKQDLJob *j = [VKQDLJob new];
+		j.state = VKQDL_RUNNING;
+		j.result = [NSMutableDictionary dictionary];
+		int handle = vkq_dl_add (j);
+
+		dispatch_async (dispatch_get_global_queue (QOS_CLASS_UTILITY, 0), ^{
+			@autoreleasepool
+			{
+				NSString *why = nil, *which = @"downloaded";
+				NSArray	 *mods = vkq_dl_load_modtable (cached, &why);
+				if (!mods)
+				{
+					if (why)
+						NSLog (@"[vkquake] moddl: cached mod table ignored: %@", why);
+					mods = vkq_dl_load_modtable (bundled, &why);
+					which = @"bundled";
+				}
+				if (!mods)
+				{
+					vkq_dl_finish (j, VKQDL_FAILED, @"no usable mod table");
+					return;
+				}
+				NSMutableSet *need = [NSMutableSet set];
+				for (NSString *l in [miss componentsSeparatedByString:@"\n"])
+				{
+					NSString *p = l.lowercaseString;
+					if (!p.length || [p hasPrefix:@"sound/"] || [p hasPrefix:@"maps/"])
+						continue;
+					[need addObject:p];
+				}
+				if (!need.count)
+				{
+					vkq_dl_finish (j, VKQDL_FAILED, @"nothing to resolve");
+					return;
+				}
+				NSDictionary *best = nil;
+				int			  bestRank = 0; // 2 = gamedir + coverage, 1 = coverage only
+				for (id o in mods)
+				{
+					if (![o isKindOfClass:NSDictionary.class])
+						continue;
+					NSDictionary *m = o;
+					if (![m[@"files"] isKindOfClass:NSArray.class] || ![m[@"url"] isKindOfClass:NSString.class] ||
+						![m[@"gamedir"] isKindOfClass:NSString.class])
+						continue;
+					NSMutableSet *have = [NSMutableSet set];
+					for (id f in m[@"files"])
+						if ([f isKindOfClass:NSString.class])
+							[have addObject:[f lowercaseString]];
+					if (![need isSubsetOfSet:have])
+						continue;
+					int rank = 1;
+					if (gd.length && [m[@"gamedirs"] isKindOfClass:NSArray.class])
+						for (id g in m[@"gamedirs"])
+							if ([g isKindOfClass:NSString.class] && [[g lowercaseString] isEqualToString:gd])
+								rank = 2;
+					if (rank > bestRank)
+					{
+						best = m;
+						bestRank = rank;
+					}
+				}
+				if (!best)
+				{
+					vkq_dl_finish (j, VKQDL_FAILED, [NSString stringWithFormat:@"no package in the %@ mod table has all %lu missing models", which, (unsigned long)need.count]);
+					return;
+				}
+				// install rules flattened to "from>as;from>as" (from may be empty:
+				// the download itself is the file). Anything malformed is dropped
+				// here and the engine validates every path again before using it.
+				NSMutableArray *rules = [NSMutableArray array];
+				if ([best[@"install"] isKindOfClass:NSArray.class])
+					for (id r in best[@"install"])
+					{
+						if (![r isKindOfClass:NSDictionary.class])
+							continue;
+						NSString *from = [r[@"from"] isKindOfClass:NSString.class] ? r[@"from"] : @"";
+						NSString *as = [r[@"as"] isKindOfClass:NSString.class] ? r[@"as"] : @"";
+						if (!as.length || [from containsString:@">"] || [from containsString:@";"] || [as containsString:@">"] || [as containsString:@";"])
+							continue;
+						[rules addObject:[NSString stringWithFormat:@"%@>%@", from, as]];
+					}
+				id		  bytes = best[@"bytes"];
+				NSString *name = [best[@"name"] isKindOfClass:NSString.class] ? best[@"name"] : best[@"gamedir"];
+				[vkq_dl_lock lock];
+				j.result[@"name"] = name;
+				j.result[@"gamedir"] = best[@"gamedir"];
+				j.result[@"url"] = best[@"url"];
+				j.result[@"sha256"] = [best[@"sha256"] isKindOfClass:NSString.class] ? best[@"sha256"] : @"";
+				j.result[@"type"] = [best[@"type"] isKindOfClass:NSString.class] ? best[@"type"] : @"zip";
+				j.result[@"bytes"] = [bytes respondsToSelector:@selector (stringValue)] ? [bytes stringValue] : @"0";
+				j.result[@"install"] = [rules componentsJoinedByString:@";"];
+				j.result[@"table"] = which;
+				j.result[@"rank"] = bestRank == 2 ? @"gamedir" : @"files";
+				[vkq_dl_lock unlock];
+				vkq_dl_finish (j, VKQDL_DONE, nil);
+			}
+		});
+		return handle;
+	}
+}
+
+// The table that ships in the app (Resources/mod-sources.json).
+const char *VKQ_DL_BundledModTablePath (void)
+{
+	static char buf[1024];
+	@autoreleasepool
+	{
+		NSString *p = [NSBundle.mainBundle pathForResource:@"mod-sources" ofType:@"json"];
+		snprintf (buf, sizeof (buf), "%s", p ? p.fileSystemRepresentation : "");
+	}
+	return buf;
+}
+
+// Remove the mod downloader's staging tree. Refuses anything that is not a
+// directory literally named ".moddl" — this is a recursive delete, and the only
+// tree it is ever allowed to delete is the one cl_moddl.c created.
+void VKQ_DL_RemoveStaging (const char *path)
+{
+	@autoreleasepool
+	{
+		if (!path || !*path)
+			return;
+		NSString *p = [NSString stringWithUTF8String:path];
+		if (![p.lastPathComponent isEqualToString:@".moddl"])
+		{
+			NSLog (@"[vkquake] moddl: refusing to remove %@", p);
+			return;
+		}
+		[NSFileManager.defaultManager removeItemAtPath:p error:NULL];
+	}
 }

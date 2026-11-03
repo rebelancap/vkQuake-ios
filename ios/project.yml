@@ -33,6 +33,10 @@ targets:
       # CFBundleIconName. (icon/generated remains the PNG master.)
       - path: Assets.xcassets
         buildPhase: resources
+      # overlay 0034: the curated mod-content table, bundled as the offline
+      # fallback for the copy the app fetches from the repository.
+      - path: ../mods/mod-sources.json
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rebelancap.vkquake
@@ -100,6 +104,8 @@ targets:
       - shell
       - shell-visionos
       - path: Assets-visionos.xcassets
+        buildPhase: resources
+      - path: ../mods/mod-sources.json
         buildPhase: resources
     settings:
       base:
