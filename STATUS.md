@@ -79,5 +79,6 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-None. Simulators shut down (iPhone Air lane 2, iPad Air 13" M4); no agents running;
-tree clean; `issue-6-7-followup` pushed (1.2.1.1); `main` = `origin/main` = v1.2.1.
+Opus agent in flight (started 2026-11-03 pm): mod-content download round on new branch
+`mod-download` (from issue-6-7-followup); owns the tree and the iPhone Air sim (lane 2).
+`issue-6-7-followup` pushed (1.2.1.1); `main` = `origin/main` = v1.2.1.
