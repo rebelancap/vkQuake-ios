@@ -8,20 +8,28 @@ the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/) and the SideStore so
 Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` holds the
 unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
 
-## Last round (2026-11-02) — issue #6: hardware mouse + keyboard → release 1.2.1
-- Cause: SDL3's iOS GCMouse backend needs `UIApplicationSupportsIndirectInputEvents`
-  in Info.plist (we had none), and overlay 0004 forced `no_mouse` on iOS. Fix: plist
-  key; new overlay 0032 (desktop mouse path on iOS, pointer lock in game, free pointer
-  + `M_MouseHover` in menus, macOS warp compiled out); shell: mouse+hw keyboard hides
-  the touch overlay, mouse disables gyro, indirect-pointer touches filtered out of
-  the overlay, hw-keyboard Enter/Backspace/backquote de-duplicated in VKQKeyInput.
-- `build/` had been purged: oracle, ios-deps, visionos-deps, sim deps all rebuilt.
-  All builds green. Sim round lane 2 (iPhone Air 45A5059C…, iOS 27.0): sim-verify
-  ios + issue5b console round PASS (artifacts/sim/2026-11-02-ios-*.png, issue5b/).
-  The simulator cannot present a GCMouse, so the mouse path itself is unverified on
-  hardware; the reporter (robimart) is the first real test — replied on the issue.
-- Published OTA (notes on hub), GitHub release v1.2.1 with both IPAs (version
-  asserted from the served IPA plists), dispatch chain kicked by the release.
+## Last round (2026-11-03) — issue #6 follow-up + issue #7, branch `issue-6-7-followup` (pushed, NOT merged)
+- robimart on 1.2.1: bindings + touch-hiding work, but the pointer stays visible and
+  motion stops at the screen edge (= iPadOS did not grant pointer lock); aim feels
+  accelerated. New issue #7: on an external 4K display the game is drawn rotated 90°.
+- Pointer lock is granted only to a FULL-SCREEN foregroundActive scene (Apple doc);
+  an external display forces Stage Manager / windowing, so their scene was not
+  eligible. Proven on the iPad Air 13" (M4) sim, iOS 27.0: `vkq_mouse` shows
+  pointerlock=LOCKED in game, unlocked with the console open — our plumbing works.
+- Branch adds: `vkq_mouse` console diagnostic (engine + UIKit state), lock-state
+  logging, re-request of the lock on scene activation / while missing in game, a
+  one-time console notice telling the player iPadOS needs full screen; and for #7 an
+  `application:supportedInterfaceOrientationsForWindow:` on SDL's delegate (any
+  orientation when the scene is not on the main screen). All builds green (visionOS
+  needed a stub). sim-verify ios (iPhone Air) PASS; iPad sim e1m1 + console OK.
+- NOT verified: the external-display fix (sim's external display not drivable from
+  this session) and the lock on the reporter's hardware. Replied on #6 and #7 with
+  the diagnosis and questions.
+- Oddity, pre-existing (A/B with the hook disabled is identical): on the iPad Air 13"
+  sim the engine draws an almost square ~2048x2036 px frame at the top of a portrait
+  buffer while UIKit reports a 1366x1024 pt landscape window and SDL metal view
+  (artifacts/sim/2026-11-03-ipad-*.png). Unknown whether a sim artifact; the reporter
+  has not complained about the iPad's own screen.
 
 ## Next steps
 1. Perf on device: SSAO now defaults on for GPUs with subgroup ops, and fresh installs
@@ -29,14 +37,21 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    r_ssao 0 / vid_fsaa 0 on iOS.
 2. Device checks the sim can't do: real controller gyro/rumble, headset VR (rebuilt
    present path, depth copy), surface-loss recovery on backgrounding.
-3. Issue #6 follow-up: wait for robimart's hardware report (mouse sensitivity, pointer
-   lock, bindings); external-display rotation is a separate open item (asked for a
-   new issue). Issue #4/#5 replies; `~` in menu text fields; add a shutdown trap to
+3. Issue #6/#7: when Austin OKs a release, bump to 1.2.2 on `issue-6-7-followup`,
+   merge, release (RELEASING.md loop), ask robimart for `vkq_mouse` output and the
+   external-display result. If the orientation hook does not fix #7, next candidates:
+   log the scene's interfaceOrientation/screen on `windowScene:didUpdateEffectiveGeometry:`
+   and SDL's UIKit_ComputeViewFrame on the external screen.
+4. Investigate the iPad-sim square frame (see Last round): compare vid.width/height
+   and the CAMetalLayer drawableSize on the iPad Air 13" sim vs the iPhone Air. Issue #4/#5 replies; `~` in menu text fields; add a shutdown trap to
    `scripts/sim-verify.sh`; drop SDL patch 0003 when upstream SDL moves off
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
+- Release the `issue-6-7-followup` branch as 1.2.2? Default if unanswered: wait (release
+  numbers are Austin's call); the reporter cannot reach the OTA hub.
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-None. No simulators booted by this session; no agents running; `main` = `origin/main`.
+None. Simulators shut down (iPhone Air lane 2, iPad Air 13" M4); no agents running;
+`main` = `origin/main` = v1.2.1; `issue-6-7-followup` pushed, one commit ahead.
