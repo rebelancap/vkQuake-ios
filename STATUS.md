@@ -48,9 +48,12 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 3. Wait for robimart's test of 1.2.1.2 (#7 external display, #8 servers incl. TF and
    pieter). If #7 is still rotated, read the `vkq_mouse` paste (expect external scene
    orient=portrait, bounds 3008x1692, drawable 6016x3384, supported=0x2).
-3a. DECISION FOR AUSTIN: DarkPlaces protocol 7 client support (13 of 28 listed DP
-   servers answer; the reporter's first picks were all DP). Large engine feature;
-   default: not planned, DP servers stay marked `*` and refuse cleanly.
+3a. DarkPlaces protocol 7 support — APPROVED by Austin 2026-11-03 ("if it doesn't
+   harm anything else"). Phase 0 in flight: Opus planning agent writes
+   docs/DP7-PLAN.md on branch `dp7-plan` (survey of live DP servers incl. CSQC use,
+   protocol scope from the DP source, fit into vkQuake, phased plan + estimate,
+   go/no-go). Next: brief Phase A (join/see/move/shoot on an id1 DP server) as overlay
+   patch 0035 on a `dp7` branch, keeping 15/666/999 paths byte-identical.
 3c. Later candidates: NetQuake.io in-protocol download (`cl_serverextension_download`);
    #7 split-scene idea (input scene on iPad + render scene on external display, how
    Jump Desktop does it) if pointer lock on external displays matters; 0026's
@@ -66,14 +69,12 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- Austin: upload build/ota/vkQuake-1.2.1.2-iOS.ipa to issue #8 with build/reply-8-1.2.1.2.md
-  (gh has no attachment API). Default if not done: the reporter stays on 1.2.1.1.
+- (done) Austin attached the 1.2.1.2 IPA on #8; awaiting the reporter's results.
 - Release `issue-7-external-display` as 1.2.2 after the reporter confirms? Default: wait
   (release numbers are Austin's call). Close #6 (confirmed fixed; classifier blocks me).
-- DarkPlaces protocol 7 support? Default: no (see Next step 3a).
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-None. Simulators shut down; no agents running; tree clean. Branches pushed:
-issue-6-7-followup (1.2.1.1), mod-download, issue-7-external-display (1.2.1.2, RC).
-`main` = `origin/main` = v1.2.1.
+Opus planning agent in flight: docs/DP7-PLAN.md on branch `dp7-plan` (read-only
+otherwise, oracle only, no sims). Branches pushed: issue-6-7-followup (1.2.1.1),
+mod-download, issue-7-external-display (1.2.1.2, RC). `main` = `origin/main` = v1.2.1.
