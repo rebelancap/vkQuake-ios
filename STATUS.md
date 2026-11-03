@@ -55,9 +55,20 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    (cl_moddl.c ~:930 / COM_UnzipToDir, common.c ~:4404) against cl_mapdownload_maxpkg
    × a small factor before extracting. Regenerate 0034, rebuild, re-run
    sim-verify-moddl.sh. Then 1.2.1.2 test build (OTA_PUBLIC_GATE=1) for the reporter.
-3e. #7: Opus agent in flight on branch `issue-7-external-display` (from mod-download):
-   make SDL's view match the external scene's window; prove with an in-app drawable
-   dump on the iPad sim's headless external display.
+3e. #7 DONE on branch `issue-7-external-display` (61aa1da, from mod-download):
+   root cause = both orientation sources answered landscape-only so UIKit rotated the
+   external scene 90° (external scenes count orientation from the panel's NATIVE
+   orientation; "landscape" = rotated, portrait-shaped bounds). The 1.2.1.1 hook
+   never ran: SDL's real app delegate on iOS 13+ is `SDLUIKitSceneShim`, not
+   `SDLUIKitDelegate`. Fix: SDL patch 0003 `UIKit_IsExternalDisplayScene()` →
+   supported orientations = Portrait (native) off the main screen; shell hook now on
+   the scene shim too; re-asks supported orientations on screen/scene changes.
+   Proven only under emulation (`VKQ_EMULATE_EXTERNAL_DISPLAY=1` hint; the sim cannot
+   extend a display — its TVOut screen is mirror-only): scripts/sim-verify-issue7.sh.
+   Expected on the reporter's hardware: `vkq_mouse` shows external scene
+   orient=portrait, bounds 3008x1692, drawable=6016x3384, supported=0x2.
+   Side finding: the iPad-sim "square frame" oddity is a headless-sim artifact
+   (panel never rotates; landscape scene drawn unrotated into a portrait buffer).
 3b. Release: when Austin OKs, set both plists to 1.2.2 (build 45) on `issue-6-7-followup`,
    merge, release (RELEASING.md loop), ask robimart for `vkq_mouse` output and the
    external-display result. If the orientation hook does not fix #7, next candidates:
@@ -76,7 +87,7 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-Opus agent in flight: #7 external-display fix on branch `issue-7-external-display`,
-owns the tree + iPhone Air (lane 2) + iPad Air 13" sims. Apple Vision Pro sim is booted
-by ANOTHER session (not ours). Branches pushed: issue-6-7-followup (1.2.1.1),
-mod-download. `main` = `origin/main` = v1.2.1.
+Opus agent in flight: mod-download review fixes (Next step 3d) on branch
+`issue-7-external-display`; owns the tree + iPhone Air (lane 2). Apple Vision Pro sim
+is booted by ANOTHER session. Branches pushed: issue-6-7-followup (1.2.1.1),
+mod-download, issue-7-external-display. `main` = `origin/main` = v1.2.1.
