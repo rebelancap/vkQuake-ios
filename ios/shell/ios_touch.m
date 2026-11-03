@@ -149,6 +149,127 @@ static NSSet<UITouch *> *vkq_direct_touches (NSSet<UITouch *> *touches)
 	return touches;
 }
 
+#ifndef VKQ_VISIONOS
+#import <objc/runtime.h>
+extern void		 Con_Printf (const char *fmt, ...);
+static UIWindow *vkq_key_window (void); // defined with the keyboard code below
+
+// --- pointer lock (issue #6 follow-up) -------------------------------------
+// In game the engine asks SDL for relative mouse mode; SDL's view controller
+// answers prefersPointerLocked=YES and iPadOS then decides. It grants the lock
+// only to a full-screen, foreground-active scene (no Split View / Slide Over /
+// Stage Manager window): UIWindowScene.pointerLockState is nil when the scene is
+// not eligible at all, non-nil + unlocked while a request is pending or refused.
+// Without the lock a mouse still turns the view but the pointer stays visible
+// and the deltas stop at the screen edge — the 1.2.1 report. Nothing here can
+// force the lock; this re-asks when it is missing (the first ask can land before
+// the scene is active) and tells the player once what iPadOS wants.
+static UIPointerLockState *vkq_lock_state (void) API_AVAILABLE(ios(14.0))
+{
+	return vkq_key_window ().windowScene.pointerLockState;
+}
+static void vkq_pointer_lock_tick (BOOL mouse, BOOL inGame)
+{
+	static int	 frames;
+	static BOOL	 told;
+	static int	 unlockedTicks;
+	if (@available(iOS 14.0, *))
+	{
+		if (!mouse || !inGame)
+		{
+			unlockedTicks = 0;
+			return;
+		}
+		if (++frames % 60) // ~once a second
+			return;
+		UIPointerLockState *st = vkq_lock_state ();
+		if (st.locked)
+		{
+			unlockedTicks = 0;
+			return;
+		}
+		[vkq_key_window ().rootViewController setNeedsUpdateOfPrefersPointerLocked];
+		if (++unlockedTicks >= 3 && !told)
+		{
+			told = YES;
+			NSLog (@"[vkquake] pointer lock not granted (state=%@) — telling the player", st ? @"unlocked" : @"unavailable");
+			Con_Printf ("vkQuake: iPadOS did not lock the mouse pointer.\n");
+			Con_Printf ("Mouse look needs the app FULL SCREEN: no Stage Manager window, Split View or Slide Over.\n");
+			Con_Printf ("Type vkq_mouse in the console for details.\n");
+		}
+	}
+}
+
+// Everything the mouse path depends on, UIKit side (the engine prints its half
+// first — see IN_MouseDiag_f). Goes to the console so a player can paste it.
+void VKQ_iOS_MouseDiag (void)
+{
+	dispatch_async (dispatch_get_main_queue (), ^{
+		UIWindow	  *win = vkq_key_window ();
+		UIWindowScene *ws = win.windowScene;
+		NSUInteger	   mice = 0;
+		BOOL		   kb = NO;
+		NSString	  *lock = @"n/a";
+		if (@available(iOS 14.0, *))
+		{
+			mice = GCMouse.mice.count;
+			kb = GCKeyboard.coalescedKeyboard != nil;
+			UIPointerLockState *st = ws.pointerLockState;
+			lock = st ? (st.locked ? @"LOCKED" : @"unlocked") : @"unavailable (scene not eligible)";
+		}
+		UIViewController *vc = win.rootViewController;
+		BOOL prefers = NO;
+		if (@available(iOS 14.0, *))
+			prefers = vc.prefersPointerLocked;
+		CGRect sb = ws.screen.bounds, wb = win.bounds;
+		Con_Printf ("vkq_mouse (iOS %s, %s): mice=%lu hwkeyboard=%d pointerlock=%s prefersPointerLocked=%d\n", UIDevice.currentDevice.systemVersion.UTF8String,
+					UIDevice.currentDevice.model.UTF8String, (unsigned long)mice, kb ? 1 : 0, lock.UTF8String, prefers ? 1 : 0);
+		Con_Printf ("  scene: state=%ld orient=%ld mainScreen=%d screen=%dx%d window=%dx%d key=%d rootVC=%s screens=%lu\n", (long)ws.activationState,
+					(long)ws.interfaceOrientation, ws.screen == UIScreen.mainScreen ? 1 : 0, (int)sb.size.width, (int)sb.size.height, (int)wb.size.width,
+					(int)wb.size.height, win.isKeyWindow ? 1 : 0, NSStringFromClass (vc.class).UTF8String,
+					(unsigned long)UIApplication.sharedApplication.connectedScenes.count);
+		NSLog (@"[vkquake] vkq_mouse: mice=%lu kb=%d lock=%@ prefers=%d state=%ld orient=%ld main=%d screen=%@ window=%@ key=%d vc=%@", (unsigned long)mice, kb, lock, prefers,
+			   (long)ws.activationState, (long)ws.interfaceOrientation, ws.screen == UIScreen.mainScreen, NSStringFromCGRect (sb), NSStringFromCGRect (wb), win.isKeyWindow,
+			   vc.class);
+	});
+}
+
+// --- external display (issue #7) --------------------------------------------
+// Info.plist allows landscape only, which is right for the iPad's own panel but
+// not for a scene on an external display: that screen never rotates and UIKit
+// reports it portrait, so a landscape-only app is drawn turned 90 degrees (the
+// report, and Moonlight's #515). SDL asks the app delegate first
+// (UIKit_GetSupportedOrientations), so answer for it: any orientation on a
+// screen other than the main one, landscape as before on the iPad itself.
+// SDL's delegate class has no such method of its own; it is added at load.
+static NSUInteger vkq_orientations_for_window (id self, SEL _cmd, UIApplication *app, UIWindow *window)
+{
+	UIWindowScene *ws = window.windowScene;
+	if (ws && ws.screen && ws.screen != UIScreen.mainScreen)
+		return UIInterfaceOrientationMaskAll;
+	return UIInterfaceOrientationMaskLandscape;
+}
+@interface VKQDelegateHooks : NSObject
+@end
+@implementation VKQDelegateHooks
++ (void)load
+{
+	Class c = NSClassFromString (@"SDLUIKitDelegate");
+	SEL	  sel = @selector (application:supportedInterfaceOrientationsForWindow:);
+	if (!c || class_getInstanceMethod (c, sel))
+		return; // no SDL delegate, or it grew its own answer — leave it
+	class_addMethod (c, sel, (IMP)vkq_orientations_for_window, "Q@:@@");
+}
+@end
+#else
+// visionOS: no UIScreen / pointer lock; the engine's vkq_mouse command still links.
+void VKQ_iOS_MouseDiag (void)
+{
+	extern void Con_Printf (const char *fmt, ...);
+	Con_Printf ("vkq_mouse: not applicable on visionOS\n");
+}
+#endif // !VKQ_VISIONOS
+
 @interface VKQTouchView : UIView
 - (void)applyAppearance:(CGFloat)scale opacity:(CGFloat)op;
 - (void)reloadButtonPositions;
@@ -1544,9 +1665,22 @@ static void vkq_build_ui (void)
 			if (g_link) g_link.paused = YES;
 			NSLog (@"[vkquake] scene deactivated — rendering paused");
 		}];
+#ifndef VKQ_VISIONOS
+	if (@available(iOS 14.0, *))
+		[NSNotificationCenter.defaultCenter addObserverForName:UIPointerLockStateDidChangeNotification
+			object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+				UIWindowScene *ws = n.userInfo[UIPointerLockStateSceneUserInfoKey];
+				NSLog (@"[vkquake] pointer lock state changed: %@", ws.pointerLockState ? (ws.pointerLockState.locked ? @"locked" : @"unlocked") : @"unavailable");
+			}];
+#endif
 	[NSNotificationCenter.defaultCenter addObserverForName:UISceneDidActivateNotification
 		object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
 			if (g_link) g_link.paused = NO;
+#ifndef VKQ_VISIONOS
+			// a pointer-lock request made before the scene was active is re-evaluated now
+			if (@available(iOS 14.0, *))
+				[vkq_key_window ().rootViewController setNeedsUpdateOfPrefersPointerLocked];
+#endif
 #ifdef VKQ_VISIONOS
 			// Fallback only: the primary exit path is VKQ_Exit3DFinalize after
 			// dismissImmersiveSpace completes (with mixed immersion the window
@@ -1612,6 +1746,9 @@ void VKQ_iOS_FramePoll (void)
 	// The layout editor has to keep the overlay up regardless of game state — you
 	// reach it from the settings sheet, which is usually open over a menu.
 	BOOL showGame = (inGame && !controller && !deskInput) || [g_touch isEditingLayout];
+#ifndef VKQ_VISIONOS
+	vkq_pointer_lock_tick (mouse, inGame && keydest == 0);
+#endif
 	if (g_touch.hidden != !showGame)
 	{
 		g_touch.hidden = !showGame;
