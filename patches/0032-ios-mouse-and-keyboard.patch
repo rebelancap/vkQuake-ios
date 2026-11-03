@@ -1,0 +1,84 @@
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -253,7 +253,7 @@
+ 	if (no_mouse)
+ 		return;
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) && !defined(VKQ_IOS) // UIKit has no mouse warp; the quakespasm#48 quirk is macOS-only
+ 	{
+ 		// Work around https://github.com/sezero/quakespasm/issues/48
+ 		int width, height;
+@@ -392,11 +392,15 @@
+ #endif
+ 
+ #ifdef VKQ_IOS
+-	// iOS has no mouse; relative-mouse-mode calls fail and spam the console every
+-	// activate. Force no_mouse so IN_Activate/IN_HideCursor early-return. Aim is
+-	// touch / gyro / gamepad.
+-	no_mouse = true;
+-	IN_BeginIgnoringMouseEvents ();
++	// Issue #6: hardware mice (iPad + Bluetooth/USB mouse, Magic Keyboard
++	// trackpad) ARE supported — SDL3 reads them through GCMouse once the app's
++	// Info.plist carries UIApplicationSupportsIndirectInputEvents, and
++	// SDL_SetWindowRelativeMouseMode maps onto UIKit pointer lock (so it no longer
++	// fails / spams the console). So the mouse path stays ENABLED here, exactly as
++	// on desktop: relative deltas in game (IN_MouseMotion), unlocked pointer in
++	// menus / console (IN_DeactivateForMenu via ui_mouse). Touch, gyro and gamepad
++	// still work with no mouse attached: SDL only adds a mouse device when one is
++	// physically connected.
+ 	// The menu is driven straight from finger events (in_sdl3.c) — SDL's touch->mouse
+ 	// synthesis freezes at the first tap's position on this hardware, so every menu
+ 	// tap stuck on the first item. Turn the synthesis OFF so its stale-position mouse
+--- a/Quake/in_sdl3.c
++++ b/Quake/in_sdl3.c
+@@ -375,7 +375,23 @@
+ 			int x, y;
+ 			IN_ScaleMouseCoords (event->motion.x, event->motion.y, &x, &y);
+ 			Con_Mousemove (x, y);
++		}
++#ifdef VKQ_IOS
++		// Issue #6: a hardware mouse in the menus. With the pointer unlocked
++		// (IN_DeactivateForMenu) SDL delivers the iPad pointer's ABSOLUTE position
++		// here, and this filter is the only place that sees it. Feed it into the
++		// same cursor the finger path drives (menu.c M_MouseHover -> M_UpdateMouse),
++		// so hover highlights rows and a click (K_MOUSE1 from
++		// the button event, which the filter passes through) lands on the row
++		// under the pointer. Relative motion in game never reaches this filter.
++		else if (key_dest == key_menu)
++		{
++			extern void M_MouseHover (float px, float py);
++			int			x, y;
++			IN_ScaleMouseCoords (event->motion.x, event->motion.y, &x, &y);
++			M_MouseHover ((float)x, (float)y);
+ 		}
++#endif
+ 		return false;
+ 	}
+ 
+--- a/Quake/menu.c
++++ b/Quake/menu.c
+@@ -5776,6 +5776,23 @@
+ 	}
+ }
+ 
++/*
++================
++M_MouseHover -- a hardware mouse's ABSOLUTE pointer position, in DRAWABLE PIXELS
++(issue #6). Called from the in_sdl3.c event filter while a menu is up and the
++pointer is unlocked. Moves the same cursor a finger does, so the row under the
++pointer highlights and a real click (K_MOUSE1 straight from SDL) lands on it. A
++finger mid-gesture keeps ownership of the cursor.
++================
++*/
++void M_MouseHover (float px, float py)
++{
++	if (vkq_touch_down)
++		return;
++	vkq_menu_touch_x = px;
++	vkq_menu_touch_y = py;
++}
++
+ // --- console seams -------------------------------------------------------
+ // Injected UIKit touches do not reach the touch path on a simulator, so these
+ // drive M_TouchEvent — the same function real finger events call — and are how

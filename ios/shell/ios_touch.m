@@ -111,6 +111,44 @@ static float look_accel (float d)
 static NSString *vkq_btn_key (NSString *ident, const char *axis) { return [NSString stringWithFormat:@"btn.%@.%s", ident, axis]; }
 
 // ---------------------------------------------------------------------------
+// --- hardware mouse / keyboard presence (issue #6) ---------------------------
+// GameController reports every connected pointing device (Bluetooth/USB mouse,
+// Magic Keyboard trackpad) as a GCMouse and every hardware keyboard as the
+// coalesced GCKeyboard. SDL3 reads both through the same framework, so these
+// are exactly the devices the engine is receiving input from.
+static BOOL vkq_mouse_present (void)
+{
+	if (@available(iOS 14.0, *))
+		return GCMouse.mice.count > 0;
+	return NO;
+}
+static BOOL vkq_hw_keyboard_present (void)
+{
+	if (@available(iOS 14.0, *))
+		return GCKeyboard.coalescedKeyboard != nil;
+	return NO;
+}
+// Touches that come from a finger (or pencil) — never from a mouse / trackpad.
+// A hardware pointer's clicks reach the engine through SDL's GCMouse path with
+// their own bindings; letting them also land on the touch overlay would make a
+// left click plant the virtual stick or start a drag-look.
+static NSSet<UITouch *> *vkq_direct_touches (NSSet<UITouch *> *touches)
+{
+	if (@available(iOS 13.4, *))
+	{
+		BOOL any = NO;
+		for (UITouch *t in touches)
+			if (t.type == UITouchTypeIndirectPointer)
+			{
+				any = YES;
+				break;
+			}
+		if (any)
+			return [touches objectsPassingTest:^BOOL (UITouch *t, BOOL *stop) { return t.type != UITouchTypeIndirectPointer; }];
+	}
+	return touches;
+}
+
 @interface VKQTouchView : UIView
 - (void)applyAppearance:(CGFloat)scale opacity:(CGFloat)op;
 - (void)reloadButtonPositions;
@@ -517,6 +555,9 @@ static NSString *vkq_btn_key (NSString *ident, const char *axis) { return [NSStr
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
+	touches = vkq_direct_touches (touches);
+	if (!touches.count)
+		return;
 	if (_editing)
 	{
 		[self editDragBegin:[touches.anyObject locationInView:self]];
@@ -573,6 +614,9 @@ static NSString *vkq_btn_key (NSString *ident, const char *axis) { return [NSStr
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
+	touches = vkq_direct_touches (touches);
+	if (!touches.count)
+		return;
 	if (_editing)
 	{
 		[self editDragMove:[touches.anyObject locationInView:self]];
@@ -656,8 +700,8 @@ static NSString *vkq_btn_key (NSString *ident, const char *axis) { return [NSStr
 			}
 	}
 }
-- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self endTouches:touches]; }
-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self endTouches:touches]; }
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self endTouches:vkq_direct_touches (touches)]; }
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self endTouches:vkq_direct_touches (touches)]; }
 
 - (void)applyAppearance:(CGFloat)scale opacity:(CGFloat)op
 {
@@ -745,9 +789,18 @@ static void vkq_toggle_console (const char *why)
 - (UIKeyboardAppearance)keyboardAppearance { return UIKeyboardAppearanceDark; }
 - (void)insertText:(NSString *)text
 {
+	// Issue #6: a HARDWARE keyboard reaches the engine twice — through SDL's
+	// GCKeyboard path (key events: Enter, Backspace, backquote, arrows, WASD...)
+	// and through this responder (the typed text). Keep the text, which SDL does
+	// not produce on iOS, and leave the keys SDL already delivers to SDL — a
+	// double Enter would run the console line and then an empty one, a double
+	// backquote would open and immediately close the console.
+	BOOL hw = vkq_hw_keyboard_present ();
 	for (NSUInteger i = 0; i < text.length; i++)
 	{
 		unichar c = [text characterAtIndex:i];
+		if (hw && (c == '`' || c == '~' || c == '\n' || c == '\r'))
+			continue;
 		if (c == '`' || c == '~')
 		{
 			// Issue #5: the console key, as on a desktop keyboard. Typed into
@@ -768,6 +821,8 @@ static void vkq_toggle_console (const char *why)
 }
 - (void)deleteBackward
 {
+	if (vkq_hw_keyboard_present ())
+		return; // SDL already delivered K_BACKSPACE for this press (see insertText:)
 	VKQ_TouchKey (VKQ_K_BACKSPACE, 1);
 	VKQ_TouchKey (VKQ_K_BACKSPACE, 0);
 }
@@ -1545,12 +1600,18 @@ void VKQ_iOS_FramePoll (void)
 	// hide touch only when the ENGINE has an open gamepad — not merely when GCController
 	// sees one — so a controller the engine can't use doesn't leave the app uncontrollable
 	BOOL controller = VKQ_HasActiveController () != 0;
+	// Issue #6: a mouse AND a hardware keyboard together are a desktop setup —
+	// the touch controls get out of the way exactly as they do for a gamepad.
+	// A mouse alone keeps the overlay (the stick still moves you; the mouse looks
+	// and fires through its own bindings, its clicks never reach the overlay).
+	BOOL mouse = vkq_mouse_present ();
+	BOOL deskInput = mouse && vkq_hw_keyboard_present ();
 	int	 keydest = VKQ_TouchKeyDest ();
 	BOOL inGame = VKQ_TouchInGame () != 0; // a real level — not demo, menu or disconnected
 	BOOL isDemo = VKQ_TouchIsDemo () != 0;
 	// The layout editor has to keep the overlay up regardless of game state — you
 	// reach it from the settings sheet, which is usually open over a menu.
-	BOOL showGame = (inGame && !controller) || [g_touch isEditingLayout];
+	BOOL showGame = (inGame && !controller && !deskInput) || [g_touch isEditingLayout];
 	if (g_touch.hidden != !showGame)
 	{
 		g_touch.hidden = !showGame;
@@ -1651,7 +1712,7 @@ void VKQ_iOS_FramePoll (void)
 	// gyro aim (device rotation -> look) while playing, no controller
 	static CMMotionManager *motion;
 	float					gyro = vkq_setting_f ("gyro", 0.0f);
-	if (gyro > 0 && inGame && !controller)
+	if (gyro > 0 && inGame && !controller && !mouse) // a mouse owns the look
 	{
 		if (!motion)
 		{
