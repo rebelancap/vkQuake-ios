@@ -1,0 +1,87 @@
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -310,6 +310,15 @@
+ VID_GetCurrentWidth
+ ======================
+ */
++#ifdef VKQ_IOS
++// vkquake-ios overlay 0039: on an external display the shell may lower the
++// CAMetalLayer's contentsScale (iPadOS hands the app a 2x virtual canvas, e.g.
++// 6016x3384 on a 4K monitor). MoltenVK's currentExtent is the layer's natural
++// drawable size (bounds x contentsScale), and GL_CreateSwapChain refuses any
++// other extent — so the size the engine believes in must come from the layer,
++// not from SDL's bounds x screen.nativeScale.
++extern int VKQ_iOS_DrawableSize (int *w, int *h);
++#endif
+ static int VID_GetCurrentWidth (void)
+ {
+ 	int w = 0, h = 0;
+@@ -317,6 +326,10 @@
+ 	if (vkq_stereo3d_active && vkq_stereo3d_vidw > 0)
+ 		return vkq_stereo3d_vidw; // overlay 0010: panel resolution, not window
+ #endif
++#ifdef VKQ_IOS
++	if (VKQ_iOS_DrawableSize (&w, &h))
++		return w;
++#endif
+ #ifdef USE_SDL3
+ 	SDL_GetWindowSizeInPixels (draw_context, &w, &h);
+ #else
+@@ -337,6 +350,10 @@
+ 	if (vkq_stereo3d_active && vkq_stereo3d_vidh > 0)
+ 		return vkq_stereo3d_vidh; // overlay 0010: panel resolution, not window
+ #endif
++#ifdef VKQ_IOS
++	if (VKQ_iOS_DrawableSize (&w, &h))
++		return h;
++#endif
+ #ifdef USE_SDL3
+ 	SDL_GetWindowSizeInPixels (draw_context, &w, &h);
+ #else
+@@ -345,6 +362,24 @@
+ 	return h;
+ }
+ 
++#ifdef VKQ_IOS
++// overlay 0039: the shell changed the layer's contentsScale — adopt the new
++// natural size and rebuild the swapchain next frame (same steps as the
++// SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED handler in in_sdl3.c).
++void VKQ_iOS_DrawableSizeChanged (void)
++{
++	int w = VID_GetCurrentWidth ();
++	int h = VID_GetCurrentHeight ();
++	if (!draw_context || w <= 0 || h <= 0 || (w == (int)vid.width && h == (int)vid.height))
++		return;
++	Con_Printf ("vkQuake: drawable %dx%d -> %dx%d\n", (int)vid.width, (int)vid.height, w, h);
++	vid.width = w;
++	vid.height = h;
++	vid.restart_next_frame = true;
++	Cvar_FindVar ("scr_conscale")->callback (NULL);
++}
++#endif
++
+ /*
+ ================
+ VID_GetCurrentWindowWidth
+--- a/Quake/in_sdl3.c
++++ b/Quake/in_sdl3.c
+@@ -219,6 +219,19 @@
+ #endif
+ 			vid.width = event.window.data1;
+ 			vid.height = event.window.data2;
++#ifdef VKQ_IOS
++			// overlay 0039: SDL reports bounds x screen.nativeScale; the Metal
++			// layer's natural size wins when the shell has rescaled it.
++			{
++				extern int VKQ_iOS_DrawableSize (int *w, int *h);
++				int		   dw, dh;
++				if (VKQ_iOS_DrawableSize (&dw, &dh))
++				{
++					vid.width = dw;
++					vid.height = dh;
++				}
++			}
++#endif
+ 			vid.restart_next_frame = true;
+ 			Cvar_FindVar ("scr_conscale")->callback (NULL);
+ 			break;

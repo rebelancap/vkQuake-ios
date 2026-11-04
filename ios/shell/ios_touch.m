@@ -155,6 +155,8 @@ extern void		 Con_Printf (const char *fmt, ...);
 static UIWindow *vkq_key_window (void); // defined with the keyboard code below
 static void		 vkq_rebind_link_if_moved (const char *why); // frame driver, below
 static NSString *vkq_link_desc (void);
+static void		 vkq_apply_drawable_scale (const char *why); // external-display render scale, below
+static NSString *vkq_drawable_desc (void);
 
 // --- pointer lock (issue #6 follow-up) -------------------------------------
 // In game the engine asks SDL for relative mouse mode; SDL's view controller
@@ -334,6 +336,7 @@ void VKQ_iOS_MouseDiag (void)
 					(int)wb.size.height, win.isKeyWindow ? 1 : 0, NSStringFromClass (vc.class).UTF8String,
 					(unsigned long)UIApplication.sharedApplication.connectedScenes.count);
 		Con_Printf ("  frames: display link %s; screen maxfps=%ld\n", vkq_link_desc ().UTF8String, (long)ws.screen.maximumFramesPerSecond);
+		Con_Printf ("  drawable: %s\n", vkq_drawable_desc ().UTF8String);
 		NSLog (@"[vkquake] vkq_mouse: mice=%lu kb=%d lock=%@ prefers=%d state=%ld orient=%ld main=%d screen=%@ window=%@ key=%d vc=%@", (unsigned long)mice, kb, lock, prefers,
 			   (long)ws.activationState, (long)ws.interfaceOrientation, ws.screen == UIScreen.mainScreen, NSStringFromCGRect (sb), NSStringFromCGRect (wb), win.isKeyWindow,
 			   vc.class);
@@ -398,6 +401,7 @@ static void vkq_scene_did_update (id self, SEL _cmd, UIWindowScene *ws, id<UICoo
 		g_scene_screen = ws.screen;
 		vkq_refresh_orientations ("scene changed screen");
 		vkq_rebind_link_if_moved ("scene changed screen");
+		vkq_apply_drawable_scale ("scene changed screen");
 	}
 	// Trait-only updates arrive here too (many per launch); log real changes only.
 	static CGSize				  last_size;
@@ -1470,6 +1474,88 @@ static NSString *vkq_link_desc (void)
 }
 #endif
 
+// --- external-display render scale (issue #7 round 5) ------------------------
+// iPadOS presents an external monitor to the app as a 2x virtual canvas (a 4K
+// 120 Hz monitor showed up as 6016x3384 @ 120): 20 Mpixel per frame for the
+// post-process pass, the present and the system's downscale, which the engine's
+// own render scale (3D only) never touches. The "External Display Render Scale"
+// setting lowers the Metal layer's contentsScale on an external screen only;
+// the engine (overlay 0039) takes bounds x contentsScale as its drawable size,
+// which is also MoltenVK's currentExtent, and rebuilds the swapchain.
+#ifndef VKQ_VISIONOS
+static UIView *vkq_metal_view_in (UIView *root)
+{
+	if (root.tag == 255 && [root.layer isKindOfClass:CAMetalLayer.class]) // SDL_METALVIEW_TAG
+		return root;
+	for (UIView *sub in root.subviews)
+	{
+		UIView *v = vkq_metal_view_in (sub);
+		if (v)
+			return v;
+	}
+	return nil;
+}
+static UIView *vkq_metal_view (void)
+{
+	UIWindow *win = vkq_key_window ();
+	return win ? vkq_metal_view_in (win) : nil;
+}
+#endif
+int VKQ_iOS_DrawableSize (int *w, int *h) // engine thread (= main thread, display link)
+{
+#ifndef VKQ_VISIONOS
+	UIView *v = vkq_metal_view ();
+	if (!v)
+		return 0;
+	CGSize	b = v.bounds.size;
+	CGFloat s = v.layer.contentsScale;
+	*w = (int)(b.width * s);
+	*h = (int)(b.height * s);
+	return (*w > 0 && *h > 0) ? 1 : 0;
+#else
+	return 0;
+#endif
+}
+#ifndef VKQ_VISIONOS
+static const float vkq_ext_scale_factor[] = {1.0f, 0.75f, 0.5f}; // extRenderScale choice: Native / 75% / 50%
+static void vkq_apply_drawable_scale (const char *why)
+{
+	UIWindow *win = vkq_key_window ();
+	UIView	 *v = win ? vkq_metal_view_in (win) : nil;
+	if (!v)
+		return;
+	int choice = (int)lroundf (vkq_setting_f ("extRenderScale", 0.0f));
+	choice = choice < 0 ? 0 : (choice > 2 ? 2 : choice);
+	float	factor = vkq_scene_is_external (win.windowScene) ? vkq_ext_scale_factor[choice] : 1.0f;
+	CGFloat want = win.screen.nativeScale * factor;
+	if (fabs (v.layer.contentsScale - want) < 0.001)
+		return;
+	v.layer.contentsScale = want;
+	CGSize b = v.bounds.size;
+	((CAMetalLayer *)v.layer).drawableSize = CGSizeMake ((int)(b.width * want), (int)(b.height * want));
+	NSLog (@"[vkquake] drawable scale %.2f (factor %.2f, %s) -> %dx%d", want, factor, why, (int)(b.width * want), (int)(b.height * want));
+	extern void VKQ_iOS_DrawableSizeChanged (void);
+	VKQ_iOS_DrawableSizeChanged ();
+}
+static NSString *vkq_drawable_desc (void)
+{
+	UIView *v = vkq_metal_view ();
+	if (!v)
+		return @"no metal view";
+	CGSize b = v.bounds.size;
+	int	   choice = (int)lroundf (vkq_setting_f ("extRenderScale", 0.0f));
+	return [NSString stringWithFormat:@"contentsScale=%.2f (screen nativeScale=%.2f, extRenderScale=%d) natural=%dx%d layer=%.0fx%.0f", v.layer.contentsScale,
+									  vkq_key_window ().screen.nativeScale, choice, (int)(b.width * v.layer.contentsScale), (int)(b.height * v.layer.contentsScale),
+									  ((CAMetalLayer *)v.layer).drawableSize.width, ((CAMetalLayer *)v.layer).drawableSize.height];
+}
+#endif
+void VKQ_iOS_SetDrawableScale (void)
+{
+#ifndef VKQ_VISIONOS
+	vkq_apply_drawable_scale ("settings");
+#endif
+}
+
 void VKQ_iOS_StartFrameLoop (void)
 {
 	dispatch_async (dispatch_get_main_queue (), ^{
@@ -1477,6 +1563,9 @@ void VKQ_iOS_StartFrameLoop (void)
 			return;
 		g_driver = [VKQFrameDriver new];
 		vkq_bind_link ("launch");
+#ifndef VKQ_VISIONOS
+		vkq_apply_drawable_scale ("launch");
+#endif
 	});
 }
 

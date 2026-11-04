@@ -10,6 +10,7 @@
 extern void VKQ_TouchCommand (const char *text);
 extern void VKQ_TouchSetRun (int on);
 extern void VKQ_iOS_SetRefresh (void);
+extern void VKQ_iOS_SetDrawableScale (void);
 // R6 part C6 — cheats read the local server's own state (host_cmd.c). Available
 // on every platform: the Gameplay section is shared, and so are these.
 extern int		   VKQ_iOS_CheatsAvailable (void);
@@ -207,6 +208,7 @@ void VKQ_iOS_ApplySettingsToEngine (void)
 	snprintf (gammacmd, sizeof (gammacmd), "gamma %.3f\n", 1.0f - 0.5f * b);
 	VKQ_TouchCommand (gammacmd);
 	VKQ_iOS_SetRefresh ();
+	VKQ_iOS_SetDrawableScale (); // external-display render scale (no-op on the iPad's own panel)
 	VKQ_iOS_AudioApply (); // session category/options + master gain (Audio section)
 	/*
 	 * MP-DL1 (overlay 0028): 0 never / 1 ask / 2 always, mirrored into the engine's
@@ -397,6 +399,8 @@ static NSArray<NSString *> *vkq_choice_titles (NSString *key)
 		return @[ @"Never", @"Ask First", @"Always" ];
 	if ([key isEqualToString:@"gameData"])
 		return @[ @"2021 Re-release", @"Original (Classic)" ];
+	if ([key isEqualToString:@"extRenderScale"])
+		return @[ @"Native", @"75%", @"50%" ];
 	return @[];
 }
 
@@ -418,6 +422,14 @@ static NSArray<NSString *> *vkq_choice_details (NSString *key)
 			@"Takes effect next launch: swipe vkQuake away in the app switcher and reopen it.",
 			@"Your original Quake files (Documents/id1): the classic status bar, models and sounds. "
 			@"Takes effect next launch: swipe vkQuake away in the app switcher and reopen it.",
+		];
+	if ([key isEqualToString:@"extRenderScale"])
+		return @[
+			@"Draw at the full size iPadOS reports for the monitor (often a 2x canvas, e.g. 6016x3384 on a 4K display). "
+			@"Sharpest; the heaviest on the GPU and on the system's downscale.",
+			@"Draw at three quarters of that size and let the monitor scale it. Roughly half the pixels per frame.",
+			@"Draw at half that size (a 4K monitor's 2x canvas becomes 3008x1692). A quarter of the pixels per frame; "
+			@"try this if the frame rate drops on an external display. Only applies while the game is on the monitor.",
 		];
 	return @[];
 }
@@ -685,6 +697,12 @@ int VKQ_iOS_SettingsSheetOpen (void) { return vkq_settings_depth > 0 ? 1 : 0; }
 		mkrow (@"Brightness", @"brightness", ROW_SLIDER, 0.0, 1.0, 0.2),
 		mkrow (@"Menu / HUD Size", @"menuSize", ROW_SLIDER, 0.6, 2.5, 1.3),
 		mkrow (@"120 Hz (ProMotion)", @"refresh120", ROW_SWITCH, 0, 1, 1),
+#ifndef VKQ_VISIONOS
+		// Issue #7: iPadOS hands the app a 2x virtual canvas on a monitor (a 4K
+		// panel reads 6016x3384); only applies while the game is on an external
+		// screen. Native keeps today's behaviour.
+		mkrow (@"External Display Render Scale", @"extRenderScale", ROW_CHOICE, 0, 2, 0),
+#endif
 	]];
 	[rows addObject:@[
 		// Master gain on top of the engine's own Sound/Music Volume sliders, so
