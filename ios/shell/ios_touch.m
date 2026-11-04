@@ -1869,7 +1869,16 @@ static void vkq_build_ui (void)
 	g_catcher.backgroundColor = UIColor.clearColor;
 	g_catcher.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	g_catcher.hidden = YES;
-	[g_catcher addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:VKQBack.class action:@selector (press)]];
+	UITapGestureRecognizer *catchTap = [[UITapGestureRecognizer alloc] initWithTarget:VKQBack.class action:@selector (press)];
+#ifndef VKQ_VISIONOS
+	// Issue #6 follow-up: fingers and pencil only. A mouse click is ALSO delivered
+	// as an indirect-pointer touch; the click already opens the menu through SDL's
+	// GCMouse path, and the same click completing as a tap here sent Escape and
+	// closed it again (menu "pops in and straight back out"; click-hold-and-move
+	// is not a tap, so that stayed).
+	catchTap.allowedTouchTypes = @[ @(UITouchTypeDirect), @(UITouchTypePencil) ];
+#endif
+	[g_catcher addGestureRecognizer:catchTap];
 	[win addSubview:g_catcher];
 
 	// keyboard: shift the game up + show a Dismiss button while the soft keyboard is up
