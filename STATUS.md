@@ -17,9 +17,11 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
   the server's gamedir is installed, maps install into id1, abandoned plans cancelled,
   `fullserverinfo` executed, no LAN broadcast for explicit hosts). moddl harness
   94/94 PASS incl. live hipnotic switch + pieter switch-back; timedemo 969.
-- Plists bumped to 1.2.1.3 / build 46; OTA publish (OTA_PUBLIC_GATE=1) in progress at
-  the time of writing — verify the served IPA (version, no remoteConsole, DP strings)
-  before handing build/ota/vkQuake-1.2.1.3-iOS.ipa + build/reply-8-1.2.1.3.md to Austin.
+- 1.2.1.3 / build 46 OTA PUBLISHED (OTA_PUBLIC_GATE=1; first attempt refused: notes >
+  420 chars — the hub kept serving 1.2.1.2, caught by the served-IPA check). Served IPA
+  verified: 1.2.1.3/46, no remoteConsole, cl_dp7status/landscape-native/watchdog strings
+  present, 7 mod entries. Copy for the issue: build/ota/vkQuake-1.2.1.3-iOS.ipa; reply:
+  build/reply-8-1.2.1.3.md.
 - Orchestrator lesson: `git commit -a` on STATUS.md swept an agent's files (e94e525);
   commit STATUS.md by path only while agents own the tree.
 
@@ -100,7 +102,7 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 
 ## Open questions
 - Austin: upload build/ota/vkQuake-1.2.1.3-iOS.ipa to issue #8 with build/reply-8-1.2.1.3.md
-  once the served IPA is verified (see Last round). Default if not done: reporter stays on 1.2.1.2.
+  (verified). Default if not done: reporter stays on 1.2.1.2.
 - Release `dp7` as 1.2.2 after the reporter confirms #7/#8 on 1.2.1.3? Default: wait
   (release numbers are Austin's call). Release checklist: plists → 1.2.2 (build 47),
   merge dp7 → main, RELEASING.md loop, verify dispatch chain; mods/ reaching main makes
@@ -109,7 +111,6 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-OTA publish of 1.2.1.3 running in the orchestrator's background (publish-ota.sh). No
-agents running; no sims booted (another session's Vision Pro may be). Branches pushed:
+None. No agents running; no sims booted by this session; tree clean. Branches pushed:
 issue-6-7-followup, mod-download, issue-7-external-display, dp7-plan, dp7 (RC, 1.2.1.3).
 `main` = `origin/main` = v1.2.1.
