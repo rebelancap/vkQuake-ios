@@ -93,7 +93,7 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    on any; 4 run protocol 15 and are joinable TODAY but our `*` rule stars them
    (DP never sends `nqprotocol`); 7 are DP7 Quake servers (no CSQC); 2 are Xonotic
    (CSQC, never joinable). Phase 0 DONE (a66b149, patch 0035 on the RC): DP rows tagged "DP ", stars only for needpass/Xonotic; 4 protocol-15 DP servers joinable; oracle joined 47.190.124.72:26001.
-   Phase A DONE on `dp7` (35aa39c, b28f016; patch 0036, cl_dp7.c ~700 lines; gates: timedemo 969/985/1090 identical, 36 non-DP7 move packets byte-identical, moddl harness PASS, sim joined a local DP server + live Coopera/PART1CL3; Zeus needs mod content; Phase B = DP temp entities/effects/attachments/DP7 demos). Sonnet review: no non-DP7 regressions; TWO bounds fixes to apply before 1.2.1.3 (patch 0036): (i) cl_dp7.c CLDP7_ParseSound — reject sound_num < 0 / msg_badread (MSG_ReadByte returns -1 past end → cl.sound_precache[-1]); (ii) cl_parse.c CL_ParseStatic via CL_ParseBaseline v7 (spawnstatic2): modelindex is a short → check < MAX_MODELS before cl.model_precache[]; CL_ParseStaticSound v2: sound_num short → check < MAX_SOUNDS (both upstream/666 paths too — guard without changing valid behaviour). Design was: new cl_dp7.c behind
+   Phase A DONE on `dp7` (35aa39c, b28f016; patch 0036, cl_dp7.c ~700 lines; gates: timedemo 969/985/1090 identical, 36 non-DP7 move packets byte-identical, moddl harness PASS, sim joined a local DP server + live Coopera/PART1CL3; Zeus needs mod content; Phase B = DP temp entities/effects/attachments/DP7 demos). Sonnet review: no non-DP7 regressions; bounds fixes DONE (e8c1b45, patch 0036; negative test with injected bad indices via a UDP relay passed). Were: (i) cl_dp7.c CLDP7_ParseSound — reject sound_num < 0 / msg_badread (MSG_ReadByte returns -1 past end → cl.sound_precache[-1]); (ii) cl_parse.c CL_ParseStatic via CL_ParseBaseline v7 (spawnstatic2): modelindex is a short → check < MAX_MODELS before cl.model_precache[]; CL_ParseStaticSound v2: sound_num short → check < MAX_SOUNDS (both upstream/666 paths too — guard without changing valid behaviour). Design was: new cl_dp7.c behind
    cl.protocol==PROTOCOL_DP7 — entity-delta reader, DP7 clientdata, opcodes 55/56/59,
    56-byte clc_move + frame acks; ~450 lines, 2 rounds; regression gate = identical
    timedemo counts + byte-identical move packet for non-DP7. A 230-line Python
@@ -121,7 +121,6 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-Opus agent in flight: DP7 bounds fixes on `dp7` (owns the tree). Read-only Opus
-diagnosis of #8 round 3 on the oracle. ORCHESTRATOR RULE: commit STATUS.md by path
-only (`git commit STATUS.md`), never `-a`, while an agent owns the tree.
+Opus agent in flight: #8 round 3 fixes (A-E) on `dp7`; owns the tree + iPhone Air
+(lane 2). Then 1.2.1.3 (OTA_PUBLIC_GATE=1). Orchestrator commits STATUS.md by path only.
 `main` = `origin/main` = v1.2.1. RC line = `dp7`.
