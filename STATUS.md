@@ -1,14 +1,28 @@
 # STATUS — vkQuake iOS
 
 ## Current state
-Engine is on upstream vkQuake **1.37.0** (`749b4fd4`) with a 29-patch overlay plus
-3 SDL patches. **Public release 1.2.1** (tag `v1.2.1`, 2026-11-02) is live on GitHub,
-the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/) and the SideStore sources
-(quake-ports + all-ports; chain verified, see Last round). `origin/main` = release.
-Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` holds the
-unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
+Engine is on upstream vkQuake **1.37.0** (`749b4fd4`) with a 31-patch overlay (0001-0040,
+0015/0016 retired) plus 3 SDL patches. **Public release 1.2.2** (tag `v1.2.2`, build 50,
+2026-11-04 19:49 UTC) is live on GitHub, the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/)
+and the SideStore sources (quake-ports + all-ports, iOS + visionOS all serve 1.2.2; dispatch
+chain verified 11 s after the release). `main` = `origin/main` = `dp7` = release. Next OTA dev
+builds are 1.2.2.1, 1.2.2.2, … Local branch `vr-notes-private` holds the unpushed VR docs.
+DECISIONS.md is gitignored (local-only).
 
-## Last round (2026-11-04 evening) — reporter's 1.2.1.6 verdict; stuck-fire guard (patch 0040); release prep
+## Last round (2026-11-04 evening) — v1.2.2 RELEASED
+- Austin: "go 1.2.2". Plists → 1.2.2/50 (a757992), dp7 ff-merged into main, build-ios.sh +
+  build-visionos.sh (both device libs rebuilt), publish-ota.sh (public, no gate), both IPAs
+  verified 1.2.2/50 (reconcile line + render-scale strings present, no remoteConsole; iOS
+  served == export), `gh release create v1.2.2` with build/notes-1.2.2.md. Chain: port
+  workflow, all-ports and quake-ports repository_dispatch all success; live sources show
+  Quake 1.2.2 (iOS + visionOS).
+- NOT done: posting the issue replies / closing #6 and #8 — `gh issue comment/close` was
+  denied by the permission classifier. Austin pastes build/reply-7-1.2.2.md (#7),
+  build/reply-6-1.2.2.md (#6, then close), build/reply-8-1.2.2.md (#8, then close).
+- Earlier in the round: reporter's 1.2.1.6 verdict (75% + 4x AA locks 120 Hz on the
+  monitor); stuck-fire guard = patch 0040 (see Previous round below for the dead end).
+
+## Previous round (2026-11-04 evening) — reporter's 1.2.1.6 verdict; stuck-fire guard (patch 0040); release prep
 - Reporter on 1.2.1.6: 50% render scale only +10-15%; the cost is the 4x MSAA resolve on
   the 2x canvas — **75% + 4x AA locks 120 Hz** (their chosen setting). Finished the whole
   campaign. New: fire occasionally sticks on until the next click (not reproducible by
@@ -166,19 +180,20 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- Austin: "go 1.2.2"? Then: plists → 1.2.2 (build 50), merge dp7 → main (ff), build-ios.sh
-  + publish-ota.sh, `gh release create v1.2.2` with build/notes-1.2.2.md + both IPAs, verify
-  IPA versions and the dispatch chain, post build/reply-7-1.2.1.7.md (reword to "1.2.2") on
-  #7, close #6/#8. Default if no answer: stop at "ready"; nothing tagged.
+- Austin: paste build/reply-7-1.2.2.md on #7, build/reply-6-1.2.2.md on #6 and close it,
+  build/reply-8-1.2.2.md on #8 and close it (gh posting was denied to the session).
+  Default if not done: issues stay open with the release live.
+- Stuck fire (#6/#7): if the reporter sees it again on 1.2.2, ask for a condump — the guard
+  prints "mouse button N released by the engine" when it fires. If it never prints and
+  the bug recurs, the GCMouse-churn theory is wrong too; next suspect is the GCMouse
+  handler queue vs SDL event ordering.
+- Pointer lock on an external display: iPadOS declines; only the split-scene idea (input
+  window on the iPad panel) remains. Default: not pursued unless the reporter pushes.
 - #8 is confirmed fixed by the reporter on 1.2.1.3; close it at the 1.2.2 release.
-- Release `dp7` as 1.2.2? #8 confirmed, #7 orientation confirmed, fps fix awaiting the
-  reporter. Default: wait (release numbers are Austin's call). Release checklist: plists → 1.2.2 (build 50),
-  merge dp7 → main, RELEASING.md loop, verify dispatch chain; mods/ reaching main makes
-  the live mod-table URL work. Close #6 (confirmed fixed).
+- (1.2.2 released — the release question is closed.)
 - DP7 Phase B (DP-only temp entities/effects, attachments, DP7 demos): default later.
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-None. No agents running; iPad Air 13" sim shut down; tree clean (untracked .claude/, docs/IOS-AUDIO-SESSION-GUIDE.md pre-existing). Branches pushed:
-issue-6-7-followup, mod-download, issue-7-external-display, dp7-plan, dp7 (RC, 1.2.1.6).
-`main` = `origin/main` = v1.2.1.
+None. No agents running; iPad Air 13" sim (D804DBF5) shut down; tree clean (untracked
+.claude/, docs/IOS-AUDIO-SESSION-GUIDE.md pre-existing). `main` = `origin/main` = v1.2.2.
