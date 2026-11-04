@@ -1,6 +1,6 @@
 --- a/Quake/in_sdl.c
 +++ b/Quake/in_sdl.c
-@@ -898,8 +898,42 @@
+@@ -898,8 +898,57 @@
  Emit key events for game controller buttons, including emulated buttons for analog sticks/triggers
  ================
  */
@@ -12,25 +12,40 @@
 +// the mouse count flipping 4 -> 3) SDL nils the old object's button handlers and
 +// drops its input source without synthesizing a release (SDL_RemoveMouse), so a
 +// button held across that moment is never let go. Reconcile once per frame: if
-+// the engine holds a mouse key that NO connected hardware mouse is pressing,
-+// release it. Inactive without a hardware mouse (the shell answers -1), so the
-+// touch / fake-click paths are untouched; a release a few ms early on the race
-+// with SDL's own up event is harmless (Key_Event ignores the stray up).
++// the engine holds a mouse key that NO connected hardware mouse is pressing for
++// several consecutive frames, release it. Inactive without a hardware mouse (the
++// shell answers -1), so the touch / fake-click paths are untouched.
++//
++// The persistence threshold matters: GCMouse's polled `pressed` flips on the HID
++// thread, while SDL's up event rides a handler block queued to the main runloop
++// and lands a frame later — so a single-frame mismatch is every ordinary click's
++// release, not a stuck button (1.2.2 released on the first frame and spammed the
++// console on every click). Only a mismatch that outlives SDL's delivery is real.
++#define VKQ_MOUSE_RECONCILE_FRAMES 6 // ~50 ms at 120 Hz, ~100 ms at 60 Hz
 +static void IN_ReconcileMouseButtons (void)
 +{
 +	extern int		VKQ_iOS_MouseButtonsHeld (void); // bit i = SDL button i+1 pressed; -1 = no hardware mouse
 +	extern qboolean keydown[];
++	static int		mismatch[countof (buttonremap)];
 +	int				held = VKQ_iOS_MouseButtonsHeld ();
 +	int				i;
 +	if (held < 0)
++	{
++		memset (mismatch, 0, sizeof (mismatch));
 +		return;
++	}
 +	for (i = 0; i < (int)countof (buttonremap); i++)
 +	{
-+		if (keydown[buttonremap[i]] && !(held & (1 << i)))
++		if (!keydown[buttonremap[i]] || (held & (1 << i)))
 +		{
-+			Con_Printf ("vkQuake: mouse button %d released by the engine (the mouse never reported the release)\n", i + 1);
-+			Key_Event (buttonremap[i], false);
++			mismatch[i] = 0;
++			continue;
 +		}
++		if (++mismatch[i] < VKQ_MOUSE_RECONCILE_FRAMES)
++			continue;
++		mismatch[i] = 0;
++		Con_DPrintf ("vkQuake: mouse button %d released by the engine (the mouse never reported the release)\n", i + 1);
++		Key_Event (buttonremap[i], false);
 +	}
 +}
 +#endif
