@@ -8,36 +8,20 @@ the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/) and the SideStore so
 Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` holds the
 unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
 
-## Last round (2026-11-03 late) — 1.2.1.2 test build staged (branch `issue-7-external-display`)
-- Branch `issue-7-external-display` (from mod-download; pushed, NOT merged; plists
-  1.2.1.2 / build 45) = issue-6-7-followup + mod-download + #7 fix + review fixes +
-  TF coverage/retry guard + DarkPlaces-protocol graceful refusal. It is the release
-  candidate for 1.2.2 once the reporter confirms.
-- #7: root cause = both orientation sources said landscape-only, so UIKit rotated
-  the external scene 90° (external scenes count orientation from the panel's NATIVE
-  orientation). 1.2.1.1's hook never ran: SDL's app delegate on iOS 13+ is
-  `SDLUIKitSceneShim`. Fix in SDL patch 0003 (`UIKit_IsExternalDisplayScene`,
-  Portrait = native off the main screen) + shell hook on the shim. Proven only under
-  emulation (`VKQ_EMULATE_EXTERNAL_DISPLAY=1`, scripts/sim-verify-issue7.sh); the sim
-  cannot extend a display. Reporter has no rotation setting; monitor is horizontal.
-- mod-download (patch 0034, cl_moddl.c): review fixes (no install into id1 when the
-  server names no gamedir; unpacked-size cap = maxpkg×4); retry guard keyed per
-  server + missing-file set; package type "file"; entries combine per gamedir; table
-  now 7 entries (FortressOne pak + tpad/qpi/ammopack.mdl from FortressOne/map-repo
-  @5b31e00, Threewave CTF, AirQuake, Copper), all verified by
-  scripts/mod-sources-verify.py. Live harness 66/66 PASS incl. TF on 2nuke2, a
-  map-change rejoin, and a DarkPlaces refusal.
-- #8 reporter hit "Server returned version 3504" on 5-6 servers = DarkPlaces protocol
-  7, which vkQuake cannot speak (pre-existing). Now `CL_RefuseServerProtocol`:
-  message + return to join menu, no stack wall; `cl_serverextension_download`
-  stufftext dropped. The browser's `*` marking works for DP servers that answer getinfo.
-- 1.2.1.2 OTA published (OTA_PUBLIC_GATE=1, no Remote Console); served IPA checked:
-  1.2.1.2/45, remoteConsole absent, DP message present, bundled mod-sources.json ==
-  repo. Copy for the issue: build/ota/vkQuake-1.2.1.2-iOS.ipa; reply text:
-  build/reply-8-1.2.1.2.md. Austin uploads (gh cannot attach files to issues).
-- Note from the harness: sim-verify.sh's log ends with "Unknown command GET/Host:…" —
-  something on the Mac sends an HTTP request to the console bridge port 27999
-  (harmless, untraced).
+## Last round (2026-11-03 night) — 1.2.1.3 test build (branch `dp7`, RC line)
+- `dp7` now carries, on top of 1.2.1.2: #7 round 3 (landscape-native predicate, SDL 0003
+  + ios_touch.m; version line in `vkq_mouse`/`version`, patch 0037); DP7 Phase 0
+  (0035, browser DP tag) and Phase A (0036, cl_dp7.c, + bounds fixes); #8 round 3
+  (0038: plaque lowered on every content exit, 20 s signon watchdog, game-dir revert
+  via `CL_ContentDownload_PreConnect` at the top of Host_Connect_f, early switch when
+  the server's gamedir is installed, maps install into id1, abandoned plans cancelled,
+  `fullserverinfo` executed, no LAN broadcast for explicit hosts). moddl harness
+  94/94 PASS incl. live hipnotic switch + pieter switch-back; timedemo 969.
+- Plists bumped to 1.2.1.3 / build 46; OTA publish (OTA_PUBLIC_GATE=1) in progress at
+  the time of writing — verify the served IPA (version, no remoteConsole, DP strings)
+  before handing build/ota/vkQuake-1.2.1.3-iOS.ipa + build/reply-8-1.2.1.3.md to Austin.
+- Orchestrator lesson: `git commit -a` on STATUS.md swept an agent's files (e94e525);
+  commit STATUS.md by path only while agents own the tree.
 
 ## Next steps
 1. Perf on device: SSAO now defaults on for GPUs with subgroup ops, and fresh installs
@@ -115,12 +99,17 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- (done) Austin attached the 1.2.1.2 IPA on #8; awaiting the reporter's results.
-- Release `issue-7-external-display` as 1.2.2 after the reporter confirms? Default: wait
-  (release numbers are Austin's call). Close #6 (confirmed fixed; classifier blocks me).
+- Austin: upload build/ota/vkQuake-1.2.1.3-iOS.ipa to issue #8 with build/reply-8-1.2.1.3.md
+  once the served IPA is verified (see Last round). Default if not done: reporter stays on 1.2.1.2.
+- Release `dp7` as 1.2.2 after the reporter confirms #7/#8 on 1.2.1.3? Default: wait
+  (release numbers are Austin's call). Release checklist: plists → 1.2.2 (build 47),
+  merge dp7 → main, RELEASING.md loop, verify dispatch chain; mods/ reaching main makes
+  the live mod-table URL work. Close #6 (confirmed fixed).
+- DP7 Phase B (DP-only temp entities/effects, attachments, DP7 demos): default later.
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-Opus agent in flight: #8 round 3 fixes (A-E) on `dp7`; owns the tree + iPhone Air
-(lane 2). Then 1.2.1.3 (OTA_PUBLIC_GATE=1). Orchestrator commits STATUS.md by path only.
-`main` = `origin/main` = v1.2.1. RC line = `dp7`.
+OTA publish of 1.2.1.3 running in the orchestrator's background (publish-ota.sh). No
+agents running; no sims booted (another session's Vision Pro may be). Branches pushed:
+issue-6-7-followup, mod-download, issue-7-external-display, dp7-plan, dp7 (RC, 1.2.1.3).
+`main` = `origin/main` = v1.2.1.
