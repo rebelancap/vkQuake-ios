@@ -2,14 +2,13 @@
 
 ## Current state
 Engine is on upstream vkQuake **1.37.0** (`749b4fd4`) with a 31-patch overlay (0001-0040,
-0015/0016 retired) plus 3 SDL patches. **Public release 1.2.2** (tag `v1.2.2`, build 50,
-2026-11-04 19:49 UTC) is live on GitHub, the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/)
-and the SideStore sources (quake-ports + all-ports, iOS + visionOS all serve 1.2.2; dispatch
-chain verified 11 s after the release). `main` = `origin/main` = `dp7` = release. Next OTA dev
-builds are 1.2.2.1, 1.2.2.2, … Local branch `vr-notes-private` holds the unpushed VR docs.
+0015/0016 retired) plus 3 SDL patches. **Public release 1.2.3** (tag `v1.2.3`, build 51,
+2026-11-04 20:19 UTC) is live on GitHub, the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/)
+and the SideStore sources (quake-ports + all-ports, iOS + visionOS all serve 1.2.3; dispatch
+chain verified). `main` = `origin/main` = release. Next OTA dev builds are 1.2.3.1, 1.2.3.2, … Local branch `vr-notes-private` holds the unpushed VR docs.
 DECISIONS.md is gitignored (local-only).
 
-## Last round (2026-11-04 night) — #6 reporter: 1.2.2 spams the console on every click
+## Last round (2026-11-04 night) — #6: 1.2.2 console spam → v1.2.3 RELEASED
 - Reporter on 1.2.2: "mouse button N released by the engine (the mouse never reported the
   release)" printed on EVERY mouse click (buttons 1 and 3). Cause: GCMouse's polled
   `pressed` flips on the HID thread; SDL's up event rides a handler block queued to the
@@ -19,8 +18,12 @@ DECISIONS.md is gitignored (local-only).
   consecutive mismatched frames (~50 ms @120 / ~100 ms @60); Con_DPrintf (developer 1
   only). ios-syntax-check + vr-syntax-check OK; build-ios.sh green (device app built,
   not published). Sim cannot test a mouse. Reply drafted: build/reply-6-debug-spam.md.
-- NOT done: no OTA build published, no issue reply posted. Austin decides: 1.2.2.1 dev
-  build on the hub for the reporter, or straight to 1.2.3.
+- Austin: "move to 1.2.3 immediately with a comment". Done: plists 1.2.3/51 (9ef4b4f),
+  build-visionos.sh + build-sim.sh, sim gate PASS on iPhone Air lane 2 (e1m1 content
+  screenshot artifacts/sim/2026-11-04-ios-e1m1.png), publish-ota.sh (both IPAs 1.2.3/51,
+  served == export), `gh release create v1.2.3` (build/notes-1.2.3.md), dispatch chain all
+  success, live sources serve Quake 1.2.3 (iOS + visionOS), comment posted on #6. Sim shut
+  down. Reporter has not yet confirmed on 1.2.3.
 
 ## Previous round (2026-11-04 evening) — v1.2.2 RELEASED
 - Austin: "go 1.2.2". Plists → 1.2.2/50 (a757992), dp7 ff-merged into main, build-ios.sh +
