@@ -9,7 +9,20 @@ chain verified 11 s after the release). `main` = `origin/main` = `dp7` = release
 builds are 1.2.2.1, 1.2.2.2, … Local branch `vr-notes-private` holds the unpushed VR docs.
 DECISIONS.md is gitignored (local-only).
 
-## Last round (2026-11-04 evening) — v1.2.2 RELEASED
+## Last round (2026-11-04 night) — #6 reporter: 1.2.2 spams the console on every click
+- Reporter on 1.2.2: "mouse button N released by the engine (the mouse never reported the
+  release)" printed on EVERY mouse click (buttons 1 and 3). Cause: GCMouse's polled
+  `pressed` flips on the HID thread; SDL's up event rides a handler block queued to the
+  main runloop and lands a frame later, so patch 0040's first-frame reconcile beat SDL to
+  every ordinary release and Con_Printf'd it.
+- Fix (aa73db1, patch 0040 rewritten): per-button mismatch counter, release only after 6
+  consecutive mismatched frames (~50 ms @120 / ~100 ms @60); Con_DPrintf (developer 1
+  only). ios-syntax-check + vr-syntax-check OK; build-ios.sh green (device app built,
+  not published). Sim cannot test a mouse. Reply drafted: build/reply-6-debug-spam.md.
+- NOT done: no OTA build published, no issue reply posted. Austin decides: 1.2.2.1 dev
+  build on the hub for the reporter, or straight to 1.2.3.
+
+## Previous round (2026-11-04 evening) — v1.2.2 RELEASED
 - Austin: "go 1.2.2". Plists → 1.2.2/50 (a757992), dp7 ff-merged into main, build-ios.sh +
   build-visionos.sh (both device libs rebuilt), publish-ota.sh (public, no gate), both IPAs
   verified 1.2.2/50 (reconcile line + render-scale strings present, no remoteConsole; iOS
