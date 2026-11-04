@@ -8,7 +8,25 @@ the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/) and the SideStore so
 Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` holds the
 unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
 
-## Last round (2026-11-04 afternoon) — 1.2.1.6 test build (branch `dp7`): #7 round 5 render scale
+## Last round (2026-11-04 evening) — reporter's 1.2.1.6 verdict; stuck-fire guard (patch 0040); release prep
+- Reporter on 1.2.1.6: 50% render scale only +10-15%; the cost is the 4x MSAA resolve on
+  the 2x canvas — **75% + 4x AA locks 120 Hz** (their chosen setting). Finished the whole
+  campaign. New: fire occasionally sticks on until the next click (not reproducible by
+  them). Pointer lock: Infuse's old screen-blanking = the legacy second-UIScreen model.
+- Stuck fire: first diagnosis (menu/console mouse filter drops the release) was WRONG —
+  the filter passes button events; a sim A/B (held key across togglemenu) could not
+  reproduce; those patches/test deleted. Real candidate: GCMouse churn (pastes show
+  mice=4→3 in game): SDL nils handlers + SDL_RemoveMouse drops the source with no
+  synthesized release. Shipped guard = patch 0040 (IN_ReconcileMouseButtons in
+  IN_Commands + shell VKQ_iOS_MouseButtonsHeld): releases an engine-held K_MOUSEn no
+  connected mouse is pressing; prints a console line when it fires; inactive with no
+  hardware mouse. Not sim-reproducible; issue7 regression PASS; syntax checks OK.
+  NOT yet on the OTA hub (hub = 1.2.1.6).
+- Austin (mid-turn): if the fix is small/high-confidence and nothing else is open, go to
+  public release. Prepared: build/notes-1.2.2.md (release notes), dp7 fast-forwards main
+  (50+ commits), RELEASING.md read. Waiting for the explicit "go 1.2.2".
+
+## Previous round (2026-11-04 afternoon) — 1.2.1.6 test build (branch `dp7`): #7 round 5 render scale
 - Reporter on 1.2.1.5: first-click fix CONFIRMED. In-game pointer-lock paste:
   `prefersPointerLocked=1 pointerlock=unlocked` → scene eligible, iPadOS declines the lock
   on the external display. System policy; only the split-scene idea remains (3c).
@@ -148,9 +166,10 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- Austin: post build/reply-7-1.2.1.6.md on issue #7 with build/ota/vkQuake-1.2.1.6-iOS.ipa
-  (verified) and build/reply-6-1.2.1.6.md on #6. Default if not done: reporter stays on
-  1.2.1.5 (60-80 fps on the monitor). Next data needed: fps at 50%/75% + the `drawable:` line.
+- Austin: "go 1.2.2"? Then: plists → 1.2.2 (build 50), merge dp7 → main (ff), build-ios.sh
+  + publish-ota.sh, `gh release create v1.2.2` with build/notes-1.2.2.md + both IPAs, verify
+  IPA versions and the dispatch chain, post build/reply-7-1.2.1.7.md (reword to "1.2.2") on
+  #7, close #6/#8. Default if no answer: stop at "ready"; nothing tagged.
 - #8 is confirmed fixed by the reporter on 1.2.1.3; close it at the 1.2.2 release.
 - Release `dp7` as 1.2.2? #8 confirmed, #7 orientation confirmed, fps fix awaiting the
   reporter. Default: wait (release numbers are Austin's call). Release checklist: plists → 1.2.2 (build 50),
