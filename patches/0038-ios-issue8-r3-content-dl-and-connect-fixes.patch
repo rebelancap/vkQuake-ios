@@ -1,0 +1,578 @@
+--- a/Quake/cl_main.c
++++ b/Quake/cl_main.c
+@@ -202,6 +202,12 @@
+ 	cl.worldmodel = NULL;
+ 	cl.sendprespawn = false;
+ 	SCR_CenterPrintClear ();
++#ifdef VKQ_IOS
++	// overlay 0038: a map/mod consent prompt the player walked away from must not
++	// outlive the connection it was for (it blocked every later download with
++	// "a download is already in progress"). A prompt still on screen is kept.
++	CL_ContentDownload_DropUnattended ();
++#endif
+ }
+ 
+ void CL_Disconnect_f (void)
+@@ -974,6 +980,62 @@
+ 			return i;
+ 	}
+ 	return 0;
++}
++
++/*
++===============
++CL_SignonWatchdog
++
++vkquake-ios overlay 0038 (issue #8). A join that stalls between signon stages
++(the server keeps sending nops, so net_messagetimeout's 300 s never trips) sat
++on the loading plaque with nothing drawn and no way out. After 20 s with no
++signon progress, give up cleanly: plaque down, back to the join screen.
++
++Idle time accumulates only from ordinary frames: a step longer than 1 s (the
++synchronous map load inside CL_ParseServerInfo, a hitch, the app in the
++background) is not counted, so a long but legitimate load can never fire it.
++===============
++*/
++#define SIGNON_WATCHDOG_SECONDS 20.0
++static void CL_SignonWatchdog (void)
++{
++	static int	  last_key = -1;
++	static double idle, last_time;
++	double		  now = Sys_DoubleTime ();
++	double		  dt = now - last_time;
++	int			  key;
++
++	last_time = now;
++	if (cls.state != ca_connected || cls.demoplayback || cls.signon >= SIGNONS || sv.active)
++	{
++		last_key = -1;
++		return;
++	}
++	key = cls.signon * 2 + (cl.worldmodel ? 1 : 0);
++	if (key != last_key)
++	{
++		last_key = key;
++		idle = 0;
++		return;
++	}
++	if (dt > 0 && dt < 1.0)
++		idle += dt;
++	if (idle < SIGNON_WATCHDOG_SECONDS)
++		return;
++	last_key = -1;
++	{
++		extern enum m_state_e m_return_state;
++		extern char			 m_return_reason[32];
++		int					 stage = cls.signon;
++		Con_Printf ("\nThe server stopped answering while joining (signon %d, %.0f s). Giving up.\n", stage, SIGNON_WATCHDOG_SECONDS);
++		q_snprintf (m_return_reason, sizeof (m_return_reason), "Join stalled (signon %d)", stage);
++		key_dest = key_menu;
++		m_state = (m_return_state == m_slist || m_return_state == m_lanconfig) ? m_return_state : m_main;
++		IN_Deactivate (true);
++		SCR_EndLoadingPlaque ();
++		cls.demonum = -1; // never fall into the demo loop from a failed join
++		Host_EndGame ("Join stalled at signon %d\n", stage);
++	}
+ }
+ 
+ /*
+@@ -1031,6 +1093,8 @@
+ 		CL_ParseServerMessage ();
+ 	} while (ret && cls.state == ca_connected);
+ 
++	CL_SignonWatchdog (); // vkquake-ios 0038
++
+ 	if (cl_shownet.value)
+ 		Con_Printf ("\n");
+ 
+@@ -1345,7 +1409,9 @@
+ static void CL_ServerExtension_FullServerinfo_f (void)
+ {
+ 	const char *newserverinfo = Cmd_Argv (1);
+-	memcpy (cl.serverinfo, newserverinfo, sizeof (cl.serverinfo)); // just replace it
++	// vkquake-ios 0038: argv slots are 1024 bytes and serverinfo is 8192, so the
++	// memcpy read ~7 KB past the argument. Copy the string, not the buffer.
++	q_strlcpy (cl.serverinfo, newserverinfo, sizeof (cl.serverinfo)); // just replace it
+ }
+ static void CL_ServerExtension_ServerinfoUpdate_f (void)
+ {
+--- a/Quake/cl_mapdl.c
++++ b/Quake/cl_mapdl.c
+@@ -185,6 +185,21 @@
+ 		q_strlcpy (mdl_tried[mdl_tried_count++], map, sizeof (mdl_tried[0]));
+ }
+ 
++// overlay 0038: an ABANDONED plan (not declined, not failed) was never really
++// tried; let the next join to a server running that map ask again.
++static void mdl_forget (const char *map)
++{
++	int i;
++	for (i = 0; i < mdl_tried_count;)
++		if (!q_strcasecmp (mdl_tried[i], map))
++		{
++			memmove (mdl_tried[i], mdl_tried[i + 1], (mdl_tried_count - i - 1) * sizeof (mdl_tried[0]));
++			mdl_tried_count--;
++		}
++		else
++			i++;
++}
++
+ // ---------------------------------------------------------------------------
+ // small helpers
+ // ---------------------------------------------------------------------------
+@@ -335,18 +350,37 @@
+ // ---------------------------------------------------------------------------
+ // install
+ // ---------------------------------------------------------------------------
++/*
++ * overlay 0038 (issue #8): WHERE a fetched map goes. The server's gamedir string
++ * is never a path here; it only chooses between two directories we own. A map
++ * for the mod we are running goes into that mod (com_gamedir). Anything else —
++ * a stock-content DM/CTF map, or a server that named no gamedir — goes into the
++ * base game in the same (writable) root com_gamedir is built from, which EVERY
++ * game directory searches. Installing into com_gamedir unconditionally put
++ * ctf2m2.bsp into hipnotic/ because moddl had left the client in hipnotic,
++ * where it vanished the moment the player was back in id1.
++ */
++static void mdl_map_root (char *out, size_t len)
++{
++	if (mdl.gamedir[0] && COM_GameDirMatches (mdl.gamedir))
++		q_strlcpy (out, com_gamedir, len);
++	else
++		q_snprintf (out, len, "%s/%s", com_basedirs[com_numbasedirs - 1], GAMENAME);
++}
++
+ static qboolean mdl_install_bsp (const char *tmp, const char *map)
+ {
+-	char dir[MAX_OSPATH], dest[MAX_OSPATH], why[96];
++	char dir[MAX_OSPATH], dest[MAX_OSPATH], why[96], root[MAX_OSPATH];
+ 
+ 	if (!mdl_bsp_header_ok (tmp, why, sizeof (why)))
+ 	{
+ 		mdl_fail ("%s", why);
+ 		return false;
+ 	}
+-	q_snprintf (dir, sizeof (dir), "%s/maps", com_gamedir);
++	mdl_map_root (root, sizeof (root));
++	q_snprintf (dir, sizeof (dir), "%s/maps", root);
+ 	Sys_mkdir (dir);
+-	q_snprintf (dest, sizeof (dest), "%s/maps/%s.bsp", com_gamedir, map);
++	q_snprintf (dest, sizeof (dest), "%s/maps/%s.bsp", root, map);
+ 	// NEVER overwrite. If the file is there, the precache check that started this
+ 	// found something else missing, or the player installed it in the meantime;
+ 	// either way clobbering their copy is not ours to do.
+@@ -419,7 +453,7 @@
+ 	if (dir[0])
+ 		q_snprintf (root, sizeof (root), "%s/%s", com_basedir, dir);
+ 	else
+-		q_strlcpy (root, com_gamedir, sizeof (root)); // the gamedir we are actually running
++		mdl_map_root (root, sizeof (root)); // overlay 0038: the mod we run, or the base game
+ 	Sys_mkdir (root);
+ 
+ 	n = COM_UnzipToDir (zip, root, com_basedir, err, sizeof (err));
+@@ -448,9 +482,13 @@
+ 		mdl_fail ("package did not contain %s.bsp", map);
+ 		return false;
+ 	}
+-	q_snprintf (dest, sizeof (dest), "%s/maps", com_gamedir);
+-	Sys_mkdir (dest);
+-	q_snprintf (dest, sizeof (dest), "%s/maps/%s.bsp", com_gamedir, map);
++	{
++		char mroot[MAX_OSPATH];
++		mdl_map_root (mroot, sizeof (mroot)); // overlay 0038
++		q_snprintf (dest, sizeof (dest), "%s/maps", mroot);
++		Sys_mkdir (dest);
++		q_snprintf (dest, sizeof (dest), "%s/maps/%s.bsp", mroot, map);
++	}
+ 	if (Sys_FileType (dest) & FS_ENT_FILE)
+ 		return true; // already there — nothing to do, and nothing to overwrite
+ 	if (rename (found, dest) != 0)
+@@ -821,6 +859,7 @@
+ 		Con_Printf ("mapdl: cl_mapdownload is 0 — not offering to download\n");
+ 		return false;
+ 	}
++	CL_ContentDownload_DropUnattended (); // overlay 0038
+ 	if (mdl.state != MDL_IDLE && mdl.state != MDL_FAILED)
+ 	{
+ 		Con_Printf ("mapdl: a download is already in progress\n");
+@@ -945,8 +984,45 @@
+ 	Con_Printf ("mapdl: cancelled\n");
+ 	memset (&mdl, 0, sizeof (mdl));
+ 	mdl.state = MDL_IDLE;
++}
++
++// ---------------------------------------------------------------------------
++// overlay 0038 (issue #8): stale plans
++// ---------------------------------------------------------------------------
++static void mdl_abandon (const char *why)
++{
++	char map[64];
++	q_strlcpy (map, mdl.map, sizeof (map));
++	Con_Printf ("mapdl: abandoning the plan for %s (%s)\n", mdl.target[0] ? mdl.target : "the previous server", why);
++	CL_MapDownload_Cancel ();
++	if (map[0])
++		mdl_forget (map);
++}
++
++// A consent prompt nobody is looking at (the player left the screen any way
++// other than its own Cancel row) must not block every later download.
++void CL_MapDownload_DropUnattended (void)
++{
++	if (mdl.state == MDL_PROMPT && m_state != m_mapdl)
++		mdl_abandon ("the prompt was left unanswered");
+ }
+ 
++// Host_Connect_f to a DIFFERENT server: the plan for the old one is stale. A
++// running transfer would otherwise finish and issue its own `connect <old
++// server>` over the player's new choice. mapdl's own rejoin (same target, or
++// MDL_RECONNECT) passes through.
++void CL_MapDownload_AbandonFor (const char *target)
++{
++	if (mdl.state == MDL_IDLE || mdl.state == MDL_RECONNECT)
++		return;
++	if (target && !q_strcasecmp (target, mdl.target))
++		return;
++	if (mdl.state == MDL_FAILED)
++		CL_MapDownload_Cancel ();
++	else
++		mdl_abandon (va ("now joining %s", target ? target : "another server"));
++}
++
+ // ---------------------------------------------------------------------------
+ // console commands. These exist for three reasons: the menu rows issue them (so
+ // the menu holds no logic), a controller/keyboard user can bind them, and the
+--- a/Quake/cl_moddl.c
++++ b/Quake/cl_moddl.c
+@@ -177,6 +177,14 @@
+ static char mod_switched[MOD_MAX_TRIED][256]; // targets we already switched game for
+ static int	mod_switched_count;
+ 
++// overlay 0038 (issue #8): the game moddl switched AWAY from (COM_GetGameNames
++// (true) form: "id1", "id1;rogue"), the game it switched TO (recorded once the
++// switch has happened), and the server it did it for. While set, a connect to a
++// DIFFERENT server switches back first (CL_ContentDownload_PreConnect). Without
++// this the client stayed in the mod for the rest of the session, and the next
++// server's map download landed in the mod's folder.
++static char mod_restore_game[256], mod_restore_from[256], mod_restore_target[256];
++
+ static qboolean mod_in_list (char list[][256], int n, const char *s)
+ {
+ 	int i;
+@@ -186,6 +194,19 @@
+ 	return false;
+ }
+ 
++static void mod_remove_list (char list[][256], int *n, const char *s)
++{
++	int i;
++	for (i = 0; i < *n;)
++		if (!q_strcasecmp (list[i], s))
++		{
++			memmove (list[i], list[i + 1], (*n - i - 1) * sizeof (list[0]));
++			(*n)--;
++		}
++		else
++			i++;
++}
++
+ static void mod_add_list (char list[][256], int *n, const char *s)
+ {
+ 	if (*n < MOD_MAX_TRIED && !mod_in_list (list, *n, s))
+@@ -656,6 +677,15 @@
+ 		 * ahead of the new game's configs. Two frames is the buffer draining.
+ 		 */
+ 		Con_Printf ("moddl: switching to game \"%s\" to rejoin\n", mod.gamedir);
++		// overlay 0038: remember where we came from. Keep the ORIGINAL game
++		// across chained switches (we are still in the game moddl set last), but
++		// a game the player chose since then is the new "original".
++		// mod_restore_from is filled in once the switch has actually happened
++		// (MOD_SWITCH), from the engine's own answer.
++		if (!mod_restore_game[0] || !mod_restore_from[0] || q_strcasecmp (COM_GetGameNames (true), mod_restore_from))
++			q_strlcpy (mod_restore_game, COM_GetGameNames (true), sizeof (mod_restore_game));
++		mod_restore_from[0] = 0;
++		q_strlcpy (mod_restore_target, mod.target, sizeof (mod_restore_target));
+ 		Cbuf_AddText (va ("game \"%s\"\n", mod.gamedir));
+ 		mod.state = MOD_SWITCH;
+ 		mod.frames = 2;
+@@ -1067,6 +1097,13 @@
+ 	case MOD_SWITCH:
+ 		if (--mod.frames > 0)
+ 			return;
++		if (mod_restore_game[0] && !mod_restore_from[0])
++		{
++			if (q_strcasecmp (COM_GetGameNames (true), mod_restore_game))
++				q_strlcpy (mod_restore_from, COM_GetGameNames (true), sizeof (mod_restore_from));
++			else
++				mod_restore_game[0] = 0; // the switch did not happen: nothing to undo
++		}
+ 		Con_Printf ("moddl: rejoining %s\n", mod.target);
+ 		IN_Activate ();
+ 		key_dest = key_game;
+@@ -1378,6 +1415,9 @@
+ 		Con_Printf ("moddl: cl_mapdownload is 0 — not offering to download mod content\n");
+ 		return false;
+ 	}
++	// overlay 0038: a consent prompt nobody is looking at (the player left it via
++	// the main menu, the server browser or the console) must not block this one.
++	CL_ContentDownload_DropUnattended ();
+ 	if (mod.state != MOD_IDLE && mod.state != MOD_FAILED)
+ 	{
+ 		Con_Printf ("moddl: a download is already in progress\n");
+@@ -1521,8 +1561,110 @@
+ 	Con_Printf ("moddl: cancelled\n");
+ 	memset (&mod, 0, sizeof (mod));
+ 	mod.state = MOD_IDLE;
++}
++
++// ---------------------------------------------------------------------------
++// overlay 0038 (issue #8): stale plans and the game-dir policy
++// ---------------------------------------------------------------------------
++// m_state alone, not key_dest: the console pulled down over the prompt (the
++// harness does that to read the log) still leaves it the player's open question.
++static qboolean mod_prompt_visible (void)
++{
++	return m_state == m_mapdl;
++}
++
++// A plan abandoned (not declined, not failed): forget it was tried, so going
++// back to that server later offers it again instead of "not retrying".
++static void mod_abandon (const char *why)
++{
++	char target[256];
++	q_strlcpy (target, mod.target, sizeof (target));
++	Con_Printf ("moddl: abandoning the plan for %s (%s)\n", target[0] ? target : "the previous server", why);
++	CL_ModDownload_Cancel ();
++	if (target[0])
++		mod_forget_tried (target);
++}
++
++void CL_ContentDownload_DropUnattended (void)
++{
++	if (mod_prompt_visible ())
++		return;
++	if (mod.state == MOD_PROMPT)
++		mod_abandon ("the prompt was left unanswered");
++	CL_MapDownload_DropUnattended ();
++}
++
++/*
++ * The server named its game directory, it is not ours, and we have it: switch
++ * to it and rejoin (the same path moddl takes for a model gap). Called from
++ * CL_ParseServerInfo when only a map is missing. Once per server per session
++ * (mod_switched), so a mod folder that is still short cannot loop.
++ */
++qboolean CL_ModDownload_SwitchForServer (const char *servergamedir, const char *target)
++{
++	char gd[64];
++
++	if (!target || !*target || !q_strcasecmp (target, "local"))
++		return false;
++	CL_ContentDownload_DropUnattended ();
++	if (mod.state != MOD_IDLE && mod.state != MOD_FAILED)
++		return false;
++	if (CL_MapDownload_State () != 0 && !CL_MapDownload_Failed ())
++		return false;
++	mod_sanitize_gamedir (servergamedir, gd, sizeof (gd));
++	if (!gd[0] || COM_GameDirMatches (gd) || !mod_local_has (gd) || mod_in_list (mod_switched, mod_switched_count, target))
++		return false;
++	memset (&mod, 0, sizeof (mod));
++	q_strlcpy (mod.target, target, sizeof (mod.target));
++	q_strlcpy (mod.servergd, gd, sizeof (mod.servergd));
++	return mod_try_local_switch (gd);
+ }
+ 
++/*
++ * Host_Connect_f, before anything else. `target` is what is being connected to.
++ *  1. A map/mod plan for a DIFFERENT server is stale: drop it, so its prompt
++ *     cannot block the next one and a running transfer cannot finish and issue
++ *     its own `connect <old server>` over the player's choice. moddl's and
++ *     mapdl's own rejoins (same target) pass through.
++ *  2. If moddl switched game for another server and the game is still the one
++ *     it set, switch back. Returns true then: the caller re-queues its connect
++ *     behind the switch's exec quake.rc / vid_unlock (COM_SwitchGame appends
++ *     them; a connect run now would precede them, inside the VID_Lock window),
++ *     which is the same order as moddl's own MOD_SWITCH rejoin.
++ * "local" (a single-player / listen start) touches neither.
++ */
++qboolean CL_ContentDownload_PreConnect (const char *target)
++{
++	char prev[256];
++
++	if (!target || !*target || !q_strcasecmp (target, "local"))
++		return false;
++	CL_MapDownload_AbandonFor (target);
++	if (mod.state != MOD_IDLE && q_strcasecmp (target, mod.target))
++	{
++		if (mod.state == MOD_FAILED)
++			CL_ModDownload_Cancel ();
++		else
++			mod_abandon (va ("now joining %s", target));
++	}
++	if (!mod_restore_game[0] || !q_strcasecmp (target, mod_restore_target))
++		return false;
++	if (!mod_restore_from[0] || q_strcasecmp (COM_GetGameNames (true), mod_restore_from))
++	{
++		// The player changed game themselves since (Mods menu, `game`): theirs wins.
++		Con_DPrintf ("moddl: game is \"%s\", not the \"%s\" we set; leaving it\n", COM_GetGameNames (true), mod_restore_from);
++		mod_restore_game[0] = 0;
++		return false;
++	}
++	q_strlcpy (prev, mod_restore_game, sizeof (prev));
++	mod_restore_game[0] = 0;
++	// Going back to that server later should switch again: it is not a loop.
++	mod_remove_list (mod_switched, &mod_switched_count, mod_restore_target);
++	Con_Printf ("moddl: leaving \"%s\" (switched for %s); back to \"%s\" to join %s\n", mod_restore_from, mod_restore_target, prev, target);
++	COM_SwitchGame (prev);
++	return true;
++}
++
+ static void CL_ModDownload_Accept_f (void)
+ {
+ 	if (mod.state != MOD_PROMPT)
+@@ -1549,6 +1691,10 @@
+ 		"moddl status: state=%s title=%s gamedir=%s source=%d items=%d cur=%d total=%lld target=%s reason=%s\n", names[mod.state],
+ 		mod.title[0] ? mod.title : "-", mod.gamedir[0] ? mod.gamedir : "-", mod.source, mod.nitems, mod.cur, mod.plantotal,
+ 		mod.target[0] ? mod.target : "-", mod.reason[0] ? mod.reason : "-");
++	Con_Printf (
++		"moddl restore: game=%s from=%s for=%s current=%s plaque=%d\n", mod_restore_game[0] ? mod_restore_game : "-",
++		mod_restore_from[0] ? mod_restore_from : "-", mod_restore_target[0] ? mod_restore_target : "-", COM_GetGameNames (true),
++		scr_disabled_for_loading ? 1 : 0); // plaque=1: nothing but the loading plaque is being drawn
+ }
+ 
+ void CL_ModDownload_Init (void)
+--- a/Quake/cl_parse.c
++++ b/Quake/cl_parse.c
+@@ -1231,6 +1231,7 @@
+ 	 * followed by the same failure. The mod flow adds the map to its own plan.
+ 	 */
+ 	qboolean modelgap = false;
++	qboolean anygap = false; // overlay 0038: any model (map included) missing
+ 	{
+ 		static char moddl_missing[16384];
+ 		int			nmodelgap = 0;
+@@ -1240,6 +1241,7 @@
+ 		{
+ 			if (model_precache[i][0] == '*' || COM_FileExists (model_precache[i], NULL))
+ 				continue;
++			anygap = true;
+ 			if (q_strncasecmp (model_precache[i], "maps/", 5))
+ 			{
+ 				modelgap = true;
+@@ -1261,8 +1263,26 @@
+ 			if (CL_ModDownload_Begin (moddl_missing, nmodelgap, gamedir, cl_connect_target))
+ 			{
+ 				// The menu screen is already up; same clean teardown as 0028.
++				// overlay 0038 (issue #8): Host_Connect_f raised the loading plaque and
++				// Host_EndGame does not lower it, so nothing (the consent prompt
++				// included) was drawn until its 60 s timeout. Same as 0033's reject.
++				SCR_EndLoadingPlaque ();
+ 				Host_EndGame ("Fetching content this server needs\n");
+ 			}
++		}
++		/*
++		 * overlay 0038 (issue #8): the server NAMED its game directory (PREDINFO),
++		 * it is not ours, and we have it installed. Only a map is missing (a model
++		 * gap went to moddl above, which makes the same switch), so without this
++		 * 0028 would fetch a map that lives in the mod's own pak. Switch to the
++		 * mod and rejoin instead — before anything has been loaded. Nothing
++		 * missing = no switch: joining already works, and a switch costs a
++		 * reconnect and would override the player's Mods-menu choice.
++		 */
++		else if (anygap && *gamedir && CL_ModDownload_SwitchForServer (gamedir, cl_connect_target))
++		{
++			SCR_EndLoadingPlaque ();
++			Host_EndGame ("Switching to the server's game\n");
+ 		}
+ 	}
+ #endif
+@@ -1310,6 +1330,7 @@
+ 			{
+ 				// The menu screen and key_dest are already set by the downloader.
+ 				// Host_EndGame, not Host_Error, for R6.5's reasons (see below).
++				SCR_EndLoadingPlaque (); // overlay 0038: see the mod-gap exit above
+ 				Host_EndGame ("Fetching a map this server needs\n");
+ 			}
+ #endif
+@@ -1349,6 +1370,9 @@
+ 			// Host_EndGame, not Host_Error: same clean CL_Disconnect and unwind,
+ 			// without the debug break and the stack trace. This is not a defect in
+ 			// our client and must not look like one.
++			// vkquake-ios 0038: lower the plaque Host_Connect_f raised, or the join
++			// screen behind it is not drawn until the 60 s plaque timeout.
++			SCR_EndLoadingPlaque ();
+ 			Host_EndGame ("Server is running a map you do not have\n");
+ 		}
+ 	}
+@@ -2233,6 +2257,16 @@
+ 				// server-command no-op registered in CL_Init is not visible, and
+ 				// printed "Unknown command". It is only an offer to send downloads.
+ 				Con_DPrintf2 ("Ignoring stufftext: %s", str);
++			}
++			else if (!q_strncasecmp (str, "fullserverinfo ", 15) && (!strchr (str, '\n') || !strchr (str, '\n')[1]))
++			{
++				// vkquake-ios 0038 (issue #8): FTE sends this WITHOUT "//" to an NQ
++				// client that negotiated CSQC or PREDINFO (fteqw sv_user.c, prespawn:
++				// va("fullserverinfo \"%s\"\n", ...)). Through the Cbuf it misses the
++				// server-command handler registered in CL_Init ("Unknown command").
++				// Run it directly, as the server command it is: one line only, and
++				// not via the Cbuf, which would split the quoted info on ';'.
++				Cmd_ExecuteString (str, src_server);
+ 			}
+ 			else
+ 				Cbuf_AddText (str);
+--- a/Quake/client.h
++++ b/Quake/client.h
+@@ -402,6 +402,14 @@
+ qboolean	CL_ModDownload_Failed (void);
+ const char *CL_ModDownload_Line1 (void);
+ const char *CL_ModDownload_Line2 (void);
++// overlay 0038 (issue #8): stale map/mod plans and moddl's game switch.
++// PreConnect runs first in Host_Connect_f; true = it switched the game back and
++// the caller must re-queue its connect behind the switch's quake.rc.
++qboolean	CL_ContentDownload_PreConnect (const char *target);
++void		CL_ContentDownload_DropUnattended (void);
++qboolean	CL_ModDownload_SwitchForServer (const char *servergamedir, const char *target);
++void		CL_MapDownload_DropUnattended (void);
++void		CL_MapDownload_AbandonFor (const char *target);
+ #endif
+ 
+ void SV_UpdateInfo (int edict, const char *keyname, const char *value);
+--- a/Quake/host_cmd.c
++++ b/Quake/host_cmd.c
+@@ -1891,6 +1891,19 @@
+ {
+ 	char name[MAX_QPATH];
+ 
++#ifdef VKQ_IOS
++	// overlay 0038 (issue #8): before joining a DIFFERENT server, drop map/mod
++	// download plans left over for the previous one, and undo a game switch the
++	// mod downloader made for it. When the game was switched, COM_SwitchGame has
++	// queued exec quake.rc + vid_unlock; this connect goes in behind them, the
++	// same order as moddl's own MOD_SWITCH rejoin.
++	q_strlcpy (name, Cmd_Argv (1), sizeof (name)); // the switch may re-tokenize
++	if (CL_ContentDownload_PreConnect (name))
++	{
++		Cbuf_AddText (va ("connect \"%s\"\n", name));
++		return;
++	}
++#endif
+ 	cls.demonum = -1; // stop demo loop in case this fails
+ 	if (cls.demoplayback)
+ 	{
+--- a/Quake/net_main.c
++++ b/Quake/net_main.c
+@@ -592,6 +592,14 @@
+ 			if (n < hostCacheCount)
+ 				goto JustDoIt;
+ 		}
++		// vkquake-ios 0038 (issue #8): an explicit address (a.b.c.d[:port],
++		// host.name[:port], [v6]:port) never needs the LAN search below, which
++		// broadcasts to 255.255.255.255 and ff03::1 -- refused by iOS without
++		// Local Network permission ("UDP_Write, sendto: No route to host" twice
++		// per connect) -- and which BLOCKS here until 1.5 s after its last send.
++		// Only a bare LAN server NAME needs the hostcache the search fills.
++		if (strchr (host, '.') || strchr (host, ':') || strchr (host, '['))
++			goto JustDoIt;
+ 	}
+ 
+ 	slist_silent = host ? true : false;

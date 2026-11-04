@@ -36,6 +36,19 @@
 #   j. (live) a DarkPlaces protocol 7 server (overlay 0036): joined, signon 4, no
 #      stack trace / Host_Error / DP7 parse abort, no "Unknown command
 #      cl_serverextension_download" (before 0036 this leg proved a clean refusal)
+#   k. (overlay 0038) a consent prompt the player left via the main menu does not
+#      block the next join: same server -> a fresh plan; togglemenu + another
+#      server -> the stale plan is abandoned and the new one starts (never "a
+#      download is already in progress"). (live) the same with a real TF plan
+#      followed by a Copper fixture server.
+#   l. (0038) after a moddl LOCAL switch to a mod, joining an id1 server switches
+#      back to id1 and joins; going back to the mod server switches again
+#   m. (0038) the loading plaque is down behind the consent prompt (plaque=0) and the menu after declining is DRAWN (frames
+#      change), not frozen behind the loading plaque Host_Connect_f raised
+#   n. (live, 0038) FTE hipnotic server 192.99.32.215:27501 from id1 -> local
+#      switch to hipnotic and in the game; then q1.pieter.com:27500 -> back to
+#      id1 and in the game, fullserverinfo applied (no "Unknown command"), no
+#      "No route to host" from the LAN search
 #
 # LANE: iPhone Air on iOS 27.0 (lane 2 by default). Never simctl create. The
 # device, the fixture HTTP server and every game server are shut down on every
@@ -238,6 +251,21 @@ waitlog () { # waitlog <regex> <seconds> [<since-line>]
 mark () { wc -l < "$LOG" | tr -d ' '; }
 shot () { xcrun simctl io "$UDID" screenshot "$PFX-$1.png" >/dev/null 2>&1 \
 	&& echo "   shot: $PFX-$1.png" || echo "   (screenshot unavailable)"; }
+# live_frames <tag>: four screenshots in a row; PASS when they are not all the
+# same image. A screen frozen behind the loading plaque presents nothing new; a
+# live menu blinks its cursor (2-4 Hz) and the shots land at varying phases.
+live_frames () {
+	local tag=$1 i
+	for i in 1 2 3 4; do xcrun simctl io "$UDID" screenshot "$PFX-$tag-$i.png" >/dev/null 2>&1; done
+	python3 -I - "$PFX-$tag-1.png" "$PFX-$tag-2.png" "$PFX-$tag-3.png" "$PFX-$tag-4.png" <<'PY'
+import sys
+from PIL import Image, ImageChops
+ims = [Image.open(p).convert("RGB") for p in sys.argv[1:]]
+diffs = [ImageChops.difference(ims[0], im).getbbox() for im in ims[1:]]
+print("   frames: " + ", ".join("differs %s" % (d,) if d else "same" for d in diffs))
+sys.exit(0 if any(diffs) else 1)
+PY
+}
 showtail () { tail -n +"$1" "$LOG" | grep -E 'moddl|mapdl|which you do not have|belongs to' | tail -"${2:-8}" >&2 || true; }
 back_to_id1 () {
 	say 'disconnect'; sleep 2
@@ -440,6 +468,94 @@ sleep 10
 if srv_has_player bun "$SM"; then pass "(f) in the game on content from the real host"; else fail "(f) did not rejoin"; fi
 shot 08-f-real-host
 
+
+# ===========================================================================
+echo
+echo "== (k) a consent prompt left via the main menu does not block the next one (0038)"
+# ===========================================================================
+back_to_id1
+rm -rf "$BASE/copper" "$BASE/qdlmod"
+say 'cl_mapdownload 1'
+say "cl_moddownload_tableurl \"http://127.0.0.1:$FIXPORT/table/mod-sources.json\""
+sleep 1
+M=$(mark)
+say "connect 127.0.0.1:$SRV_NOGD"
+waitlog 'moddl: plan — 1 item\(s\), 5197459 bytes, from 127\.0\.0\.1:'$FIXPORT', into copper' 40 "$M" \
+	&& pass "(k) a Copper plan is waiting for consent" || { fail "(k) no plan"; showtail "$M"; }
+say 'menu_main'; sleep 2
+say 'moddl_status'; sleep 2
+tail -n +"$M" "$LOG" | grep -q 'moddl status: state=prompt' && pass "(k) the player walked away: the prompt is unanswered, off screen" || fail "(k) not in the prompt state after menu_main"
+M=$(mark)
+say "connect 127.0.0.1:$SRV_NOGD"
+waitlog 'moddl: abandoning the plan for 127\.0\.0\.1:'$SRV_NOGD' \(the prompt was left unanswered\)' 30 "$M" \
+	&& pass "(k) same server: the unattended prompt was dropped" || { fail "(k) the stale prompt was not dropped"; showtail "$M"; }
+waitlog 'moddl: plan — 1 item\(s\), 5197459 bytes' 40 "$M" && pass "(k) same server: a fresh plan started" || { fail "(k) no fresh plan"; showtail "$M"; }
+tail -n +"$M" "$LOG" | grep -q 'already in progress' && fail "(k) \"a download is already in progress\"" || pass "(k) no \"already in progress\""
+say 'togglemenu'; sleep 2
+M=$(mark)
+say "connect 127.0.0.1:$SRV_BIG"
+waitlog 'moddl: abandoning the plan for 127\.0\.0\.1:'$SRV_NOGD' \(now joining 127\.0\.0\.1:'$SRV_BIG'\)' 30 "$M" \
+	&& pass "(k) togglemenu + another server: the old plan was abandoned" || { fail "(k) old plan not abandoned"; showtail "$M"; }
+waitlog 'moddl: plan — 1 item\(s\), 5197459 bytes, from 127\.0\.0\.1:'$FIXPORT', into copper' 40 "$M" \
+	&& pass "(k) the new server's Copper plan started" || { fail "(k) no plan for the new server"; showtail "$M"; }
+tail -n +"$M" "$LOG" | grep -q 'already in progress' && fail "(k) \"a download is already in progress\"" || pass "(k) no \"already in progress\""
+shot 13-k-new-plan-after-abandon
+say 'moddl_cancel'; sleep 2
+
+# ===========================================================================
+echo
+echo "== (l) after a LOCAL switch to a mod, an id1 server switches back to id1 and joins (0038)"
+# ===========================================================================
+back_to_id1
+mkdir -p "$BASE/qdlmod"
+cp -c "$FIX/server/qdlmod/pak0.pak" "$BASE/qdlmod/pak0.pak"
+M=$(mark); SM=$(srvmark tab)
+say "connect 127.0.0.1:$SRV_TAB"
+waitlog 'moddl: you already have "qdlmod" — switching to it and rejoining' 30 "$M" \
+	&& pass "(l) local switch to qdlmod" || { fail "(l) no local switch"; showtail "$M"; }
+sleep 10
+if srv_has_player tab "$SM"; then pass "(l) in the game on qdlmod"; else fail "(l) did not join the qdlmod server"; fi
+say 'moddl_status'; sleep 2
+tail -n +"$M" "$LOG" | grep -q "moddl restore: game=id1 from=id1;qdlmod for=127.0.0.1:$SRV_TAB" \
+	&& pass "(l) moddl recorded the switch (id1 -> id1;qdlmod for :$SRV_TAB)" || { fail "(l) restore record missing"; tail -n +"$M" "$LOG" | grep 'moddl restore' >&2 || true; }
+M=$(mark); SM=$(srvmark warm)
+say "connect 127.0.0.1:$SRV_WARM"
+waitlog 'moddl: leaving "id1;qdlmod" \(switched for 127\.0\.0\.1:'$SRV_TAB'\); back to "id1" to join 127\.0\.0\.1:'$SRV_WARM 30 "$M" \
+	&& pass "(l) joining the id1 server undoes moddl's switch" || { fail "(l) no switch back"; showtail "$M"; }
+waitlog '"game" changed to "id1"' 30 "$M" && pass "(l) game is id1 again" || fail "(l) game not changed to id1"
+sleep 8
+if srv_has_player warm "$SM"; then pass "(l) in the game on the id1 server"; else fail "(l) the re-queued connect did not join"; fi
+say 'game'; sleep 2
+tail -n +"$M" "$LOG" | grep -q '"game" is "id1"' && pass "(l) \"game\" reads back id1" || fail "(l) game does not read back id1"
+shot 14-l-reverted-in-game-id1
+M=$(mark); SM=$(srvmark tab)
+say "connect 127.0.0.1:$SRV_TAB"
+waitlog 'moddl: you already have "qdlmod" — switching to it and rejoining' 30 "$M" \
+	&& pass "(l) back to the mod server: switches to qdlmod again (not refused as already switched)" || { fail "(l) no second local switch"; showtail "$M"; }
+sleep 10
+if srv_has_player tab "$SM"; then pass "(l) in the game on qdlmod again"; else fail "(l) did not rejoin the qdlmod server"; fi
+
+# ===========================================================================
+echo
+echo "== (m) a declined download leaves the menu DRAWN, not frozen behind the plaque (0038)"
+# ===========================================================================
+back_to_id1
+rm -rf "$BASE/copper"
+M=$(mark)
+say "connect 127.0.0.1:$SRV_NOGD"
+waitlog 'moddl: plan — 1 item\(s\), 5197459 bytes' 40 "$M" && pass "(m) a plan is offered" || { fail "(m) no plan"; showtail "$M"; }
+sleep 2
+# The engine's own answer first: is the loading plaque (which suppresses ALL
+# drawing) still up while the prompt waits? Before 0038 it was, for 60 s.
+PM=$(mark); say 'moddl_status'; sleep 2
+tail -n +"$PM" "$LOG" | grep -q 'moddl restore: .* plaque=0' && pass "(m) the loading plaque is down while the prompt waits (plaque=0)" \
+	|| { fail "(m) the loading plaque is still up behind the prompt"; tail -n +"$PM" "$LOG" | grep 'moddl restore' >&2 || true; }
+# Frame change is informational here: the prompt's only animation is the row
+# cursor, which is not drawn at all when the touch layer has no hovered row.
+live_frames 15-m-prompt && echo "   note  (m) the prompt screen is animating" || echo "   note  (m) no animation on the prompt screen (no cursor drawn); see $PFX-15-m-prompt-1.png"
+say 'moddl_cancel'; sleep 3
+live_frames 16-m-declined-menu && pass "(m) after declining, the menu is being drawn" || fail "(m) the screen is frozen after declining"
+
 # ===========================================================================
 if [ "${VKQ_MODDL_LIVE:-0}" = 1 ]; then
 echo
@@ -486,6 +602,29 @@ echo "   the TF server is on: $LMAP"
 if [ "$LMAP" = "?" ]; then
 	fail "(g) the live TF server does not answer getstatus — it is down; leg (g) proves nothing"
 else
+echo
+echo "== (k-live) a real TF plan left via togglemenu, then the Copper fixture server -> the Copper plan starts (0038)"
+# qdlmod too: leg (l) left a local copy, and a local switch is not a plan
+rm -rf "$BASE/fortress" "$BASE/copper" "$BASE/qdlmod"
+M=$(mark)
+say "connect 52.14.57.255:26023"
+if waitlog 'moddl: plan — [0-9]+ item\(s\), [0-9]+ bytes, from github\.com( and more)?, into fortress' 90 "$M"; then
+	pass "(k-live) a TF plan is waiting for consent"
+	say 'togglemenu'; sleep 2
+	M=$(mark)
+	say "connect 127.0.0.1:$SRV_BIG"
+	waitlog 'moddl: abandoning the plan for 52\.14\.57\.255:26023 \(now joining 127\.0\.0\.1:'$SRV_BIG'\)' 30 "$M" \
+		&& pass "(k-live) the TF plan was abandoned" || { fail "(k-live) TF plan not abandoned"; showtail "$M" 12; }
+	waitlog 'moddl: plan — [0-9]+ item\(s\), [0-9]+ bytes, from .*, into copper' 60 "$M" \
+		&& pass "(k-live) the Copper plan started: $(tail -n +"$M" "$LOG" | grep -Eo 'plan — [0-9]+ item\(s\), [0-9]+ bytes, from [^,]*' | tail -1)" \
+		|| { fail "(k-live) no Copper plan"; showtail "$M" 12; }
+	tail -n +"$M" "$LOG" | grep -q 'already in progress' && fail "(k-live) \"a download is already in progress\"" || pass "(k-live) no \"already in progress\""
+	shot 13b-k-live-copper-after-tf
+	say 'moddl_cancel'; sleep 2
+else
+	fail "(k-live) no TF plan"; showtail "$M" 12
+fi
+back_to_id1
 M=$(mark)
 say "connect 52.14.57.255:26023"
 waitlog 'moddl: (downloaded|bundled) table matched "Team Fortress \(FortressOne assets\)" by gamedir' 60 "$M" \
@@ -512,8 +651,13 @@ waitlog 'moddl: rejoining 52\.14\.57\.255:26023' 120 "$M" && pass "(g) rejoining
 # to a map with a model the pak lacks). A NEW missing set must get a fresh
 # attempt now — accept it and rejoin again — instead of "not retrying".
 ingame=0
+# Start each round AT the rejoin line, not at "now": since 0038 skips the LAN
+# search the rejoin can reach "Using protocol" within the same second as the
+# "rejoining" line, and a mark taken after it missed the signon (false FAIL).
+rejoin_line () { grep -n 'moddl: rejoining 52\.14\.57\.255:26023' "$LOG" | tail -1 | cut -d: -f1; }
+RM0=$(rejoin_line)
 for round in 1 2 3; do
-	RM=$(mark)
+	RM=${RM0:-$(mark)}; RM0=
 	for _ in $(seq 1 90); do
 		tail -n +"$RM" "$LOG" | grep -Eq 'Using protocol|moddl: plan —|moddl: FAILED|not retrying|Host_Error' && break
 		sleep 1
@@ -523,6 +667,7 @@ for round in 1 2 3; do
 		pass "(g) round $round: the server needs more content (map change?) — a fresh attempt was offered: $(tail -n +"$RM" "$LOG" | grep -Eo 'plan — [0-9]+ item\(s\), [0-9]+ bytes' | tail -1)"
 		say 'moddl_accept'
 		waitlog 'moddl: rejoining 52\.14\.57\.255:26023' 180 "$RM" || { fail "(g) round $round: no rejoin"; showtail "$RM" 12; break; }
+		RM0=$(rejoin_line)
 		continue
 	fi
 	if tail -n +"$RM" "$LOG" | grep -Eq 'which you do not have|moddl: FAILED|not retrying|Host_Error'; then
@@ -604,6 +749,36 @@ else
 	shot 11-j-darkplaces-dp7-in-game
 	say 'disconnect'; sleep 2
 fi
+
+echo
+echo "== (n) LIVE: FTE hipnotic server from id1 -> hipnotic; then q1.pieter.com -> back to id1 (0038)"
+# ===========================================================================
+back_to_id1
+mkdir -p "$BASE/hipnotic"
+[ -f "$BASE/hipnotic/pak0.pak" ] || cp -c "$ROOT/gamedata/rerelease/hipnotic/pak0.pak" "$BASE/hipnotic/pak0.pak"
+say 'developer 1'; sleep 1
+M=$(mark)
+say 'connect 192.99.32.215:27501'
+waitlog 'moddl: you already have "hipnotic" — switching to it and rejoining' 90 "$M" \
+	&& pass "(n) 192.99.32.215:27501 (FTE, hipnotic): local switch to hipnotic" || { fail "(n) no switch to hipnotic"; showtail "$M" 12; }
+waitlog 'CL_SignonReply: 4' 90 "$M" && pass "(n) in the game on the hipnotic server (signon 4)" || { fail "(n) no signon 4 on the hipnotic server"; tail -n +"$M" "$LOG" | tail -15 >&2; }
+tail -n +"$M" "$LOG" | grep -Eq 'which you do not have|Host_Error|Join stalled' && { fail "(n) the hipnotic join failed"; showtail "$M" 12; } || true
+sleep 2; shot 17-n-live-hipnotic-in-game
+M=$(mark)
+say 'connect q1.pieter.com:27500'
+waitlog 'moddl: leaving "id1;hipnotic" \(switched for 192\.99\.32\.215:27501\); back to "id1" to join q1\.pieter\.com:27500' 30 "$M" \
+	&& pass "(n) q1.pieter.com: moddl's hipnotic switch is undone first" || { fail "(n) no switch back"; showtail "$M" 12; }
+waitlog '"game" changed to "id1"' 30 "$M" && pass "(n) game is id1 again" || fail "(n) game not changed to id1"
+waitlog 'CL_SignonReply: 4' 90 "$M" && pass "(n) in the game on q1.pieter.com (signon 4)" || { fail "(n) no signon 4 on q1.pieter.com"; tail -n +"$M" "$LOG" | tail -15 >&2; }
+sleep 3
+tail -n +"$M" "$LOG" | grep -q 'Unknown command "fullserverinfo"' && fail "(n) \"Unknown command fullserverinfo\"" || pass "(n) no \"Unknown command fullserverinfo\""
+tail -n +"$M" "$LOG" | grep -q 'No route to host' && fail "(n) \"No route to host\" (the LAN search ran for an explicit address)" || pass "(n) no \"No route to host\" from the LAN search"
+say 'serverinfo'; sleep 2
+tail -n +"$M" "$LOG" | grep -Eq '^ *\*version: FTE' && pass "(n) fullserverinfo applied: $(tail -n +"$M" "$LOG" | grep -E '^ *\*version:' | tail -1 | sed 's/^ *//')" \
+	|| { fail "(n) cl.serverinfo does not carry FTE's *version"; tail -n +"$M" "$LOG" | grep -A12 'Serverinfo:' | tail -14 >&2; }
+shot 18-n-live-pieter-in-game-id1
+say 'developer 0'
+say 'disconnect'; sleep 2
 fi # VKQ_MODDL_LIVE
 
 # ---------------------------------------------------------------------------
