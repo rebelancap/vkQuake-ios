@@ -153,6 +153,8 @@ static NSSet<UITouch *> *vkq_direct_touches (NSSet<UITouch *> *touches)
 #import <objc/runtime.h>
 extern void		 Con_Printf (const char *fmt, ...);
 static UIWindow *vkq_key_window (void); // defined with the keyboard code below
+static void		 vkq_rebind_link_if_moved (const char *why); // frame driver, below
+static NSString *vkq_link_desc (void);
 
 // --- pointer lock (issue #6 follow-up) -------------------------------------
 // In game the engine asks SDL for relative mouse mode; SDL's view controller
@@ -331,6 +333,7 @@ void VKQ_iOS_MouseDiag (void)
 					(long)ws.interfaceOrientation, ws.screen == UIScreen.mainScreen ? 1 : 0, (int)sb.size.width, (int)sb.size.height, (int)wb.size.width,
 					(int)wb.size.height, win.isKeyWindow ? 1 : 0, NSStringFromClass (vc.class).UTF8String,
 					(unsigned long)UIApplication.sharedApplication.connectedScenes.count);
+		Con_Printf ("  frames: display link %s; screen maxfps=%ld\n", vkq_link_desc ().UTF8String, (long)ws.screen.maximumFramesPerSecond);
 		NSLog (@"[vkquake] vkq_mouse: mice=%lu kb=%d lock=%@ prefers=%d state=%ld orient=%ld main=%d screen=%@ window=%@ key=%d vc=%@", (unsigned long)mice, kb, lock, prefers,
 			   (long)ws.activationState, (long)ws.interfaceOrientation, ws.screen == UIScreen.mainScreen, NSStringFromCGRect (sb), NSStringFromCGRect (wb), win.isKeyWindow,
 			   vc.class);
@@ -394,6 +397,7 @@ static void vkq_scene_did_update (id self, SEL _cmd, UIWindowScene *ws, id<UICoo
 	{
 		g_scene_screen = ws.screen;
 		vkq_refresh_orientations ("scene changed screen");
+		vkq_rebind_link_if_moved ("scene changed screen");
 	}
 	// Trait-only updates arrive here too (many per launch); log real changes only.
 	static CGSize				  last_size;
@@ -423,6 +427,7 @@ static void vkq_scene_did_update (id self, SEL _cmd, UIWindowScene *ws, id<UICoo
 														NSLog (@"[vkquake] display: %@", note.name);
 														if (![note.name isEqualToString:UIScreenModeDidChangeNotification])
 															vkq_refresh_orientations (note.name.UTF8String);
+														vkq_rebind_link_if_moved (note.name.UTF8String);
 														vkq_log_displays (NO);
 													}];
 	Class sd = NSClassFromString (@"SDLUIKitSceneShim");
@@ -1387,12 +1392,26 @@ static VKQFrameDriver *g_driver;
 static CADisplayLink  *g_link;
 
 // UIScreen is unavailable on visionOS; the compositor runs ~90 Hz there.
+#ifndef VKQ_VISIONOS
+static __weak UIScreen *g_link_screen; // the screen the display link is bound to
+// The screen the game window is actually on. Issue #7 follow-up: on an external
+// monitor the scene lives on that panel (iPadOS even reports it as mainScreen
+// with the iPad's own panel unlisted), so the link must be built from the
+// window's screen, not the class method's default — the 1.2.1.3 report ran a
+// 120 Hz-paced loop against a 60 Hz 6K monitor: presents blocked every other
+// tick and the counter wandered 60-80 fps regardless of render resolution.
+static UIScreen *vkq_display_screen (void)
+{
+	UIScreen *scr = vkq_key_window ().screen;
+	return scr ? scr : UIScreen.mainScreen;
+}
+#endif
 static float vkq_display_max_fps (void)
 {
 #ifdef VKQ_VISIONOS
 	return 90.0f;
 #else
-	return (float)UIScreen.mainScreen.maximumFramesPerSecond; // 120 on ProMotion
+	return (float)vkq_display_screen ().maximumFramesPerSecond; // 120 on ProMotion, 60 on most monitors
 #endif
 }
 
@@ -1409,16 +1428,55 @@ static void vkq_apply_refresh (void)
 
 void VKQ_iOS_SetRefresh (void) { vkq_apply_refresh (); }
 
+// (Re)build the display link on the window's current screen. Main thread only.
+static void vkq_bind_link (const char *why)
+{
+	BOOL paused = g_link ? g_link.paused : NO;
+	if (g_link)
+		[g_link invalidate];
+#ifdef VKQ_VISIONOS
+	g_link = [CADisplayLink displayLinkWithTarget:g_driver selector:@selector (tick:)];
+#else
+	UIScreen *scr = vkq_display_screen ();
+	g_link_screen = scr;
+	g_link = [scr displayLinkWithTarget:g_driver selector:@selector (tick:)];
+#endif
+	vkq_apply_refresh ();
+	g_link.paused = paused;
+	[g_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+	NSLog (@"[vkquake] display link started (%s, max %ld Hz, preferred %.0f-%.0f)", why, (long)vkq_display_max_fps (), g_link.preferredFrameRateRange.minimum,
+		   g_link.preferredFrameRateRange.maximum);
+}
+
+#ifndef VKQ_VISIONOS
+// Called when the scene may have moved to another screen (monitor plugged in,
+// Stage Manager drag, mode change): rebind if the link is on the wrong screen.
+static void vkq_rebind_link_if_moved (const char *why)
+{
+	if (!g_link)
+		return;
+	if (vkq_display_screen () == g_link_screen)
+		return;
+	vkq_bind_link (why);
+}
+// For vkq_mouse: what the link is paced against right now.
+static NSString *vkq_link_desc (void)
+{
+	if (!g_link)
+		return @"none";
+	return [NSString stringWithFormat:@"screen max=%ld Hz preferred=%.0f-%.0f paused=%d boundToWindowScreen=%d", (long)g_link_screen.maximumFramesPerSecond,
+									  g_link.preferredFrameRateRange.minimum, g_link.preferredFrameRateRange.maximum, g_link.paused ? 1 : 0,
+									  g_link_screen == vkq_display_screen () ? 1 : 0];
+}
+#endif
+
 void VKQ_iOS_StartFrameLoop (void)
 {
 	dispatch_async (dispatch_get_main_queue (), ^{
 		if (g_link)
 			return;
 		g_driver = [VKQFrameDriver new];
-		g_link = [CADisplayLink displayLinkWithTarget:g_driver selector:@selector (tick:)];
-		vkq_apply_refresh ();
-		[g_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
-		NSLog (@"[vkquake] display link started (max %ld Hz)", (long)vkq_display_max_fps ());
+		vkq_bind_link ("launch");
 	});
 }
 
