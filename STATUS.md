@@ -8,7 +8,28 @@ the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/) and the SideStore so
 Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` holds the
 unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
 
-## Last round (2026-11-03 night) — 1.2.1.3 test build (branch `dp7`, RC line)
+## Last round (2026-11-04 morning) — 1.2.1.4 test build (branch `dp7`): #7 round 4
+- Reporter (robimart) on 1.2.1.3: **#8 confirmed working** on every server tried incl.
+  hipnotic ("all seems to work well"). **#7 renders full-screen and upright on the
+  monitor**; two leftovers: (a) still no pointer lock, (b) fps fell from a locked 120 to
+  60-80 and does not improve at 320x200 / no MSAA.
+- (b) diagnosed + fixed (b57d88f): the monitor is a 6K panel (6016x3384 ⇒ 60 Hz). The
+  shell built its CADisplayLink with the class method, paced by the iPad's 120 Hz, while
+  presents blocked on the 60 Hz monitor ⇒ pacing-bound 60-80. Now
+  `[window.screen displayLinkWithTarget:]`, rebind on scene-screen change / screen mode
+  change / connect / disconnect, and `vkq_mouse` prints a `frames:` line (bound screen
+  max, preferred range, boundToWindowScreen). Sim: issue7 emulation PASS on the iPad
+  Air 13" (M4) sim (D804DBF5), `boundToWindowScreen=1`, screenshots upright
+  (artifacts/sim/2026-11-04-issue7r3-*; artifacts/ is gitignored).
+- (a) pointer lock: the paste was from the console (relative=0, prefers=0) so it shows
+  nothing about in-game. Reply asks for `bind f9 vkq_mouse` + in-game presses +
+  condump; `unlocked` ⇒ iPadOS refuses on the external display (policy, next idea is
+  the split-scene approach), `unavailable` ⇒ scene not eligible.
+- 1.2.1.4 / build 47 OTA PUBLISHED (OTA_PUBLIC_GATE=1). Served IPA verified:
+  1.2.1.4/47, boundToWindowScreen present, no remoteConsole; copy at
+  build/ota/vkQuake-1.2.1.4-iOS.ipa; reply draft build/reply-7-1.2.1.4.md.
+
+## Previous round (2026-11-03 night) — 1.2.1.3 test build (branch `dp7`, RC line)
 - `dp7` now carries, on top of 1.2.1.2: #7 round 3 (landscape-native predicate, SDL 0003
   + ios_touch.m; version line in `vkq_mouse`/`version`, patch 0037); DP7 Phase 0
   (0035, browser DP tag) and Phase A (0036, cl_dp7.c, + bounds fixes); #8 round 3
@@ -101,16 +122,17 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- Austin: upload build/ota/vkQuake-1.2.1.3-iOS.ipa to issue #8 with build/reply-8-1.2.1.3.md
-  (verified). Default if not done: reporter stays on 1.2.1.2.
-- Release `dp7` as 1.2.2 after the reporter confirms #7/#8 on 1.2.1.3? Default: wait
-  (release numbers are Austin's call). Release checklist: plists → 1.2.2 (build 47),
+- Austin: post build/reply-7-1.2.1.4.md on issue #7 with build/ota/vkQuake-1.2.1.4-iOS.ipa
+  (verified). Default if not done: reporter stays on 1.2.1.3 (60-80 fps on the monitor).
+- #8 is confirmed fixed by the reporter on 1.2.1.3; close it at the 1.2.2 release.
+- Release `dp7` as 1.2.2? #8 confirmed, #7 orientation confirmed, fps fix awaiting the
+  reporter. Default: wait (release numbers are Austin's call). Release checklist: plists → 1.2.2 (build 48),
   merge dp7 → main, RELEASING.md loop, verify dispatch chain; mods/ reaching main makes
   the live mod-table URL work. Close #6 (confirmed fixed).
 - DP7 Phase B (DP-only temp entities/effects, attachments, DP7 demos): default later.
 - VR docs on `vr-notes-private`: default keep local, never push.
 
 ## Live claims
-None. No agents running; no sims booted by this session; tree clean. Branches pushed:
-issue-6-7-followup, mod-download, issue-7-external-display, dp7-plan, dp7 (RC, 1.2.1.3).
+None. No agents running; iPad Air 13" sim shut down; tree clean (untracked .claude/, docs/IOS-AUDIO-SESSION-GUIDE.md pre-existing). Branches pushed:
+issue-6-7-followup, mod-download, issue-7-external-display, dp7-plan, dp7 (RC, 1.2.1.4).
 `main` = `origin/main` = v1.2.1.
