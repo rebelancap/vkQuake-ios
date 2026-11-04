@@ -8,7 +8,26 @@ the OTA hub (https://goomba.tailc8f64e.ts.net/ota/vkquake/) and the SideStore so
 Next OTA dev builds are 1.2.1.1, 1.2.1.2, … Local branch `vr-notes-private` holds the
 unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry lives there.
 
-## Last round (2026-11-04 morning) — 1.2.1.5 test build (branch `dp7`): #7 round 4 + #6 menu flicker
+## Last round (2026-11-04 afternoon) — 1.2.1.6 test build (branch `dp7`): #7 round 5 render scale
+- Reporter on 1.2.1.5: first-click fix CONFIRMED. In-game pointer-lock paste:
+  `prefersPointerLocked=1 pointerlock=unlocked` → scene eligible, iPadOS declines the lock
+  on the external display. System policy; only the split-scene idea remains (3c).
+- Monitor is really 4K UHD @ 120 Hz; iPadOS presents it as a 6016x3384 canvas at 120 Hz
+  (`frames: screen max=120`). The 1.2.1.4 60 Hz pacing theory was WRONG (kept: correct
+  binding). Real suspect: 20 Mpixel full-canvas passes/present/system downscale, which
+  r_scale never touches.
+- 1.2.1.6 (9fb89f4 + 85163ff): Display > "External Display Render Scale" (Native/75%/50%)
+  lowers the Metal layer's contentsScale while external; patch 0039 makes the engine use
+  bounds x contentsScale (= MoltenVK currentExtent) and rebuild the swapchain; vkq_mouse
+  `drawable:` line. Sim: scripts/sim-verify-extscale.sh PASS (50% → 1024x1366 drawable on
+  the 2048x2732 panel, full-screen; Native → full). vr-syntax-check OK.
+- First 1.2.1.6 archive FAILED to link (_VKQ_iOS_DrawableSizeChanged): build-sim.sh does
+  not rebuild build/ios/libvkquake.a — ran build-ios.sh, republished. Served IPA verified:
+  1.2.1.6/49, setting + hook strings present, no remoteConsole. visionOS engine lib not
+  rebuilt (shell stubs only; harmless). Copy: build/ota/vkQuake-1.2.1.6-iOS.ipa; replies:
+  build/reply-7-1.2.1.6.md, build/reply-6-1.2.1.6.md. DECISIONS.md entry added.
+
+## Previous round (2026-11-04 morning) — 1.2.1.5 test build (branch `dp7`): #7 round 4 + #6 menu flicker
 - Reporter (robimart) on 1.2.1.3: **#8 confirmed working** on every server tried incl.
   hipnotic ("all seems to work well"). **#7 renders full-screen and upright on the
   monitor**; two leftovers: (a) still no pointer lock, (b) fps fell from a locked 120 to
@@ -129,12 +148,12 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
    statusBarOrientation; consider a different bridge port than quake3e's 27999.
 
 ## Open questions
-- Austin: post build/reply-7-1.2.1.5.md on issue #7 with build/ota/vkQuake-1.2.1.5-iOS.ipa
-  (verified) and build/reply-6-1.2.1.5.md on #6. Default if not done: reporter stays on
-  1.2.1.3 (60-80 fps on the monitor, menu flicker on first click).
+- Austin: post build/reply-7-1.2.1.6.md on issue #7 with build/ota/vkQuake-1.2.1.6-iOS.ipa
+  (verified) and build/reply-6-1.2.1.6.md on #6. Default if not done: reporter stays on
+  1.2.1.5 (60-80 fps on the monitor). Next data needed: fps at 50%/75% + the `drawable:` line.
 - #8 is confirmed fixed by the reporter on 1.2.1.3; close it at the 1.2.2 release.
 - Release `dp7` as 1.2.2? #8 confirmed, #7 orientation confirmed, fps fix awaiting the
-  reporter. Default: wait (release numbers are Austin's call). Release checklist: plists → 1.2.2 (build 49),
+  reporter. Default: wait (release numbers are Austin's call). Release checklist: plists → 1.2.2 (build 50),
   merge dp7 → main, RELEASING.md loop, verify dispatch chain; mods/ reaching main makes
   the live mod-table URL work. Close #6 (confirmed fixed).
 - DP7 Phase B (DP-only temp entities/effects, attachments, DP7 demos): default later.
@@ -142,5 +161,5 @@ unpushed VR docs. DECISIONS.md is gitignored (local-only); the issue #6 entry li
 
 ## Live claims
 None. No agents running; iPad Air 13" sim shut down; tree clean (untracked .claude/, docs/IOS-AUDIO-SESSION-GUIDE.md pre-existing). Branches pushed:
-issue-6-7-followup, mod-download, issue-7-external-display, dp7-plan, dp7 (RC, 1.2.1.5).
+issue-6-7-followup, mod-download, issue-7-external-display, dp7-plan, dp7 (RC, 1.2.1.6).
 `main` = `origin/main` = v1.2.1.
