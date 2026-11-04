@@ -1501,6 +1501,41 @@ static UIView *vkq_metal_view (void)
 	return win ? vkq_metal_view_in (win) : nil;
 }
 #endif
+// Issue #6 follow-up (overlay 0040): which buttons any connected hardware mouse
+// holds RIGHT NOW, polled from GameController (bit i = SDL button i+1: left,
+// middle, right, back, forward); -1 when no hardware mouse is connected. The
+// engine releases a mouse key it still holds that no mouse is pressing.
+int VKQ_iOS_MouseButtonsHeld (void)
+{
+#ifndef VKQ_VISIONOS
+	if (@available(iOS 14.0, *))
+	{
+		NSArray<GCMouse *> *mice = GCMouse.mice;
+		if (mice.count == 0)
+			return -1;
+		int held = 0;
+		for (GCMouse *m in mice)
+		{
+			GCMouseInput *in = m.mouseInput;
+			if (!in)
+				continue;
+			if (in.leftButton.pressed)
+				held |= 1 << 0;
+			if (in.middleButton.pressed)
+				held |= 1 << 1;
+			if (in.rightButton.pressed)
+				held |= 1 << 2;
+			NSArray<GCControllerButtonInput *> *aux = in.auxiliaryButtons;
+			for (NSUInteger i = 0; i < aux.count && i < 2; i++)
+				if (aux[i].pressed)
+					held |= 1 << (3 + i);
+		}
+		return held;
+	}
+#endif
+	return -1;
+}
+
 int VKQ_iOS_DrawableSize (int *w, int *h) // engine thread (= main thread, display link)
 {
 #ifndef VKQ_VISIONOS

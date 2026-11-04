@@ -1,0 +1,45 @@
+--- a/Quake/in_sdl.c
++++ b/Quake/in_sdl.c
+@@ -898,8 +898,42 @@
+ Emit key events for game controller buttons, including emulated buttons for analog sticks/triggers
+ ================
+ */
++#ifdef VKQ_IOS
++// vkquake-ios overlay 0040 (issue #6 follow-up, "shooting goes into an infinite
++// loop, a click stops it"): a hardware-mouse button whose RELEASE never arrived
++// leaves "+attack <key>" armed until the next click. SDL reads iPad mice through
++// GCMouse; when iPadOS re-enumerates a mouse (the reporter's in-game pastes show
++// the mouse count flipping 4 -> 3) SDL nils the old object's button handlers and
++// drops its input source without synthesizing a release (SDL_RemoveMouse), so a
++// button held across that moment is never let go. Reconcile once per frame: if
++// the engine holds a mouse key that NO connected hardware mouse is pressing,
++// release it. Inactive without a hardware mouse (the shell answers -1), so the
++// touch / fake-click paths are untouched; a release a few ms early on the race
++// with SDL's own up event is harmless (Key_Event ignores the stray up).
++static void IN_ReconcileMouseButtons (void)
++{
++	extern int		VKQ_iOS_MouseButtonsHeld (void); // bit i = SDL button i+1 pressed; -1 = no hardware mouse
++	extern qboolean keydown[];
++	int				held = VKQ_iOS_MouseButtonsHeld ();
++	int				i;
++	if (held < 0)
++		return;
++	for (i = 0; i < (int)countof (buttonremap); i++)
++	{
++		if (keydown[buttonremap[i]] && !(held & (1 << i)))
++		{
++			Con_Printf ("vkQuake: mouse button %d released by the engine (the mouse never reported the release)\n", i + 1);
++			Key_Event (buttonremap[i], false);
++		}
++	}
++}
++#endif
++
+ void IN_Commands (void)
+ {
++#ifdef VKQ_IOS
++	IN_ReconcileMouseButtons (); // overlay 0040
++#endif
+ 	joyaxisstate_t newaxisstate;
+ 	qboolean	   newbuttonstate[SDL_GAMEPAD_BUTTON_COUNT];
+ 	int			   i;
